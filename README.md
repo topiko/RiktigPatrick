@@ -1,2 +1,2 @@
 # RiktigPatrick
-This is yeat another of thsoe amazing things!
+This is yet another of thsoe amazing things!
