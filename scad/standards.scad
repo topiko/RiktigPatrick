@@ -1,0 +1,48 @@
+// BEARING:
+BEARINGD = 11;
+BEARINGT = 4;
+BEARINGAXLED= 5;
+
+// BOLTS:
+BOLT3TIGHT=2.9;
+BOLT3LOOSE=3.05;
+BOLT25TIGHT = 2.30; // 2.35
+BOLT25LOOSE = 2.60;
+
+// GEARS:
+GEART = 6;
+GEARMODUL = 1;
+HELIXANGLE=40;
+PRESSUREANGLE=25;
+
+SERVOGEARNTOOTH = 15;
+SERVOHORNT = 7;
+SERVOHORNBEARINGT = 4;
+
+// Bore, Diam, Thickness
+SERVOBEARINGDIMS = [5, 11, 4];
+AXLEBEARINGDIMS = [10, 15, 4];
+WHEELBEARINGDIMS = [20, 27, 4];
+
+AXLEHORNDIN = AXLEBEARINGDIMS[0]/sqrt(2);
+
+SERVOHORNSP = .96;
+TIGHTSP = .05;
+RADSP = .15; // .25
+AXLECOVERT = .94;
+
+THREADH=.6;
+THREADPITCH = 2;
+
+SHOWALIGNERS ="dontshow"; // show
+
+
+GEARCOLOR="Ivory"; //WhiteSmoke"; //SlateGray";
+BEARINGCOLOR="Gray";
+$fn = 0; //50000;
+acc = "print"; //"show"; // "print";
+
+$fa = acc=="print" ? 1 : 15; //1;
+$fs = acc=="print" ? .3 : 2; //.2; //.02
+
+
