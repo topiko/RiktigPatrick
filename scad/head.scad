@@ -42,12 +42,14 @@ module head_bulk(modRs=0){
   Wheadtop=Wheadtop-2*modRs; // -2*modRs;
   Hhead=Hhead-modRs;
   Lhead=Lhead-2*modRs;
+  addbackh = 9;
+
 
   hull(){
     rotmove(Rhead+modRs,Lhead/2 - Rhead) rounded_tilted_cylinder(Wheadbottom, Rhead, rcorner, alpha);
     rotmove(Rhead+modRs,-Lhead/2 + Rhead) rounded_tilted_cylinder(Wheadbottom, Rhead, rcorner, alpha);
     rotmove(Hhead-Rhead,Lhead/2 - Rhead - Hhead*tan(headtheta)) rounded_tilted_cylinder(Wheadtop, Rhead, rcorner, alpha);
-    rotmove(Hhead-Rhead +9,-Lhead/2 + Rhead) rounded_tilted_cylinder(Wheadtop, Rhead, rcorner, alpha);
+    rotmove(Hhead-Rhead +addbackh,-Lhead/2 + Rhead) rounded_tilted_cylinder(Wheadtop-2*tan(alpha)*addbackh, Rhead, rcorner, alpha);
   }
 
 }
@@ -161,6 +163,7 @@ module head(key){
       sp = key == "cut" ? TIGHTSP*2 : 0;
       R = 5;
       lipw = 5;
+      color("Red")
       linear_extrude(height=H)
       difference(){
         offset(R+sp) square([Wmouth, Hmouth - R], center=true);
@@ -182,7 +185,7 @@ module head(key){
           lips_(Tmax, Wmouth, Hmouth);
           hull() lips_(1, Wmouth, Hmouth);
           intersection(){
-            hull() lips_(Tmax, Wmouth, Hmouth);
+            color("Red") hull() lips_(Tmax, Wmouth, Hmouth);
             teeth_();
           }
         }
@@ -304,7 +307,7 @@ module head(key){
     if (key=="cut"){
       // CABLE HOLE
       rpit = 7;
-      translate([20,rpit + 2.+yback+wallT,0]) rounded_cutter(20, 14, 4, .5);
+      translate([17,rpit + 2.+yback+wallT,0]) rounded_cutter(20, 14, 4, .5);
 
       // COOLING
       hc = 2.9; 
@@ -342,10 +345,10 @@ module moverothead(phi, theta){
 
 echo(key);
 key="bottom"; //"top"; //
-//head(key);
-head("top");
+head(key);
+//head("top");
 //head_shell(wallT);
-//head("mouth");
+head("mouth");
 //head("rpi");
 //head("camera");
 //head("rpi");
