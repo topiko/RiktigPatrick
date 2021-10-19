@@ -21,7 +21,7 @@ Hthick = 30;
 
 //HEAD:
 Whead=59; 
-Hhead=112;
+Hhead=110;
 Hneck = .4;
 Rhead=3;
 headaddW=0;

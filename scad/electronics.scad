@@ -166,7 +166,7 @@ module protoboard2(H=5, key="mockup", boltH=0, boltD=BOLT25TIGHT){
 
 
 
-module camera(cut, H=30, boltD=BOLT25TIGHT){
+module camera(key, H=30, boltD=BOLT25TIGHT){
 	holeD = 30;
 	cameraW = 38;
 	cameraR = 32/2;
@@ -189,13 +189,35 @@ module camera(cut, H=30, boltD=BOLT25TIGHT){
 			translate(p) bolt(6, boltD, -boltD/2);
 		}
 	}
+	
+	module ring(){
+		wt=1.6;
+		D = holeD*sqrt(2) + mountR;
+		module solid(wt){
+			hull(){
+			for (p=mountHoles){
+				translate([p[0], p[1] , 0]) cylinder(h=mountH, r=wt);
+				}
+			}
+		}
 
-	if (cut){ camandbolts();}
-	else {
+		T = mountR;
+		difference(){
+			solid(T);
+			translate([0,0,-.1]) scale([1,1,2])solid(T-wt);
+			cube([12, 45, 25], center=true);
+		}
+
+        }
+
+	if (key=="cut"){camandbolts();}
+	if (key=="poles"){
 		difference(){
 		mount();
 		camandbolts();}
+
 	}
+	if (key=="ring"){ring();}
 }
 
 
@@ -248,6 +270,15 @@ module rpizero(key, H=5, T=2, pijuice=false, boltH=0, boltD=BOLT3TIGHT){
 		translate([dims[0]/2 - 20.5, -dims[1]/2 - 2, -H-5]) cube([5, 2, 30]);
 	}
 	
+	module pins(){
+		//TODO: check dims!
+		dx = 2.54;
+		h = 2.5;
+		X = -dims[0]/2 + 7;
+		Y = dims[1]/2 - 1.9*dx;
+		for (i=[0:1:20]) for (j=[0,1]) translate([i*dx + X, j*dx+ Y,+2 + 7.5]) cylinder(h=h, d=2.5); 
+	}
+	
 	translate([0,0,H])
 	if (key=="boardpoles"){
 		board();
@@ -265,6 +296,7 @@ module rpizero(key, H=5, T=2, pijuice=false, boltH=0, boltD=BOLT3TIGHT){
 		  usbcharge();
 		  pwrswitch();
 		  sdcard();
+		  pins();
 		}
 		mountpoles(key="bolts");
 	}
@@ -312,11 +344,51 @@ module switches(key){
 
     cut();
     swich_();
+}
+
+module switchmount(){
+  wallT = 3;
+  H = 12;
+  W = 8;
+  R = 5/2;
+
+  module base(){
+    difference(){
+      translate([0,0,wallT/2]) cube([H, W, wallT], center=true);
+      cylinder(h=3*wallT, r=R, center=true);
+    }
   }
 
-$fa=1;
-$fs=.1;
-rpizero("cut");
+  module sidelevercut(){
+    rotate([90,0,0])
+    translate([0, threadL, 0])
+    rotate([0,0,90-angle/2])
+    rotate_extrude(angle=angle)
+    translate([Llever, 0]) square([leverD, 20], center=true);
+  }
+
+  module straightlevercut(){
+
+    translate([0, 0, threadL])
+    rotate([90,0,0])
+    rotate([0,0,90-angle/2])
+    rotate_extrude(angle=angle)
+    translate([10, 0]) square([20, leverD], center=true);
+  }
+
+  Llever = 10;
+  threadL=8;
+  leverD=2;
+  angle=45;
+
+  base();
+  sidelevercut();
+  straightlevercut();
+}
+
+rpizero("cut", H = 8, T=10);
+//switches();
+//switchmount();
 //nanoble(3, key="poles");
 //protoboard2(3, key="poles");
 //translate([0,20,0]) buckconverter(3, key="poles");

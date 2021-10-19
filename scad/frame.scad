@@ -221,7 +221,7 @@ module frame(key){
       translate([i*edgex(h), yback + wallT + dswitch/2 + sp, h])
       rotate([0,i*(90-alpha),0]) cylinder(h=20, d=dswitch, center=true);
     }
-    h = 105;
+    h = 95;
     D=10;
     sw_(-1, h);
     sw_(1, h);
@@ -282,12 +282,13 @@ module frame(key){
   //neckservo();
   //neckservo("servo");
 }
-key= "bottom"; //"arduino"; //"top";//
-//frame(key);
-frame("top");
+key="bottom"; //"arduino"; //"top";//
+frame(key);
+//frame("motors");
+//frame("top");
 //frame("servo");
 //frame("converter");
 //frame("arduino");
-frame("batt");
+//frame("batt");
 
 

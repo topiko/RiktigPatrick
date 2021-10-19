@@ -100,19 +100,20 @@ module head(key){
     sp = 0;
 
 
-    Hmin = 15;
-    Hmax = 15;
+    Hmin = 25;
+    Hmax = 25;
     Wmin=7;
-    Wmax=9;
-    Tmin=1;
-    Tmax=3;
+    Wmax=8;
+    Tmin=rcorner + 1;
+    Tmax=Tmin + 5;
     rmin=.5;
     rmax=1.0;
     zmin=0;
-    zmax=2;
-    gapmin=-.3;
-    gapmax=.3;
- 
+    zmax=1;
+    gapmin=-.2;
+    gapmax=1;
+    gap = 4;
+    Rlip =10;
     dims = [[Hmin, Hmax], [Wmin, Wmax], [Tmin, Tmax], [rmin, rmax], [gapmin, gapmax]];
 
     function teethdims(i) = [for (dimpair=dims) rands(dimpair[0], dimpair[1], 1, seed*i)[0]];  
@@ -153,21 +154,21 @@ module head(key){
         T_low=lowteethdims[i][2];
         r_low=lowteethdims[i][3];
 
-        color("Beige")translate([upteethPos[i], H_up/2 + teethzs[i], 0]) tooth(H_up, W_up, T_up, r_up); 
-        color("Beige")translate([lowteethPos[i], -H_low/2 + teethzs[i], 0]) tooth(H_low, W_low, T_low, r_low); 
+        color("Beige")translate([upteethPos[i], H_up/2 + gap/2 + teethzs[i], 0]) tooth(H_up, W_up, T_up, r_up); 
+        color("Beige")translate([lowteethPos[i], -H_low/2 - gap/2  + teethzs[i], 0]) tooth(H_low, W_low, T_low, r_low); 
         
       }
     }
      
     module lips_(H, Wmouth=Whead/3*2, Hmouth=.9*Hmax){
       sp = key == "cut" ? TIGHTSP*2 : 0;
-      R = 5;
+      R = Rlip;
       lipw = 5;
       color("Red")
       linear_extrude(height=H)
       difference(){
-        offset(R+sp) square([Wmouth, Hmouth - R], center=true);
-        offset(R-lipw) square([Wmouth, Hmouth - R], center=true);
+        offset(R+sp) square([Wmouth - 2*R, Hmouth - 2*R], center=true);
+        offset(R-lipw) square([Wmouth - 2*R, Hmouth - 2*R], center=true);
       }
     }
     module mount(key){
@@ -183,7 +184,7 @@ module head(key){
         difference(){
         union(){
           lips_(Tmax, Wmouth, Hmouth);
-          hull() lips_(1, Wmouth, Hmouth);
+          color("Black") hull() lips_(rcorner + .6, Wmouth, Hmouth);
           intersection(){
             color("Red") hull() lips_(Tmax, Wmouth, Hmouth);
             teeth_();
@@ -198,15 +199,17 @@ module head(key){
       }
     }
 
-    Wmouth=Wheadbottom/7*7;
-    Hmouth=30;
+    Wmouth=Wheadbottom/8*9;
+    Hmouth=34;
     
-    rotate([headtheta,0,0]) 
-
-    translate([0, mountT/2 + sy, 33])
-    rotate([0,-0,0])
-    rotate([-90,0,0])
-    build();
+    difference(){
+      rotate([headtheta,0,0]) 
+      translate([0, mountT/2 + sy - rcorner, 33])
+      rotate([0,-0,0])
+      rotate([-90,0,0])
+      build();
+      moveshell_() head_bulk(-MEDIUMSP);
+    }
 
 
   }
@@ -258,10 +261,7 @@ module head(key){
     }
     }
    
-    difference(){
-      shell_();
-      mouth_("cut");
-    }
+    shell_();
   }
 
   module servo_(key){
@@ -279,7 +279,7 @@ module head(key){
   }
 
   module camera_(key="poles", side="front"){
-    camH = Hhead - 25;
+    camH = Hhead - 22;
     camplateT = 2;
     cut = key=="cut" ? 1 : 0;
     sepy_ = 4;
@@ -288,11 +288,11 @@ module head(key){
     boltD = side =="back" ? BOLT25LOOSE : BOLT25TIGHT;
     sink = 6;
 
-    //translate([Whead/2-22,-mountT/2 + sink, camH])
-    //translate([0,-mountT/2 + sink, camH])
     translate([0,yback + wallT + sepy, camH])
-    rotate([-90,0,0]) 
-    camera(cut, poleh, boltD=boltD);
+    rotate([-90,0,0]){ 
+      camera(key, poleh, boltD=boltD);
+      if (side=="front" && key!="cut") translate([0,0,2]) camera("ring", poleh, boltD=boltD);
+    }
   }
   
   module rpi_(key="boardpoles"){ 
@@ -307,7 +307,7 @@ module head(key){
     if (key=="cut"){
       // CABLE HOLE
       rpit = 7;
-      translate([17,rpit + 2.+yback+wallT,0]) rounded_cutter(20, 14, 4, .5);
+      translate([19,yback,7+wallT]) rotate([90,0,0]) rounded_cutter(20, 6, 14, .5);
 
       // COOLING
       hc = 2.9; 
@@ -348,7 +348,7 @@ key="bottom"; //"top"; //
 head(key);
 //head("top");
 //head_shell(wallT);
-head("mouth");
+//head("mouth");
 //head("rpi");
 //head("camera");
 //head("rpi");
