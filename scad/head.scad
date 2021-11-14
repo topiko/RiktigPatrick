@@ -262,7 +262,7 @@ module head(key){
 
     mountT = key=="top" || key=="cuttop" ? mountT - 2*sy : mountT;
     key = key=="cuttop" ? "cut" : key;
-    extraNeck = .2 + rcorner*tan(alpha);
+    extraNeck = 0; //.2 + rcorner*tan(alpha);
     hornL = wallT + Hneck + Rtop + extraNeck;
     difference(){
       translate([0,0, wallT])
@@ -330,7 +330,7 @@ module head(key){
 
   module antenna_(key="mockup"){
     L = 30;
-    Rbot = 7;
+    Rbot = 6;
     Rtop = 8/2;
     Tled = 1;
     Dled = 5;
@@ -370,7 +370,7 @@ module head(key){
           shift(){
             difference(){
               bulk(-ringT);
-              bulk(coneT);
+              bulk(-TIGHTSP);
             }
           }
           moveshell_() head_bulk();
@@ -407,7 +407,6 @@ module head(key){
 
   }
   
-  antenna_();
 
   if (key=="top"){top_shell_();}
   if (key=="bottom"){bottom_shell_();}
@@ -434,12 +433,12 @@ module moverothead(phi, theta){
 //moverothead(0, 0) 
 //translate([0, mountT/2, 0]) 
 echo(key);
-key="bottom1"; //"top"; //
+key="bottom"; //"top"; //
 head(key);
 //head("top");
 //head_shell(wallT);
 //head("mouth");
-//head("antenna");
+head("antenna");
 //head("rpi");
 //head("camera");
 //head("rpi");
