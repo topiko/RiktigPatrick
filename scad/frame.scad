@@ -44,8 +44,11 @@ module frame_shell(wallT, key="top"){
 
   maxW = 2*max(Wtop, Wbottom);
 
-  module choose(moveY=0){
-    module cutter(){translate([-maxW/2, 0, -Hframe]) cube([maxW, Rtop, 3*Hframe]);}
+  module choose(){
+    module cutter(){
+      translate([-maxW/2, 0, -Hframe]) cube([maxW, Rtop, 3*Hframe]);
+      //translate([0,Rtop, Hframe]) rotate([3, 0, 0]) translate([-maxW/2, -10000, -2*Hframe]) cube([maxW, 10000, 3*Hframe]);
+    }
     
     if (key=="bottom"){
       intersection(){
@@ -70,6 +73,7 @@ module frame_shell(wallT, key="top"){
 
 }
 
+//frame_shell(wallT);
 
 module frame(key){  
   yback = -Rtop;
