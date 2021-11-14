@@ -27,7 +27,7 @@ module frame_bulk(modRs=0){
     rotmove(Hframe + addHback,Rbottom) rounded_tilted_cylinder(Wtop-2*addHback*tan(alpha), Rbottom, rcorner, alpha);
     //rotmove(Hframe+addHfront,Rtop + sqrt(pow((Rtop - Rbottom), 2) - pow(addHfront, 2))) rounded_tilted_cylinder(Wtop-2*addHfront*tan(alpha), Rbottom, rcorner, alpha);
     rotmove(0,Rbottom) rounded_tilted_cylinder(Wbottom, Rbottom, rcorner, alpha);
-    rotmove(0,Rbottom + 32) rounded_tilted_cylinder(Wbottom, Rbottom, rcorner, alpha);
+    rotmove(0,Rbottom + 33) rounded_tilted_cylinder(Wbottom, Rbottom, rcorner, alpha);
     rotmove(Hthick, Rbottom + Tframe) rounded_tilted_cylinder(Wbottom - 2*Hthick*tan(alpha), Rbottom, rcorner, alpha);
   }
 
@@ -108,6 +108,13 @@ module frame(key){
         selector(0, -1) moveshell_() frame_bulk();
         motors("mount");
       }
+      
+      // Switch mounts:
+      intersection(){
+        switch_("base", 1);
+        selector(0, -1) moveshell_() frame_bulk();
+      }
+
 
       mountpoles_("bottom");
       arduino("poles");
@@ -122,14 +129,17 @@ module frame(key){
       cable_hole();
       arduino("bolts");
       protoplate("bolts");
-      switches();
+      protoplate("cut");
       batt_plate("chargecable");
+      batt_plate("batt");
+      switch_("cut", 1);
     }
   }
   module top(){
     //selector(0, 0)
     module top_(){
       moveshell_() frame_shell(wallT, "top");
+
       // Neck servo mount
       intersection(){
         selector(0, 1) moveshell_() frame_bulk();
@@ -152,7 +162,7 @@ module frame(key){
       }
 
 
-
+    
 
 
       mountpoles_("top");
@@ -168,37 +178,45 @@ module frame(key){
       cable_hole();
       converter("bolts");
       arduino("bolts");
-     batt_plate("batt");
+      batt_plate("batt");
     }
 
   }
 
   module neckservo(key="cut", T=2*Rtop){
+    neckminangle = 30;
+    neckmaxangle = 120;
+    turnangle = neckmaxangle - neckminangle;
+    neckanglemiddle = 270 - neckminangle - turnangle/2;
     translate([0,0, Hframe])
     rotate([0,0,180])
     rotate([0,90,0])
     servo_mount_aligned(key=key, servoNtooth=headServoNteeth+2, 
                         //axleNtooth=headServoNteeth+8, 
 			axleL=18, W=56, T=T, H = 90, 
-			turnAngle=90,  
-                        armAngleMiddle=200,
+			turnAngle=turnangle,  
+                        armAngleMiddle=neckanglemiddle,
                         axlehornDin=BOLT3TIGHT, type=1, 
                         hornarmL=20, addXL=12, modbolts=true);
 
   }
 
   module batt_plate(key="plate"){
-    translate([0,0,(Hframe - 75)]){
+    lowedge = framemountpolepos_l[1][1] + 26;
+
+    translate([0,0, lowedge]){
     if (key=="batt"){
-      rotate([0,0,0]){
+      translate([0,0,3])
+      rotate([0,90,0]){
         translate([-15.5,5,0])battery();
         translate([15.5,5,0])battery();
       }
     }
     else if (key=="chargecable"){
-      W=18;
+      W=18.5;
       T=2.45;
-      translate([0,yback,+30.7]) cube([W,20,T], center=true);
+      h = -10;
+      translate([edgex(lowedge + h) -wallT - T/2 - .2,yback,h]) rotate([0,90 - alpha,0]) cube([W,20,T], center=true);
     }
     else {
       L1 = 20;
@@ -213,38 +231,32 @@ module frame(key){
     }
   }
 
-  //batt_plate("chargecable");
-  module switches(key){
-    dswitch=5 + .5;
-    sp=1; 
-    module sw_(i,h){
-      translate([i*edgex(h), yback + wallT + dswitch/2 + sp, h])
-      rotate([0,i*(90-alpha),0]) cylinder(h=20, d=dswitch, center=true);
-    }
-    h = 95;
-    D=10;
-    sw_(-1, h);
-    sw_(1, h);
-  }  
-//  switches();
 
   module motors(key){
+    nemay =yback + 20; // 10;
+    nemamountT=2.2;
+    module cool(){
+      for (i=[-3:1:3]){
+        translate([i*5.0, -nemay + yback, -12 - nemamountT]) rotate([90,0,0]) rounded_cutter(20, 3, 24, .5);
+      } 
+    }
+
     module left(){
-      nemah = 21;
-      nemamountT=2.2;
-      nemay =yback + 20; // 10;
+      nemah = 23;
       translate([edgex(nemah), nemay, nemah])
       rotate([0,90-alpha,0]) 
       if (key=="nema"){nema14_z0(nemamountT);}
       else if (key=="mount"){nema14_mountz0(nemamountT);}
       else if (key=="bolts"){nema14_boltsz0(10, T=nemamountT);}
-      else if (key=="cut"){nema14_z0(nemamountT);nema14_boltsz0(10, T=nemamountT);}
+      else if (key=="cut"){
+        nema14_z0(nemamountT);nema14_boltsz0(10, T=nemamountT);
+        cool();
+      }
     }
     left();
     mirror([1,0,0]) left();
   }
 
-  
   module arduino(key="mockup"){
     translate([0,yback,43.5/2 - Rbottom + wallT + 1. ]) //+wallT+1])
     rotate([-90,0,0])
@@ -253,17 +265,25 @@ module frame(key){
   }
 
   module protoplate(key="cut"){
-    translate([0,yback,63])
-    rotate([-90,0,0]) protoboard2(key=key, H=3+wallT);
+    translate([-6,yback,63])
+    rotate([-90,0,0]){
+      protoboard2(key=key, H=6.5+wallT);
+    
+      if (key=="cut"){
+        for (i=[-6:1:6]){translate([i*5.0, 0, 0]) rounded_cutter(20, 3, 20, .5); } 
+      }
+    }
   }
   
+  //protoplate();
   module converter(key="cut"){
     theta=12.5;
     addH = 25;
-    Lleg = 6;
-    translate([0,Tframe + Rbottom + Lleg + yback - addH*tan(theta) - 4.0,Hthick + addH])
-    rotate([90+theta,0,0]) buckconverter(H=Lleg, key=key);
+    Lleg = 4.5;
+    translate([11,Tframe + Rbottom + Lleg + yback - addH*tan(theta) - 3.0,Hthick + addH])
+    rotate([90+theta,0,0]) buckconverter_XL4015(H=Lleg, key=key);
   }
+  //converter("mockup");
   //converter();
   //arduino();
   //motors("mount");
@@ -272,23 +292,41 @@ module frame(key){
   if (key=="top") top();
   if (key=="batt") batt_plate("batt");
   if (key=="motors") motors("nema");
-  if (key=="servoparts") necservo("axleparts");
+  if (key=="servoparts") neckservo("axleparts");
   if (key=="servo") neckservo("mockup");
   if (key=="arduino") {arduino();arduino("bolts");}
   if (key=="converter") converter("mockup");
+  if (key=="switches") {switch_("mockup", 1); switch_("mockup", -1);}
   //batt_plate("batt");
   //switches();
   //top();
   //neckservo();
   //neckservo("servo");
+  module switch_(key, s=1){
+    h = 62;
+    baseT=wallT+2;
+    sy = -10; //28
+    translate([edgex(h) - 7.5,yback,h]) 
+    rotate([0, 90 - alpha,0]) 
+    rotate([90, 0,0]) 
+    slideswitch(key, boltside="top", baseT=baseT);
+    /*translate([s*edgex(h),sy,h]) 
+    rotate([0, s*(90-alpha),0]) 
+    slideswitch(key, boltside="top", baseT=baseT);
+    */
+  }
+  
 }
 key="bottom"; //"arduino"; //"top";//
+//translate([0,27,70]) rotate([0,90,0]) batt18650();
 frame(key);
 //frame("motors");
 //frame("top");
 //frame("servo");
+//frame("servoparts");
 //frame("converter");
 //frame("arduino");
 //frame("batt");
+//frame("switches");
 
 

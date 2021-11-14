@@ -7,27 +7,6 @@ include <usedims.scad>;
 
 
 
-module head_bulk_straight(modRs=0){
-  module rotmove(H,x){
-    translate([x,Lhead/2 + modRs,H])
-    rotate([90,0,0]) children(); 
-  }
-  
-
-  Rhead=Rhead-modRs;
-  rcorner=rcorner-modRs;
-  Whead=Whead-2*modRs;
-  Hhead=Hhead-modRs;
-  Lhead=Lhead-2*modRs;
-
-  hull(){
-    rotmove(Rhead+modRs,Whead/2 - Rhead) rounded_tilted_cylinder(Lhead, Rhead, rcorner, 0);
-    rotmove(Rhead+modRs,-Whead/2 + Rhead) rounded_tilted_cylinder(Lhead, Rhead, rcorner, 0);
-    rotmove(Hhead-Rhead,Whead/2 - Rhead) rounded_tilted_cylinder(Lhead, Rhead, rcorner, 0);
-    rotmove(Hhead-Rhead,-Whead/2 + Rhead) rounded_tilted_cylinder(Lhead, Rhead, rcorner, 0);
-  }
-
-}
 module head_bulk(modRs=0){
   
   module rotmove(H, y){
@@ -104,16 +83,17 @@ module head(key){
     Hmax = 25;
     Wmin=7;
     Wmax=8;
-    Tmin=rcorner + 1;
-    Tmax=Tmin + 5;
+    Tbot = 1;
+    Tmin=rcorner + Tbot + 2;
+    Tmax=Tmin + 3;
     rmin=.5;
     rmax=1.0;
     zmin=0;
     zmax=1;
-    gapmin=-.2;
-    gapmax=1;
-    gap = 4;
-    Rlip =10;
+    gapmin=-.5;
+    gapmax=1.;
+    gap = 5;
+    Rlip =12;
     dims = [[Hmin, Hmax], [Wmin, Wmax], [Tmin, Tmax], [rmin, rmax], [gapmin, gapmax]];
 
     function teethdims(i) = [for (dimpair=dims) rands(dimpair[0], dimpair[1], 1, seed*i)[0]];  
@@ -160,7 +140,7 @@ module head(key){
       }
     }
      
-    module lips_(H, Wmouth=Whead/3*2, Hmouth=.9*Hmax){
+    module lips_(H, Wmouth=Wheadbottom/3*2, Hmouth=.9*Hmax){
       sp = key == "cut" ? TIGHTSP*2 : 0;
       R = Rlip;
       lipw = 5;
@@ -184,7 +164,7 @@ module head(key){
         difference(){
         union(){
           lips_(Tmax, Wmouth, Hmouth);
-          color("Black") hull() lips_(rcorner + .6, Wmouth, Hmouth);
+          color("Black") hull() lips_(rcorner + Tbot, Wmouth, Hmouth);
           intersection(){
             color("Red") hull() lips_(Tmax, Wmouth, Hmouth);
             teeth_();
@@ -199,12 +179,12 @@ module head(key){
       }
     }
 
-    Wmouth=Wheadbottom/8*9;
-    Hmouth=34;
-    
+    Wmouth=Wheadbottom*1.1; ///8*8;
+    Hmouth=35;
+    Zmouth = 40; 
     difference(){
       rotate([headtheta,0,0]) 
-      translate([0, mountT/2 + sy - rcorner, 33])
+      translate([0, mountT/2 + sy - rcorner, Zmouth])
       rotate([0,-0,0])
       rotate([-90,0,0])
       build();
@@ -226,6 +206,7 @@ module head(key){
       mount_poles_bolts(headmountpolepos, BOLT25LOOSE, negy=yback, holeD=0);
       rpi_("cut");
       camera_("cut", side="back");
+      antenna_("cut");
     }
     
 
@@ -236,6 +217,8 @@ module head(key){
       moveshell_() head_shell(wallT, "top");
       servo_("cut");
       camera_("cut");
+      antenna_("cut");
+      cutaxlepath();
     }
     
     intersection(){
@@ -254,7 +237,10 @@ module head(key){
     // servo mount top
     difference(){
       intersection(){
-        moveshell_() selector(headBottomT, 1) head_bulk(wallT + MEDIUMSP);
+        union(){ 
+          moveshell_() selector(headBottomT, 1) head_bulk(wallT + MEDIUMSP);
+          cutaxlepath();
+        }
         translate([0,-MEDIUMSP,0]) servo_("top");
       }
       mount_poles_bolts(headmountpolepos, mountD+MEDIUMSP, negy=yback, holeD=0);
@@ -264,8 +250,20 @@ module head(key){
     shell_();
   }
 
+  module cutaxlepath(SP=0){
+    axleD = AXLEBEARINGDIMS[0] + (AXLECOVERT + SERVOHORNSP)*2;
+    Dy = mountT/2 - sy - SP;
+    H = wallT + 2*MEDIUMSP + TIGHTSP;
+    translate([0,-Dy/2 - SP,H/2 - rcorner * tan(alpha)]) cube([axleD + 2 - 2*SP, Dy, H], center=true);
+  }
+
   module servo_(key){
     axleD=AXLEBEARINGDIMS[0] + 2*AXLECOVERT; // + SERVOHORNSP + .1;
+
+    mountT = key=="top" || key=="cuttop" ? mountT - 2*sy : mountT;
+    key = key=="cuttop" ? "cut" : key;
+    extraNeck = .2 + rcorner*tan(alpha);
+    hornL = wallT + Hneck + Rtop + extraNeck;
     difference(){
       translate([0,0, wallT])
       rotate([180,0,0])
@@ -273,14 +271,17 @@ module head(key){
                           axleNtooth=headServoNteeth+2, axleL=12, 
                           armAngleMiddle=270,
                           axlehornDin=BOLT3TIGHT, type=5, 
-                          hornarmL=wallT + Hneck + Rtop, T=mountT, addXL=12);
-      translate([0,0,-Hneck-Rtop]) rotate([0,90,0]) cylinder(d=axleD, h=50, center=true);
+                          hornarmL=hornL, T=mountT, addXL=12);
+       
+      translate([0,0,-Hneck-Rtop-extraNeck]) rotate([0,90,0]) cylinder(d=axleD, h=50, center=true);
     }
+    
+    if (key=="top") difference(){cutaxlepath(MEDIUMSP); servo_("cuttop");}
   }
 
   module camera_(key="poles", side="front"){
-    camH = Hhead - 22;
-    camplateT = 2;
+    camH = Hhead - 25;
+    camplateT = 1.4;
     cut = key=="cut" ? 1 : 0;
     sepy_ = 4;
     sepy = side == "back" ? 0 : sepy_ + camplateT;
@@ -291,7 +292,7 @@ module head(key){
     translate([0,yback + wallT + sepy, camH])
     rotate([-90,0,0]){ 
       camera(key, poleh, boltD=boltD);
-      if (side=="front" && key!="cut") translate([0,0,2]) camera("ring", poleh, boltD=boltD);
+      if (side=="front" && key!="cut") translate([0,0,0*12]) camera("ring", poleh, boltD=boltD);
     }
   }
   
@@ -304,10 +305,13 @@ module head(key){
     rotate([0,0,90])
     rpizero(key=key, H=hm + wallT, T=10, boltH=hm + 2*wallT, boltD=BOLT3LOOSE );
     
+
+    holex = 21;
+
+
     if (key=="cut"){
       // CABLE HOLE
-      rpit = 7;
-      translate([19,yback,7+wallT]) rotate([90,0,0]) rounded_cutter(20, 6, 14, .5);
+      translate([holex,yback,7+wallT]) rotate([90,0,0]) rounded_cutter(20, 6, 14, .5);
 
       // COOLING
       hc = 2.9; 
@@ -316,16 +320,103 @@ module head(key){
           translate([i*7,yback, k*1.5*hc + 11]) rotate([90,0,0]) rounded_cutter(20, 12, 3, .5);      
     
    }
+   else {
+
+     // cable zip tie mount:
+     translate([holex,yback,14+wallT]) rotate([-90,0,0]) {hull() {cylinder(h=wallT+ 5, r=5); translate([0,5,0])cylinder(h=wallT+ 5, r=5);}}
+   }
     
   }
+
+  module antenna_(key="mockup"){
+    L = 30;
+    Rbot = 7;
+    Rtop = 8/2;
+    Tled = 1;
+    Dled = 5;
+    coneT = .8;
+    Hled = L - 10;
+    theta = 15;
+
+    module bulk(wallT=0){
+
+      Rtop = Rtop - wallT;
+      Rbot = Rbot - wallT;
+
+      hull(){
+        translate([0,0,L-Rtop - wallT]) sphere(Rtop);
+        cylinder(h=.0001, r=Rbot);
+      }
+    }
+
+    module ledmount(){
+
+      intersection(){
+        bulk();
+        translate([0,0,Hled])
+        difference(){
+          cylinder(h=Tled, d=2*Rbot);
+          cylinder(h=Tled, d=Dled);
+        }
+      }
+    }
+   
+    module ring(){
+      ringT = 1.2;
+      ringH = 2;
+
+      intersection(){
+        difference(){
+          shift(){
+            difference(){
+              bulk(-ringT);
+              bulk(coneT);
+            }
+          }
+          moveshell_() head_bulk();
+        }
+        moveshell_() head_bulk(-ringH);
+      }
+    }
+
+    module build(){
+      module cone(){
+        difference(){
+          bulk();
+          bulk(coneT);
+        }
+        ledmount();
+      }
+
+      difference(){
+        shift() cone();
+        moveshell_() head_bulk(wallT);
+      }
+      ring();
+
+    }
+
+    module shift(){
+      translate([0, yback + Rbot + rcorner + 5, Hhead-Rbot*sin(theta)])
+      rotate([theta,0, 0]) children();
+    }
+
+    if (key=="cut") shift() bulk(-TIGHTSP*2);
+    else build();
+
+
+  }
   
+  antenna_();
+
   if (key=="top"){top_shell_();}
   if (key=="bottom"){bottom_shell_();}
   if (key=="servoparts"){servo_("axleparts");}
   if (key=="servo"){servo_("cut");}
   if (key=="camera"){camera_("cut"); camera_("poles");}
-  if (key=="mockup"){moveshell_() head_bulk(); camera_("cut"); mouth_("mockup");}
+  if (key=="mockup"){moveshell_() head_bulk(); camera_("cut"); mouth_("mockup"); antenna_();}
   if (key=="rpi"){rpi_(); rpi_("cut");}
+  if (key=="antenna"){antenna_();}
   if (key=="mouth"){
     mouth_("mockup");
     translate([0,-10,0]) mouth_("mount");
@@ -342,13 +433,13 @@ module moverothead(phi, theta){
 
 //moverothead(0, 0) 
 //translate([0, mountT/2, 0]) 
-
 echo(key);
-key="bottom"; //"top"; //
+key="bottom1"; //"top"; //
 head(key);
 //head("top");
 //head_shell(wallT);
 //head("mouth");
+//head("antenna");
 //head("rpi");
 //head("camera");
 //head("rpi");

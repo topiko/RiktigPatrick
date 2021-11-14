@@ -3,7 +3,7 @@ use <frame.scad>;
 include <usedims.scad>;
 
 phi=30;
-theta=15;
+theta=30; //-90 +30;
 
 
 translate([0,0,Hframe])

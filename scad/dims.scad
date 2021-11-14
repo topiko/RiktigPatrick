@@ -66,7 +66,6 @@ AXLECOVERT = 1.2;
 THREADH=.6;
 THREADPITCH = 2;
 
-SHOWALIGNERS ="dontshow"; // show
 
 
 GEARCOLOR="Ivory"; //WhiteSmoke"; //SlateGray";
@@ -74,3 +73,6 @@ BEARINGCOLOR="Gray";
 $fn = 0; //50000;
 
 
+THREADSPACEPHI = 30; // Positive means you have to twist further to tighten by phi than theory.
+SHOWALIGNERS = false; //true; 
+CUTALIGNERS = false; // Cut wedges to gears to check match.

@@ -298,7 +298,7 @@ module turn_axle(key, ntooth, turnAngle, turnAngleMiddle, axleD=12, axleL=20, ax
 			cylinder(h=2*axleD, r=R, center=true);}
 		else if (key=="bolt"){
 			rotate([0,90,0])
-			translate([0,0,-axleD/2]) bolt(boltH, boltD, sink=boltD/2);
+			translate([0,0,-axleD/2]) bolt(boltH, boltD, sink=0); //boltD/2);
 		}
 		else if (key=="cut"){
 			addR = coverT + SERVOHORNSP;
@@ -363,8 +363,8 @@ module turn_axle(key, ntooth, turnAngle, turnAngleMiddle, axleD=12, axleL=20, ax
 		
 		if (key=="arm"){
 		echo("hornarmL: ", hornarmL, hornW);
-  		if (hornW<=0)translate([0,0,-R]) axle_(RADSP);
-  		else translate([0,0,-R]) axle_(RADSP);
+
+		translate([0,0,-R]) axle_(RADSP);
                 /*
 		difference(){
 			difference(){
@@ -488,7 +488,7 @@ module turn_axle(key, ntooth, turnAngle, turnAngleMiddle, axleD=12, axleL=20, ax
 					axlecyl(key);
 					cylinder(h=H, r=100000);
 					//if (showthreadaligner=="show"){
-					joiner(H, 0, aligner="onlyaligner");
+					if (CUTALIGNERS) joiner(H, 0, aligner="onlyaligner");
 					//}
 				}
    			
@@ -501,7 +501,13 @@ module turn_axle(key, ntooth, turnAngle, turnAngleMiddle, axleD=12, axleL=20, ax
 				difference(){
 					gear(gearkey);
 					translate([0,0, H]) cylinder(h=10000, r=20000);
-					joiner(H, RADSP, phi=20);
+					joiner(H, RADSP, phi=-THREADSPACEPHI, aligner="dontshow");
+					if (CUTALIGNERS){
+					joiner(H, RADSP, phi=-THREADSPACEPHI, aligner="onlyaligner");
+					joiner(H, RADSP, phi=0, aligner="onlyaligner");}
+				}
+				if (SHOWALIGNERS){
+					joiner(H, RADSP, phi=-THREADSPACEPHI, aligner="onlyaligner"); //, aligner="onlyaligner");
 					joiner(H, RADSP, phi=0, aligner="onlyaligner");
 				}
 			}
@@ -691,7 +697,7 @@ module turn_axle(key, ntooth, turnAngle, turnAngleMiddle, axleD=12, axleL=20, ax
 		difference(){
 	 		union(){
 				translate([0,0,H-SERVOHORNSP])cylinder(h=SERVOHORNSP, d=bearingdims[0] +2);
-	 			cylinder(h=H, r=bearingdims[0]/2 - TIGHTSP + addR);
+	 			cylinder(h=H, d=bearingdims[0] - TIGHTSP + addR);
 			}
 			if (key!="cut")bolt(100, BOLT3LOOSE, 1);
 		}

@@ -115,6 +115,16 @@ module buckconverter(H=5, key="mockup", boltH=0, boltD=BOLT25TIGHT){
 	generalel(dims, mountpos, boltD=boltD, H=H, key=key, boltH=boltH);
 
 }
+module buckconverter_XL4015(H=5, key="mockup", boltH=0, boltD=BOLT25TIGHT){
+	dims = [54, 24, 2];
+	mountpos = [[45, 2.5], [10, 24-2.5]];
+	
+	//boltH = boltH==0 ? H: boltH; //  + 1.5;
+	
+	color("DarkSlateGray")	
+	generalel(dims, mountpos, boltD=boltD, H=H, key=key, boltH=boltH);
+	//translate([54/2,0,H]) cube(2, center=true);
+}
 
 module servoctrl(H=5, key="mockup", boltH=0, boltD=BOLT25TIGHT){
 	dims = [63, 25.5, 2];
@@ -186,26 +196,30 @@ module camera(key, H=30, boltD=BOLT25TIGHT){
 		// Camera	
 		color("Black") cylinder(h=35, r=cameraR);
 		for (p=mountHoles){
-			translate(p) bolt(6, boltD, -boltD/2);
+			translate(p) bolt(21, boltD, -boltD/2);
 		}
 	}
 	
 	module ring(){
 		wt=1.6;
 		D = holeD*sqrt(2) + mountR;
+		ringH = H - 2; //H-2;
 		module solid(wt){
-			hull(){
+			cylinder(d=holeD*sqrt(2) - mountR*2 + 2*wt, h=ringH);
+			/*hull(){
 			for (p=mountHoles){
-				translate([p[0], p[1] , 0]) cylinder(h=mountH, r=wt);
+				translate([p[0], p[1] , 0]) cylinder(h=mountH - ringH, r=wt);
 				}
-			}
+			}*/
 		}
 
-		T = mountR;
+		T = mountR  ;
+		translate([0,0,2])
 		difference(){
-			solid(T);
-			translate([0,0,-.1]) scale([1,1,2])solid(T-wt);
-			cube([12, 45, 25], center=true);
+			solid(wt);
+			translate([0,0,-.1]) scale([1,1,2])solid(0);
+			//cube([12, 45, 25], center=true);
+			translate([0,20,0]) rotate([90,0,0]) rounded_cutter(30, 12, 26, 2);
 		}
 
         }
@@ -302,6 +316,9 @@ module rpizero(key, H=5, T=2, pijuice=false, boltH=0, boltD=BOLT3TIGHT){
 	}
 }
 
+module batt18650(center=true){
+  cylinder(h=65, d=18, center=center);
+}
 module batt1500(){
   L = 52;
   W = 34;
@@ -386,9 +403,79 @@ module switchmount(){
   straightlevercut();
 }
 
-rpizero("cut", H = 8, T=10);
+module slideswitch(key, baseT=3, boltT=0, boltL=10, boltside="top"){
+  
+  // body extreme dims
+  W = 36;
+  H = 18.7;
+  T = 10.8;
+
+  // Sliden hantag dims:
+  sW = 13;
+  sH = 7.8;
+  sT = 6;
+
+  // Bulk dims:
+  bW = 24.2;
+  bH = H - 7.8;
+  bT = T;
+
+
+  // hole distance
+  holeDist = 30;
+  boltD = BOLT3LOOSE;
+  boltT = boltT==0 ? baseT : boltT;
+
+  module cut_(addsl){
+    bolts_();
+    bulk_();
+    slider_(addsl);
+  }
+  module bulk_(){
+    translate([0,0,-bH/2])
+    cube([bW, bT, bH], center=true);
+  }
+
+  module slider_(addSh){
+    translate([0,0,(sH+ addSh)/2])
+    cube([sW, sT, sH+addSh], center=true);
+  }
+  
+  module base_(){
+    translate([0,0,baseT/2]) 
+    hull(){
+      cube([W, T, baseT], center=true);
+      translate([0,0,baseT/2]) cube([W + baseT*2*tan(45), T + baseT*tan(45)*2, .0001], center=true);
+    }
+
+  }
+  module bolts_(){
+    module twobolts(){
+      for (i=[-1,1]) translate([i*holeDist/2, 0, boltT]) mirror([0,0,1]) bolt(boltL, boltD, 0);
+    }
+
+    if (boltside=="top") twobolts();
+    else mirror([0,0,1]) twobolts();
+  }
+  
+  translate([0,0,-baseT]){ 
+    if (key=="switch") bulk_();
+    if (key=="base") base_();
+    if (key=="cut") cut_(6);
+    if (key=="mockup") cut_(0);
+    if (key=="bolts") bolts_();
+  }
+   
+}
+
+//slideswitch("mockup", boltside="top");
+//slideswitch("base", baseT=4);
+//rpizero("cut", H = 8, T=10);
 //switches();
 //switchmount();
 //nanoble(3, key="poles");
 //protoboard2(3, key="poles");
 //translate([0,20,0]) buckconverter(3, key="poles");
+$fa = 1;
+$fs = .2;
+buckconverter_XL4015(3, key="bolts");
