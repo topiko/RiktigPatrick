@@ -235,6 +235,8 @@ module head(key){
     }
      
     // servo mount top
+    sy = acc=="print" ? -30 : 0;
+    translate([0,sy,0])
     difference(){
       intersection(){
         union(){ 
@@ -306,12 +308,12 @@ module head(key){
     rpizero(key=key, H=hm + wallT, T=10, boltH=hm + 2*wallT, boltD=BOLT3LOOSE );
     
 
-    holex = 21;
+    holex = 21.5;
 
 
     if (key=="cut"){
       // CABLE HOLE
-      translate([holex,yback,7+wallT]) rotate([90,0,0]) rounded_cutter(20, 6, 14, .5);
+      translate([holex,yback,7+Rhead]) rotate([90,0,0]) rounded_cutter(20, 6, 14, .5);
 
       // COOLING
       hc = 2.9; 
@@ -336,7 +338,7 @@ module head(key){
     Dled = 5;
     coneT = .8;
     Hled = L - 10;
-    theta = 15;
+    theta = headtheta;
 
     module bulk(wallT=0){
 
@@ -397,8 +399,11 @@ module head(key){
     }
 
     module shift(){
-      translate([0, yback + Rbot + rcorner + 5, Hhead-Rbot*sin(theta)])
+      //for (i=[-1,1]){
+      i = 0;
+      translate([i*12, yback + Rbot + rcorner + 5, Hhead-Rbot*sin(theta)])
       rotate([theta,0, 0]) children();
+      //}
     }
 
     if (key=="cut") shift() bulk(-TIGHTSP*2);
@@ -438,7 +443,7 @@ head(key);
 //head("top");
 //head_shell(wallT);
 //head("mouth");
-head("antenna");
+//head("antenna");
 //head("rpi");
 //head("camera");
 //head("rpi");

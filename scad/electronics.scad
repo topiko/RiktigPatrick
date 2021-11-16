@@ -476,6 +476,6 @@ module slideswitch(key, baseT=3, boltT=0, boltL=10, boltside="top"){
 //nanoble(3, key="poles");
 //protoboard2(3, key="poles");
 //translate([0,20,0]) buckconverter(3, key="poles");
-$fa = 1;
-$fs = .2;
+//$fa = 1;
+//$fs = .2;
 buckconverter_XL4015(3, key="bolts");

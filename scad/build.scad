@@ -2,8 +2,8 @@ use <head.scad>;
 use <frame.scad>;
 include <usedims.scad>;
 
-phi=30;
-theta=30; //-90 +30;
+phi=10;
+theta=0; //-90 +30;
 
 
 translate([0,0,Hframe])

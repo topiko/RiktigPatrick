@@ -139,7 +139,8 @@ module servo_gear(modul, ntooth, gearT, gearTSp=SERVOHORNSP, key="gear", helix_a
 		
 		// Top bearing axle:
 		if (topBearing){
-			translate([0,0,gearT]) cylinder(h=bearingdims[2] + gearTSp, d=bearingdims[0]); // NOTE: removed spacing between vbearing and axle!
+			spb = 0;
+			translate([0,0,gearT]) cylinder(h=bearingdims[2] + gearTSp, d=bearingdims[0] + spb); // NOTE: removed spacing between vbearing and axle!
 			translate([0,0,gearT]) cylinder(h=gearTSp, d=bearingdims[0] + 1.5);
 		}
 	}	
