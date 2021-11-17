@@ -7,7 +7,12 @@ class Agent():
     def __init__(self, inputlen=10):
 
         self.input2d = np.zeros((inputlen, 2))
-        self.model = MLPRegressor(hidden_layer_sizes=(100,300,100,50,), activation='logistic', learning_rate_init=0.0001, warm_start=True)
+        self.model = MLPRegressor(hidden_layer_sizes=(inputlen*2, inputlen*2, inputlen, ),
+                                  activation='logistic',
+                                  learning_rate_init=0.001,
+                                  warm_start=True)
+        self.X = np.zeros((10000, 2*len(self.input2d)))
+        self.y = np.zeros((10000, 2))
         self.resethistory()
 
 
@@ -28,8 +33,8 @@ class Agent():
     def updatemodel(self):
         """
         """
-        X = self.X[:self.i]
-        y = self.y[:self.i]
+        X = self.X[:max(self.i,2)]
+        y = self.y[:max(self.i,2)]
 
         self.model = self.model.partial_fit(X, y)
 
@@ -44,8 +49,8 @@ class Agent():
 
     def resethistory(self):
 
-        self.X = np.zeros((10000, 2*len(self.input2d)))
-        self.y = np.zeros((10000, 2))
+        #self.X = np.zeros((10000, 2*len(self.input2d)))
+        #self.y = np.zeros((10000, 2))
         self.i = 0
 
 
