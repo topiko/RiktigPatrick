@@ -3,16 +3,17 @@
 #include <Servo.h>
 
 #define REFRESH_INTERVAL 3003 // KST servos operate at 333Hz --> 1/333 * 1e6
-#define SERVODISABLEPERIOD 3003 // Either 0 orREFRESH_INTERVAL ? 
+#define SERVODISABLEPERIOD 0 // Either 0 orREFRESH_INTERVAL ? 
 
 #define I2C_SLAVE_ADDRESS 11 
 #define NSERVOS 2
-#define SERVOUPDATEPERIOD 20 // in ms
+#define SERVOUPDATEPERIOD 50 // in ms
 #define COMMTIMEOUT 1000
 
 float x, y, z;
 float wx, wy, wz;
 int n;
+bool servoreported;
 uint32_t lastInput = 0;
 int servopins[2] = {D8, D9};
 uint8_t mode = 0; // Operation mode: 0 == FAILSAFE
@@ -34,9 +35,9 @@ struct StateStruct {
   float accel[3];             // 4*3 = 12
   float w[3];                 // 12
   uint16_t servopos[NSERVOS]; // 2*2 = 4
-  //byte paddind[4];            // 4
+  uint8_t mode;               // 1
                               //------
-                              // 32
+                              // 29
 };
 
 StateStruct state;
@@ -69,20 +70,24 @@ void setServoParams(int selector, short val, ServoCtrlStruct *servo){
   // Set servo params:
  
   switch(selector) {
-    case 0: servo->minlim = val; break;
-    case 1: servo->maxlim = val; break;
-    case 2: servo->maxSpeed = val; break;
+    case 64: servo->minlim = int(val); break;
+    case 65: servo->maxlim = int(val); break;
+    case 66: servo->maxSpeed = float(val)/1000.; break;
   }
 
 
 }
 
 void setCtrlVals(short selector, short val1, short val2){
-
+  
   switch(selector) {
-    case 0: servos[0].speed = val1; 
-            servos[1].speed = val2;
-            break;
+    case 16: servos[0].speed = int(val1); 
+             servos[1].speed = int(val2);
+	     Serial.println("SET SPEEDS:");
+             Serial.println(servos[0].speed);
+             Serial.println();
+
+             break;
     // TODO: set motor speeds:
   }
 }
@@ -109,12 +114,17 @@ void detachServos(){
 
 void setMode(short selectmode){
   
-  if (mode==selectmode) return;
+  Serial.println("Set mode:");
+  Serial.print("mode: "); Serial.println(mode);
+  Serial.print("new mode: "); Serial.println(selectmode);
+  Serial.print("Setting mode: "); Serial.println(selectmode);
+
+  state.mode = selectmode;
+
 
   switch (selectmode) {
     // FAILSAFE:
     case 0: mode = 0;
-
             if (servosattached) detachServos();
             Serial.println("Entering failsafe mode.");
             break;
@@ -129,18 +139,26 @@ void setMode(short selectmode){
 void initServos(){
 
   for (int i=0; i<NSERVOS; i++){
+    // Pick the servo:
+    ServoCtrlStruct *servo = &servos[i];
+
     // Initialize the various servo paramaters to some values:
-    servos[i].prevUpdate = 0;
-    servos[i].speed = 0;
-    servos[i].minlim = 1400;
-    servos[i].maxlim = 1600;
-    servos[i].idx = i;
-    servos[i].pos = 1500;
-    servos[i].maxSpeed = float(servos[i].maxlim - servos[i].minlim)/1000.; 
+    servo->prevUpdate = 0;
+    servo->speed = 0;
+    servo->minlim = 1400;
+    servo->maxlim = 1600;
+    servo->idx = i;
+    servo->pos = 1500;
+    servo->maxSpeed = float(servo->maxlim - servo->minlim)/10.; 
     
     // Disable servo:
-    // servos[i].curservo.writeMicroseconds(1500);
+    // servo->curservo.writeMicroseconds(1500);
   }
+}
+
+void runServos(){
+  // Drive allthe servos: 
+  for (int i=0;i<NSERVOS;i++){runServo(&servos[i]);}
 }
 
 void runServo(ServoCtrlStruct *servo){
@@ -155,30 +173,58 @@ void runServo(ServoCtrlStruct *servo){
     float speed = servo->maxSpeed * speedScale; 
     int16_t updatePos = sinceUpdate * speed;
     
-    // Compute the new pos in terms of microseconds:
-    servo->pos = constrain(servo->pos + updatePos, servo->minlim, servo->maxlim); 
-
-    // Write the new servo pos to state struct:
-    state.servopos[servo->idx] = servo->pos;
-    
-    // Update the servo pos:
-    if (mode != 0) {
-      Serial.println("Servo pos: ");
-      Serial.println(servo->pos);
+    if (mode != 0) { 
+      if (servoreported){
+      Serial.print("Updating servo : "); Serial.println(servo->idx);
       Serial.println(servo->speed);
       Serial.println(speedScale);
+      Serial.println(servo->maxSpeed);
       Serial.println(speed);
       Serial.println(updatePos);
-      Serial.println();
+      Serial.println("");
+      servoreported = false;
+      }
 
+      // Compute the new pos in terms of microseconds:
+      servo->pos = constrain(servo->pos + updatePos, servo->minlim, servo->maxlim); 
+
+      // Write the new servo pos to state struct:
+      state.servopos[servo->idx] = servo->pos;
+    
+      // Update the servo pos:
       servo->curservo.writeMicroseconds(servo->pos); 
-      //servo->curservo.writeMicroseconds(1500); 
       
       // Store the update time: (Risk of overflow in??)
       servo->prevUpdate = millis();
     }
     
   }
+}
+
+void reportServo(ServoCtrlStruct *servo){
+  
+  Serial.println("Reporting servo:");
+  Serial.print("Servo idx      "); Serial.println(servo->idx);
+  Serial.print("Servo speed    "); Serial.println(servo->speed);
+  Serial.print("Servo maxspeed "); Serial.println(servo->maxSpeed);
+  Serial.print("Servo pos      "); Serial.println(servo->pos);
+  Serial.print("Servo min      "); Serial.println(servo->minlim);
+  Serial.print("Servo max      "); Serial.println(servo->maxlim);
+  Serial.println("");
+
+  servoreported = true;
+
+}
+
+void showReport(short selector){
+  Serial.println("REPORT:");
+  Serial.print("Operation mode: "); Serial.println(mode);
+  Serial.print("Servos attahed: "); Serial.println(servosattached);
+  
+  for (int i=0; i<NSERVOS; i++){
+    reportServo(&servos[i]);
+  }
+
 }
 
 void loop(){
@@ -199,8 +245,8 @@ void loop(){
     state.w[2] = wz;
   }
 
-  // Drive the servos: 
-  for (int i=0;i<NSERVOS;i++){runServo(&servos[i]);}
+  // Run the servos according to ServoCtrlStruct:
+  runServos();
 
   //TODO: Drive motors.
   
@@ -231,16 +277,19 @@ void receiveEvents(int numBytes){
   short val1 = (buffer[2] << 8) | buffer[3]; // Note: conversion from big-endian to little endian system
   short val2 = (buffer[4] << 8) | buffer[5]; // Note: conversion from big-endian to little endian system
 
-  if (selector<16){ // SET MODE:
+  Serial.print("Selector : "); Serial.println(selector);
+
+  if (selector<8){ // SET MODE:
     setMode(selector);
-    //mode = selector;
   }
-  else if (16<=selector & selector<64){
-    selector = selector - 16;
+  else if (8<=selector & selector < 16){ // Show reports:
+    //showReport(selector);
+  }
+  else if (16<=selector & selector<64){ // Set control input:
+    Serial.print("Setting control!");
     setCtrlVals(selector, val1, val2);
   }
   else if (64<=selector){ // SET PARAMS:
-    selector = selector - 64;
     setServoParams(selector, val2, &servos[val1]);
   }
 
