@@ -1,104 +1,154 @@
+import numpy as np
 
-class ServoDriver():
+class ServoCalc():
 
-    def __init__(self, servo, P=1, D=0):
-        self.P = P
-        self.D = D
-        self.servo = servo
-        self.target_pos = 90
-
-    def pdspeed(self, delta_pos):
-        return  self.P * delta_pos - self.D * self.servo.get_speed()
-
-    def update_servo_speed(self, pos=None, pos_pulse=None):
-
-        if pos_pulse is not None:
-            pos = self.servo.set_pos_from_pulse(pos_pulse)
-        speed = self.pdspeed(self.target_pos - pos)
-        self.servo.set_speed(speed)
-
-    def get_ctrl_int(self):
-        return self.servo.speed_to_sendspeed()
-
-class Servo():
-
-    def __init__(self, name, idx, a=None, b=None):
+    def __init__(self, params):
         """
         Attr:
-            name : name of the servo for book keeping.
-            idx : idx in arduino servo table for writing params.
+            params : Either dict of params or path to params file. Check params below.
         """
-        self.name = name
+
+        if isinstance(params, str):
+            params = np.load(params + 'npy').item()
+        elif isinstance(params, dict):
+            pass
+        else:
+            raise TypeError('Params need to be either path to servo params file. Or params dict.')
+
+        self.params = params
+        self.name = params['name']
         self.speed = 0
-        self.maxspeed = 90
-        self.minlim = -20
-        self.maxlim = 20
-        self.idx = idx
+        self.maxspeed = params['max_speed']
+        self.minlim = params['minlim']
+        self.maxlim = params['maxlim']
+        self.idx = params['idx']
 
-        self.coefs_set = False
+        self.a = params['a']
+        self.b = params['b']
+        self.angle = self.b
 
-        if (a is not None) and (b is not None):
-            self.set_coefs(a, b)
+        self.fac = 1 if self.a > 0 else -1 # If negative slope we need to send negative value.
 
     def set_speed(self, speed):
+        """
+        Attr:
+            speed : [deg/sec]
+        """
         self.speed=speed
 
     def get_speed(self):
+        """
+        Return:
+            speed : [deg/sec]
+        """
         return self.speed
 
-    def get_pos(self):
-        return self.pos
+    def get_angle(self):
+        """
+        Return:
+            angle : deg
+        """
+        return self.angle
 
-    def set_pos_from_pulse(self, pulse):
-        self.check_coefs()
-        self.pos = (pulse - self.b)/self.a
-        return self.pos
+    def set_angle(self, val, key='pulse'):
+        """
+        """
+        if key=='pulse':
+            self.angle = (val - self.b)/self.a
+        elif key=='deg':
+            self.angle = val
+        else:
+            raise KeyError('Invalid key: {}'.format(key))
 
-    def set_coefs(self, a, b):
-        self.a = a
-        self.b = b
-        self.coefs_set = True
-
-    def check_coefs(self):
-
-        if not self.coefs_set:
-            raise ValueError('You have not supplied to conversion parameters a and b.')
-
-        return True
+        return self.angle
 
 
-    def speed_to_sendspeed(self, speed=None):
-        self.check_coefs()
+
+
+    def speed_to_int(self, speed=None):
+        """
+        Comver current speed to value sent to arduino.
+        Attr:
+            speed : [deg/sec] (None -> use self.speed)
+        Returns:
+            speed_int : fraction of speed to maxspeed * 2**15.
+        """
 
         if speed is None: speed = self.speed
 
-        speed_int = ( speed / self.maxspeed ) * 32768
+
+        speed_int = self.fac * ( speed / self.maxspeed ) * 32768 # This is then sent to arduino.
 
         return int(speed_int)
 
-    def pos_to_pulse(self, pos=None):
-        self.check_coefs()
+    def angle_to_pulse(self, angle=None):
 
-        if pos is None: pos = self.pos
+        if angle is None: angle = self.angle
 
-        return self.a * pos + self.b
+        return int(self.a * angle + self.b)
+
+    def pulse_to_angle(self, pulse):
+        return (pulse - self.b)/self.a
 
     def make_init_list(self):
         """Produce set of commands setn to arduino to init the servo params."""
 
-        key = 64
         init_dict = {}
+
+        lim1 = self.angle_to_pulse(self.minlim)
+        lim2 = self.angle_to_pulse(self.maxlim)
+
+        if self.fac == 1:
+            minlim = lim1
+            maxlim = lim2
+        elif self.fac == -1:
+            minlim = lim2
+            maxlim = lim1
+
 
         init_dict['minlim'] = (64,
                               self.idx,
-                              self.pos_to_pulse(self.minlim))
+                              minlim)
 
         init_dict['maxlim'] = (65,
                               self.idx,
-                              self.pos_to_pulse(self.maxlim))
+                              maxlim)
 
-        maxspeed_pulse = int(self.a * self.maxspeed)
+        maxspeed_pulse = abs(int(self.a * self.maxspeed))
         init_dict['maxspeed'] = (66,
                                  self.idx,
                                  maxspeed_pulse)
         return init_dict
+
+class ServoDriver(ServoCalc):
+
+    def __init__(self, params, P=None, D=None):
+
+        super().__init__(params);
+
+        self.P = self.params['P'] if P is None else P
+        self.D = self.params['D'] if D is None else D
+
+    def set_target_angle(self, angle):
+
+        self.target_angle = angle
+        self.target_pulse = self.angle_to_pulse(angle=angle)
+
+    def set_target_pulse(self, pulse):
+
+        self.target_pulse = pulse
+        self.target_angle = self.pulse_to_angle(pulse)
+
+    def update_speed_int(self, target_angle, pulse):
+        self.set_target_angle(target_angle)
+        self.set_angle(pulse, key='pulse')
+
+        dangle = self.target_angle - self.angle
+
+        # TODO: this is incorrect and should be replaced with accelaration
+        # based updates on the velocity.
+
+        self.speed = self.P * dangle - self.D * self.speed
+
+        return self.speed_to_int()
+

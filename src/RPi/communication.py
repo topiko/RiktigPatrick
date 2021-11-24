@@ -8,14 +8,16 @@ I2C_SLAVE_ADDRESS = 11 #0x0b ou 11
 
 def make_ctrl(i,j,k):
 
+    def constrain(i):
+        return int(max(-32768, min(i, 32768-1)))
 
     def input2bytes(i,j,k):
-        i = int(i).to_bytes(1, byteorder='little')
-        j = int(j).to_bytes(2, byteorder='big', signed=True)
-        k = int(k).to_bytes(2, byteorder='big', signed=True)
+
+        i = constrain(i).to_bytes(1, byteorder='little')
+        j = constrain(j).to_bytes(2, byteorder='big', signed=True)
+        k = constrain(k).to_bytes(2, byteorder='big', signed=True)
         return i+j+k
 
-    print("Ctrl input: {:5d} - {:5d} - {:5d}".format(i,j,k))
     return input2bytes(i,j,k)
 
 def write_arduino(I2Cbus, ctrl_input):
