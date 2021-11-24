@@ -8,7 +8,7 @@
 #define I2C_SLAVE_ADDRESS 11 
 #define NSERVOS 2
 #define SERVOUPDATEPERIOD 10 // in ms
-#define COMMTIMEOUT 1000
+#define COMMTIMEOUT 500
 
 float x, y, z;
 float wx, wy, wz;
@@ -119,6 +119,7 @@ void setMode(short selectmode){
   Serial.print("new mode: "); Serial.println(selectmode);
   Serial.print("Setting mode: "); Serial.println(selectmode);
 
+  //TODO: get rid of mode and only use state.mode
   state.mode = selectmode;
 
 
@@ -175,14 +176,14 @@ void runServo(ServoCtrlStruct *servo){
     
     if (mode != 0) { 
       if (servoreported){
-      Serial.print("Updating servo : "); Serial.println(servo->idx);
-      Serial.println(servo->speed);
-      Serial.println(speedScale);
-      Serial.println(servo->maxSpeed);
-      Serial.println(speed);
-      Serial.println(updatePos);
-      Serial.println("");
-      servoreported = false;
+        Serial.print("Updating servo : "); Serial.println(servo->idx);
+        Serial.println(servo->speed);
+        Serial.println(speedScale);
+        Serial.println(servo->maxSpeed);
+        Serial.println(speed);
+        Serial.println(updatePos);
+        Serial.println("");
+        servoreported = false;
       }
 
       // Compute the new pos in terms of microseconds:
@@ -195,7 +196,7 @@ void runServo(ServoCtrlStruct *servo){
       servo->curservo.writeMicroseconds(servo->pos); 
       
       // Store the update time: (Risk of overflow in??)
-      servo->prevUpdate = millis();
+      if (abs(updatePos)>0) servo->prevUpdate = millis();
     }
     
   }
