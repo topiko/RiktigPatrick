@@ -7,7 +7,7 @@
 
 #define I2C_SLAVE_ADDRESS 11 
 #define NSERVOS 2
-#define SERVOUPDATEPERIOD 50 // in ms
+#define SERVOUPDATEPERIOD 10 // in ms
 #define COMMTIMEOUT 1000
 
 float x, y, z;
