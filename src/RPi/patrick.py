@@ -12,15 +12,15 @@ P = 30; D=0;
 
 COMMPERIOD = 20e-3
 
-mintheta = -45
-maxtheta = 25
-minphi = -40
-maxphi = 40
+MINTHETA = -45
+MAXTHETA = 25
+MINPHI = -40
+MAXPHI = 40
 
 htheta_params = {'name':'head_theta',
                  'max_speed': 90, #[deg/sec]
-                 'minlim': mintheta,
-                 'maxlim': maxtheta,
+                 'minlim': MINTHETA,
+                 'maxlim': MAXTHETA,
                  'idx':1,
                  'a':15,
                  'b':1800,
@@ -30,8 +30,8 @@ htheta_params = {'name':'head_theta',
 
 hphi_params = {'name':'head_theta',
                'max_speed': 90, #[deg/sec]
-               'minlim': minphi,
-               'maxlim': maxphi,
+               'minlim': MINPHI,
+               'maxlim': MAXPHI,
                'idx':0,
                'a': -13,
                'b':1520,
