@@ -27,6 +27,7 @@ class ServoCalc():
         self.b = params['b']
         self.angle = self.b
 
+        self.showwarning = False
         self.fac = 1 if self.a > 0 else -1 # If negative slope we need to send negative value.
 
     def set_speed(self, speed):
@@ -78,7 +79,7 @@ class ServoCalc():
 
         speed_frac = (speed / self.maxspeed)
         if abs(speed_frac)>1:
-            print('WARNING: requesting larger speed than available.')
+            if self.showwarning: print('WARNING: requesting larger speed than available.')
             if   speed_frac < -1: speed_frac = -1
             elif speed_frac >  1: speed_frac =  1
 

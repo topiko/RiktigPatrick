@@ -8,17 +8,18 @@ import numpy as np
 from servo import ServoDriver
 from communication import write_arduino, make_ctrl, init_servo
 
-P = 30; D=0;
+P = 5; D=0;
 
 COMMPERIOD = 20e-3
 
-MINTHETA = -45
-MAXTHETA = 25
+SPEEDSCALE = 1
+MINTHETA = -50
+MAXTHETA = 28
 MINPHI = -40
 MAXPHI = 40
 
 htheta_params = {'name':'head_theta',
-                 'max_speed': 90, #[deg/sec]
+                 'max_speed': (MAXTHETA - MINTHETA)*SPEEDSCALE, #[deg/sec]
                  'minlim': MINTHETA,
                  'maxlim': MAXTHETA,
                  'idx':1,
@@ -29,12 +30,12 @@ htheta_params = {'name':'head_theta',
                  }
 
 hphi_params = {'name':'head_theta',
-               'max_speed': 90, #[deg/sec]
+               'max_speed': (MAXPHI-MINPHI)*SPEEDSCALE, #[deg/sec]
                'minlim': MINPHI,
                'maxlim': MAXPHI,
                'idx':0,
                'a': -13,
-               'b':1520,
+               'b':1480,
                'P':P,
                'D':D
                }
