@@ -7,8 +7,8 @@
 
 #define I2C_SLAVE_ADDRESS 11 
 #define NSERVOS 2
-#define SERVOUPDATEPERIOD 10 // in ms
-#define COMMTIMEOUT 500
+#define SERVOUPDATEPERIOD 20 // in ms
+#define COMMTIMEOUT 100
 
 float x, y, z;
 float wx, wy, wz;
@@ -97,7 +97,8 @@ void setCtrlVals(short selector, short val1, short val2){
 void attachServos(){
   // Attach all servos:
   for (int i=0; i<NSERVOS; i++){
-    servos[i].curservo.attach(servopins[i]);
+    servos[i].curservo.attach(servopins[i]);  
+    servos[i].prevUpdate = millis();
   }
   servosattached = true;
   Serial.println("Servos attached.");
@@ -105,7 +106,9 @@ void attachServos(){
 void detachServos(){
   // Detach all servos:
   for (int i=0; i<NSERVOS; i++){
-    servos[i].curservo.writeMicroseconds(SERVODISABLEPERIOD); 
+    //int middle = (servos[i].minlim + servos[i].maxlim)/2;
+    //servos[i].curservo.writeMicroseconds(SERVODISABLEPERIOD); //TODO: 0 or 3003 do not disable any other ideas?
+    //servos[i].curservo.writeMicroseconds(middle); 
     servos[i].curservo.detach();
   }
   servosattached = false;
