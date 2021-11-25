@@ -13,7 +13,7 @@ class RPController(Controller):
 
         self.ctrl = [0,0]
         self.tlastinput=time.time()
-        self.period = 1./20 # Period for control inputs.
+        self.period = 1./30 # Period for control inputs.
 
     def make_ctrl_input(self, value, ch):
 
@@ -30,7 +30,8 @@ class RPController(Controller):
 
     def decide_input(self, value, ch):
 
-        if ((time.time()-self.tlastinput)>self.period) or (value==0):
+        major_change = abs(self.ctrl[ch] - value/32768) > .1
+        if ((time.time()-self.tlastinput)>self.period) or (value==0) or major_change:
             self.tlastinput=time.time()
             return self.make_ctrl_input(value, ch)
 
@@ -41,7 +42,7 @@ class RPController(Controller):
     def handle_joystic(self, value, ch):
         ctrl = self.decide_input(value, ch)
         if ctrl is not None:
-            client.publish("riktigpatric/control/head",
+            client.publish("riktigpatrick/remote/head",
                            payload=ctrl,
                            qos=0,
                            retain=False)
