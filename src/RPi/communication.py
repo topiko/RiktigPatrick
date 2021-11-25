@@ -6,6 +6,15 @@ from smbus2 import i2c_msg
 # Slave Addresses
 I2C_SLAVE_ADDRESS = 11 #0x0b ou 11
 
+def init_servo(I2Cbus, init_dict):
+
+    print('Init servo')
+    for _, tup in init_dict.items():
+        send = make_ctrl(*tup)
+        write_arduino(I2Cbus, send)
+
+
+
 def make_ctrl(i,j,k):
 
     def constrain(i):

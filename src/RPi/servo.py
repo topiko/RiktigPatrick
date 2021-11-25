@@ -76,6 +76,11 @@ class ServoCalc():
 
         if speed is None: speed = self.speed
 
+        speed_frac = (speed / self.maxspeed)
+        if abs(speed_frac)>1:
+            print('WARNING: requesting larger speed than available.')
+            if   speed_frac < -1: speed_frac = -1
+            elif speed_frac >  1: speed_frac =  1
 
         speed_int = self.fac * ( speed / self.maxspeed ) * 32768 # This is then sent to arduino.
 
@@ -131,17 +136,24 @@ class ServoDriver(ServoCalc):
 
     def set_target_angle(self, angle):
 
+        if angle<self.minlim:
+            print('WARNING: setting anlgle outside boundaries: {:.2f}<{:.2f}(min)'.format(angle, self.minlim))
+        if angle>self.maxlim:
+            print('WARNING: setting anlgle outside boundaries: {:.2f}>{:.2f}(max)'.format(angle, self.maxlim))
         self.target_angle = angle
         self.target_pulse = self.angle_to_pulse(angle=angle)
 
     def set_target_pulse(self, pulse):
 
         self.target_pulse = pulse
-        self.target_angle = self.pulse_to_angle(pulse)
+        self.set_target_angle(self.pulse_to_angle(pulse))
 
-    def update_speed_int(self, target_angle, pulse):
-        self.set_target_angle(target_angle)
-        self.set_angle(pulse, key='pulse')
+    def update_speed(self, target_angle=None, pulse=None):
+
+        if target_angle is not None:
+            self.set_target_angle(target_angle)
+        if pulse is not None:
+            self.set_angle(pulse, key='pulse')
 
         dangle = self.target_angle - self.angle
 
@@ -150,5 +162,18 @@ class ServoDriver(ServoCalc):
 
         self.speed = self.P * dangle - self.D * self.speed
 
-        return self.speed_to_int()
+    def report(self):
 
+        reportlist = [('Name', self.name),
+                      ('Angle', self.angle),
+                      ('Target angle', self.target_angle),
+                      ('Speed', self.speed),
+                      ('Speed int', self.speed_to_int()),
+                      ('Pulse', self.angle_to_pulse()),
+                      ('Target pulse', self.target_pulse)]
+
+        fstr = '{:<25s}: {}'
+        print("SERVO REPORT")
+        for key, val in reportlist:
+            print(fstr.format(key, val))
+        print("END")
