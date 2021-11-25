@@ -27,12 +27,13 @@ struct ServoCtrlStruct {
   int idx;
   uint16_t pos;
   float maxSpeed;
+  int maxChange;
   Servo curservo;
 };
 
 
 struct StateStruct {
-  float accel[3];             // 4*3 = 12
+  float accel[3];            // 4*3 = 12
   float w[3];                 // 12
   uint16_t servopos[NSERVOS]; // 2*2 = 4
   uint8_t mode;               // 1
@@ -72,7 +73,9 @@ void setServoParams(int selector, short val, ServoCtrlStruct *servo){
   switch(selector) {
     case 64: servo->minlim = int(val); break;
     case 65: servo->maxlim = int(val); break;
-    case 66: servo->maxSpeed = float(val)/1000.; break;
+    case 66: servo->maxSpeed = float(val)/1000.; 
+             servo->maxChange = servo->maxSpeed * SERVOUPDATEPERIOD;
+             break;
   }
 
 
@@ -153,6 +156,7 @@ void initServos(){
     servo->maxlim = 1600;
     servo->idx = i;
     servo->pos = 1500;
+    servo->maxChange = 10;
     servo->maxSpeed = float(servo->maxlim - servo->minlim)/10.; 
     
     // Disable servo:
@@ -177,6 +181,8 @@ void runServo(ServoCtrlStruct *servo){
     float speed = servo->maxSpeed * speedScale; 
     int16_t updatePos = sinceUpdate * speed;
     
+    updatePos = constrain(updatePos, -servo->maxChange, servo->maxChange);
+ 
     if (mode != 0) { 
       if (servoreported){
         Serial.print("Updating servo : "); Serial.println(servo->idx);
