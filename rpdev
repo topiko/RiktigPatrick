@@ -1,0 +1,16 @@
+source /home/topiko/.screenrc
+sessionname rpdev 
+screen -t VIM 1
+stuff "conda activate rp^M"
+stuff "cd `pwd`/src/Networking/^M"
+stuff "vim^M"
+screen -t PYTHON 2
+stuff "conda activate rp^M"
+stuff "cd `pwd`/src/Networking/^M"
+#stuff "python sensfusion.py^M"
+# split -v
+select VIM
+focus
+# select PYTHON
+# focus
+layout save default
