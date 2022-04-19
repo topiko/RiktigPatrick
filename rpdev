@@ -2,12 +2,11 @@ source /home/topiko/.screenrc
 sessionname rpdev 
 screen -t VIM 1
 stuff "conda activate rp^M"
-stuff "cd `pwd`/src/Networking/^M"
+stuff "cd `pwd`/src/^M"
 stuff "vim^M"
 screen -t PYTHON 2
 stuff "conda activate rp^M"
-stuff "cd `pwd`/src/Networking/^M"
-#stuff "python sensfusion.py^M"
+stuff "cd `pwd`/src/^M"
 # split -v
 select VIM
 focus

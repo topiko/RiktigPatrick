@@ -6,7 +6,7 @@ import time
 import numpy as np
 
 from servo import ServoDriver
-from communication import write_arduino, make_ctrl, init_servo
+#from communication import write_arduino, make_ctrl, init_servo
 
 P = 5; D=0;
 
@@ -39,6 +39,13 @@ hphi_params = {'name':'head_theta',
                'P':P,
                'D':D
                }
+
+def init_servo(I2Cbus, init_dict):
+
+    print('Init servo')
+    for _, tup in init_dict.items():
+        send = make_ctrl(*tup)
+        write_arduino(I2Cbus, send)
 
 
 
