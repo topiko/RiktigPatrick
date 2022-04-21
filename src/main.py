@@ -2,14 +2,28 @@ import socket
 import selectors
 import types
 import struct
+import logging
 
 from relay.conversions import depack, make_ctrl
+from riktigpatric.patrick import RPatrick
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("debug.log"),
+        logging.StreamHandler()
+    ]
+)
+
+LOG = logging.Logger('rp_logger')
 
 sel = selectors.DefaultSelector()
 
 HOST = socket.gethostbyname('topikone.local') # "192.168.0.13"
 PORT = 1024
 NBYTES = 29
+MAXBYTES = 128
 
 lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 lsock.bind((HOST, PORT))
@@ -18,12 +32,8 @@ print(f'listening at: {HOST}:{PORT}')
 lsock.setblocking(False)
 sel.register(lsock, selectors.EVENT_READ, data=None)
 
-
-def make_output(received : bytearray) -> bytearray:
-
-    print(depack(received)[:3])
-
-    return make_ctrl(1,0,0) #
+# Thsi is the RP!
+rp = RPatrick()
 
 
 def accept_wrapper(sock : socket.socket):
@@ -34,21 +44,24 @@ def accept_wrapper(sock : socket.socket):
     events = selectors.EVENT_READ | selectors.EVENT_WRITE
     sel.register(conn, events, data=data)
 
+
 def service_connection(key, mask):
     sock = key.fileobj
     data = key.data
 
     if mask & selectors.EVENT_READ:
 
-        recv_data = bytearray()
-        while len(recv_data) < NBYTES:
-            recv_data = sock.recv(30)
-            if recv_data == b'':
+        #recv_data = bytearray()
+        #while len(recv_data) < NBYTES:
+        recv_data = sock.recv(MAXBYTES)
+        #    if recv_data == b'':
                 # on empty byte temirnate.
-                break
+        #        break
 
         if recv_data:
-            data.outb = make_output(recv_data)
+            # Set state and fetch control
+            rp.state = recv_data
+            data.outb = rp.get_ctrl()
         else:
             print(f'Empty message -> closing connection {data.addr}')
             sel.unregister(sock)
@@ -56,7 +69,7 @@ def service_connection(key, mask):
     if mask & selectors.EVENT_WRITE:
         if data.outb:
             sent = sock.send(data.outb)
-            data.outb = b""
+            data.outb = b''
 
 
 if __name__ == "__main__":
@@ -68,8 +81,8 @@ if __name__ == "__main__":
                     accept_wrapper(key.fileobj)
                 else:
                     service_connection(key, mask)
-    except KeyboardInterrupt:
-        print('Exit')
+    except KeyboardInterrupt or Exception as e:
+        print('Exit', e)
     finally:
         sel.close()
 

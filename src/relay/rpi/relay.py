@@ -43,7 +43,7 @@ with SMBus(1) as I2Cbus:
                         ctrl_input += s.recv(5)
 
                     # Write it to arduino:
-                    #write_arduino(I2Cbus, ctrl_input)
+                    write_arduino(I2Cbus, ctrl_input)
                 else:
                     raise ValueError(f'Incorrect number of bytes sent: {nsent} != {NBYTESI2C}')
             except KeyboardInterrupt:
