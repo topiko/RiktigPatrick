@@ -9,7 +9,7 @@
 #define NSERVOS 2
 #define SERVOUPDATEPERIOD 20 // in ms
 #define COMMTIMEOUT 100
-#define I2CBUFFERLEN 6
+#define I2CBUFFERLEN 10
 
 float x, y, z;
 float wx, wy, wz;
@@ -88,6 +88,8 @@ void receiveEvents(int numBytes){
   short selector = buffer[1];
   short val1 = (buffer[2] << 8) | buffer[3]; // Note: conversion from big-endian to little endian system
   short val2 = (buffer[4] << 8) | buffer[5]; // Note: conversion from big-endian to little endian system
+  short val3 = (buffer[6] << 8) | buffer[7]; // Note: conversion from big-endian to little endian system
+  short val4 = (buffer[8] << 8) | buffer[9]; // Note: conversion from big-endian to little endian system
 
   //Serial.print("Selector : "); Serial.println(selector);
 
@@ -95,11 +97,11 @@ void receiveEvents(int numBytes){
     setMode(selector);
   }
   else if ((8<=selector) & (selector<16)){ // Show reports:
-    //showReport(selector);
+    showReport(selector);
   }
   else if ((16<=selector) & (selector<64)){ // Set control input:
     //Serial.println("Setting control:");
-    setCtrlVals(selector, val1, val2);
+    setCtrlVals(selector, val1, val2, val3, val4);
   }
   else if (64<=selector){ // SET PARAMS:
     setServoParams(selector, val2, &servos[val1]);
@@ -121,11 +123,11 @@ void setServoParams(int selector, short val, ServoCtrlStruct *servo){
 
 }
 
-void setCtrlVals(short selector, short val1, short val2){
+void setCtrlVals(short selector, short servoSpeed1, short servoSpeed2, short motorSpeed1, short motorSpeed2){
   
   switch(selector) {
-    case 16: servos[0].speed = int(val1); 
-             servos[1].speed = int(val2);
+    case 16: servos[0].speed = int(servoSpeed1); 
+             servos[1].speed = int(servoSpeed2);
 	     //Serial.println("SET SPEEDS:");
              //Serial.println(servos[0].speed);
              //Serial.println(servos[1].speed);
@@ -144,7 +146,7 @@ void attachServos(){
     servos[i].prevUpdate = millis();
   }
   servosattached = true;
-  //Serial.println("Servos attached.");
+  Serial.println("Servos attached.");
 }
 
 void detachServos(){
@@ -153,7 +155,7 @@ void detachServos(){
     servos[i].curservo.detach();
   }
   servosattached = false;
-  //Serial.println("Servos detached.");
+  Serial.println("Servos detached.");
 }
 
 void initServos(){
@@ -171,12 +173,8 @@ void initServos(){
     servo->pos = 1601;
     servo->maxChange = 10;
     servo->maxSpeed = float(servo->maxlim - servo->minlim)/10.; 
-    
-    // Disable servo:
-    // servo->curservo.writeMicroseconds(1500);
   }
 
-  if (mode!=0) attachServos();
 }
 
 
@@ -196,16 +194,16 @@ void runServo(ServoCtrlStruct *servo){
     if (abs(updatePos)>0){ 
       if (mode != 0) { 
         if (servoreported){
-          //Serial.print("Updating servo : "); 
-          //Serial.println(servo->idx);
-          //Serial.println(sinceUpdate);
-          //Serial.println(servo->speed);
-          //Serial.println(speedScale);
-          //Serial.println(servo->maxSpeed);
-          //Serial.println(speed);
-          //Serial.println(servo->pos);
-          //Serial.println(updatePos);
-          //Serial.println("");
+          Serial.print("Updating servo : "); 
+          Serial.println(servo->idx);
+          Serial.println(sinceUpdate);
+          Serial.println(servo->speed);
+          Serial.println(speedScale);
+          Serial.println(servo->maxSpeed);
+          Serial.println(speed);
+          Serial.println(servo->pos);
+          Serial.println(updatePos);
+          Serial.println("");
           servoreported = false;
         }
 
@@ -232,23 +230,23 @@ void runServos(){
 
 void reportServo(ServoCtrlStruct *servo){
   
-  //Serial.println("Reporting servo:");
-  //Serial.print("Servo idx      "); Serial.println(servo->idx);
-  //Serial.print("Servo speed    "); Serial.println(servo->speed);
-  //Serial.print("Servo maxspeed "); Serial.println(servo->maxSpeed);
-  //Serial.print("Servo pos      "); Serial.println(servo->pos);
-  //Serial.print("Servo min      "); Serial.println(servo->minlim);
-  //Serial.print("Servo max      "); Serial.println(servo->maxlim);
-  //Serial.println("");
+  Serial.println("Reporting servo:");
+  Serial.print("Servo idx      "); Serial.println(servo->idx);
+  Serial.print("Servo speed    "); Serial.println(servo->speed);
+  Serial.print("Servo maxspeed "); Serial.println(servo->maxSpeed);
+  Serial.print("Servo pos      "); Serial.println(servo->pos);
+  Serial.print("Servo min      "); Serial.println(servo->minlim);
+  Serial.print("Servo max      "); Serial.println(servo->maxlim);
+  Serial.println("");
 
   servoreported = true;
 
 }
 
 void showReport(short selector){
-  //Serial.println("REPORT:");
-  //Serial.print("Operation mode: "); Serial.println(mode);
-  //Serial.print("Servos attahed: "); Serial.println(servosattached);
+  Serial.println("REPORT:");
+  Serial.print("Operation mode: "); Serial.println(mode);
+  Serial.print("Servos attahed: "); Serial.println(servosattached);
   
   for (int i=0; i<NSERVOS; i++){
     reportServo(&servos[i]);
