@@ -186,6 +186,7 @@ class RPatrick():
     def state(self):
         return self._state
 
+
     @state.setter
     def state(self, data = Union[bytearray, np.ndarray, dict]):
 
@@ -203,8 +204,8 @@ class RPatrick():
         elif key=='external_input':
             self.head.set_speeds(*data)
             self._state['head'] = self.head.state
-            print(self.state)
             self._send_control = False
+            self.__repr__()
         elif key=='setmode-0':
             self._mode = 0
         elif key=='setmode-1':
@@ -212,25 +213,35 @@ class RPatrick():
         else:
             raise KeyError(f'Invalid key "{key}" to update state.')
 
+    def __repr__(self):
+        def print_dict(d, add=''):
+            for k,v in d.items():
+                if isinstance(v, dict):
+                    LOG.info(f'{add}{k}')
+                    print_dict(v, add + '  ')
+                else:
+                    LOG.info(f'{add}{k} : {v}')
+        LOG.info('Patrick state:')
+        print_dict(self._state)
 
     def get_ctrl(self) -> bytearray:
 
-        if not self.head.servosinited:
-            LOG.warning('Servos not inited - curinit: {self.head.servo_init}...')
-            cmd = self.head.initlists[self.head.servo_init]
-            self.head.servo_init += 1
-            if self.head.servo_init == len(self.head.initlists):
-                self.head.servosinited = True
-            return cmd
-
-        if self._mode != self.state['mode']:
-            return make_ctrl(self._mode, 0, 0)
         if self._send_control:
+            if not self.head.servosinited:
+                LOG.warning(f'Servos not inited - curinit: {self.head.servo_init}...')
+                cmd = self.head.initlists[self.head.servo_init]
+                self.head.servo_init += 1
+                if self.head.servo_init == len(self.head.initlists):
+                    self.head.servosinited = True
+                return cmd
+
+            if self._mode != self.state['mode']:
+                return make_ctrl(self._mode, 0, 0)
+
             cmd = self.head.get_ctrl()
             LOG.debug('Control input')
-            return cmd #make_ctrl(1,0,0)
+            return cmd
         else:
             return b''
 
-        #return self.head.get_ctrl()
 

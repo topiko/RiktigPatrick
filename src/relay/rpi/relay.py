@@ -26,31 +26,34 @@ def write_arduino(I2Cbus, ctrl_input):
 with SMBus(1) as I2Cbus:
     I2Cbus.pec=1
     i = 0
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.connect((HOST, PORT))
-        t0 = time.time()
-        while True:
-            try:
-                statebytes = read_arduino(I2Cbus)
+    while True:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            print(f'Attempting to connect {HOST}:{PORT}')
+            s.connect((HOST, PORT))
+            t0 = time.time()
+            while True:
+                try:
+                    statebytes = read_arduino(I2Cbus)
 
-                nsent = s.send(statebytes, NBYTESI2C+1) # There is a ending byte?
+                    nsent = s.send(statebytes, NBYTESI2C+1) # There is a ending byte?
 
-                if nsent==NBYTESI2C:
-                    ctrl_input = bytearray([])
+                    if nsent==NBYTESI2C:
+                        #ctrl_input = bytearray([])
 
-                    # Wait for the full ctrl_input to be received:
-                    while len(ctrl_input) != 5:
-                        ctrl_input += s.recv(5)
+                        # Wait for the full ctrl_input to be received:
+                        ctrl_input = s.recv(9)
+                        #while len(ctrl_input) != 5:
+                        #    ctrl_input += s.recv(5)
 
-                    # Write it to arduino:
-                    write_arduino(I2Cbus, ctrl_input)
-                else:
-                    raise ValueError(f'Incorrect number of bytes sent: {nsent} != {NBYTESI2C}')
-            except KeyboardInterrupt:
-                break
+                        # Write it to arduino:
+                        write_arduino(I2Cbus, ctrl_input)
+                    else:
+                        raise ValueError(f'Incorrect number of bytes sent: {nsent} != {NBYTESI2C}')
+                except KeyboardInterrupt:
+                    break
 
-            i += 1
-        t1 = time.time()
+                i += 1
+            t1 = time.time()
 
         #s.send(b"")
 

@@ -1,10 +1,8 @@
 import socket
 import selectors
 import types
-import struct
 import logging
 
-from relay.conversions import depack, make_ctrl
 from riktigpatric.patrick import RPatrick
 
 logging.basicConfig(
@@ -18,11 +16,11 @@ logging.basicConfig(
 
 LOG = logging.Logger('rp_logger')
 
+
 sel = selectors.DefaultSelector()
 
 HOST = socket.gethostbyname('topikone.local') # "192.168.0.13"
 PORT = 1024
-NBYTES = 29
 MAXBYTES = 128
 
 lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -32,9 +30,9 @@ print(f'listening at: {HOST}:{PORT}')
 lsock.setblocking(False)
 sel.register(lsock, selectors.EVENT_READ, data=None)
 
+
 # Thsi is the RP!
 rp = RPatrick()
-
 
 def accept_wrapper(sock : socket.socket):
     conn, addr = sock.accept()
@@ -51,12 +49,7 @@ def service_connection(key, mask):
 
     if mask & selectors.EVENT_READ:
 
-        #recv_data = bytearray()
-        #while len(recv_data) < NBYTES:
         recv_data = sock.recv(MAXBYTES)
-        #    if recv_data == b'':
-                # on empty byte temirnate.
-        #        break
 
         if recv_data:
             # Set state and fetch control

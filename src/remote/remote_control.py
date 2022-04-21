@@ -1,10 +1,14 @@
-import paho.mqtt.client as mqtt
-from utils import makemqttclient
-from pyPS4Controller.controller import Controller
 import time
+import socket
+
+from pyPS4Controller.controller import Controller
+
+HOST = socket.gethostbyname('topikone.local') #'192.168.0.45'
+PORT = 1024
 
 
-q, client = makemqttclient([])
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.connect((HOST, PORT))
 
 class RPController(Controller):
 
@@ -42,10 +46,12 @@ class RPController(Controller):
     def handle_joystic(self, value, ch):
         ctrl = self.decide_input(value, ch)
         if ctrl is not None:
-            client.publish("riktigpatrick/remote/head",
-                           payload=ctrl,
-                           qos=0,
-                           retain=False)
+            pass
+            #sock.
+            #client.publish("riktigpatrick/remote/head",
+            #               payload=ctrl,
+            #               qos=0,
+            #               retain=False)
 
 
     def on_L3_up(self, value):
@@ -71,7 +77,14 @@ class RPController(Controller):
 
 
 controller = RPController(interface="/dev/input/js0", connecting_using_ds4drv=False)
-controller.listen()
+
+
+try:
+    controller.listen()
+except KeyboardInterrupt:
+    pass
+finally:
+    sock.send(b'')
 
 
 
