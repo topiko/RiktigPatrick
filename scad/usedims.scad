@@ -1,5 +1,5 @@
 
-acc =  "show"; //"print"; 
+acc =  "print";  // "show"
 
 $fa = acc=="print" ? 2 : 7; //1;
 $fs = acc=="print" ? .3 : 1; //.2; //.02

@@ -96,7 +96,7 @@ class ServoCalc():
     def pulse_to_angle(self, pulse):
         return (pulse - self.b)/self.a
 
-    def make_init_list(self):
+    def get_init_dict(self):
         """Produce set of commands setn to arduino to init the servo params."""
 
         init_dict = {}
@@ -135,6 +135,9 @@ class ServoDriver(ServoCalc):
         self.P = self.params['P'] if P is None else P
         self.D = self.params['D'] if D is None else D
 
+        self.target_angle = None
+        self.target_pulse = None
+
     def set_target_angle(self, angle):
 
         if angle<self.minlim:
@@ -163,18 +166,21 @@ class ServoDriver(ServoCalc):
 
         self.speed = self.P * dangle - self.D * self.speed
 
-    def report(self):
+    def report(self, show=False):
 
-        reportlist = [('Name', self.name),
-                      ('Angle', self.angle),
-                      ('Target angle', self.target_angle),
-                      ('Speed', self.speed),
-                      ('Speed int', self.speed_to_int()),
-                      ('Pulse', self.angle_to_pulse()),
-                      ('Target pulse', self.target_pulse)]
+        reportlist = {'Name': self.name,
+                      'Angle': self.angle,
+                      'Target angle': self.target_angle,
+                      'Speed': self.speed,
+                      'Speed int': self.speed_to_int(),
+                      'Pulse': self.angle_to_pulse(),
+                      'Target pulse': self.target_pulse}
 
         fstr = '{:<25s}: {}'
-        print("SERVO REPORT")
-        for key, val in reportlist:
-            print(fstr.format(key, val))
-        print("END")
+        if show:
+            print("SERVO REPORT")
+            for key, val in reportlist.items():
+                print(fstr.format(key, val))
+            print("END")
+
+        return reportlist

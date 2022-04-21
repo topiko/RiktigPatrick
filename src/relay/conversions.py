@@ -1,6 +1,38 @@
 import struct
+import numpy as np
+import logging
 
-def depack(bytearr_):
+from remote.keyboard_remote import depack_KB
+
+LOG = logging.getLogger()
+
+def depack(bytearr_ : bytearray) -> dict:
+
+    commsel = struct.unpack('>H', b'\x00' + bytearr_[-1:])[0]
+
+    if commsel in [0, 1]:
+        LOG.debug('IMU input')
+        return 'measurements', depack_IMU(bytearr_)
+    elif commsel==128:
+        LOG.debug('External control input.')
+        return 'external_input', depack_KB(bytearr_)
+    elif commsel==129:
+        LOG.debug('External control: mode --> 0.')
+        return 'setmode-0', None
+    elif commsel==130:
+        LOG.debug('External control: mode --> 1.')
+        return 'setmode-1', None
+
+    else:
+        raise KeyError(f'Invalid commsel key: {commsel}')
+
+def depack_IMU(bytearr_):
+    """
+    Attr:
+        IMU+Servo+TIME(?) bytearray from arduino.
+    Returns:
+        [ax, ay, az], [wx, wy, wz], head_phi_pulse, head_theta_pulse, mode
+    """
 
     def unpack_to_float(b):
         #b = bytearray(valarr)
@@ -29,7 +61,7 @@ def depack(bytearr_):
     # mode:
     mode = bytearr_[28]
 
-    return ax, ay, az, wx, wy, wz, head_phi_pulse, head_theta_pulse, mode
+    return np.array([ax, ay, az]), np.array([wx, wy, wz]), head_phi_pulse, head_theta_pulse, mode
 
 def make_ctrl(i,j,k):
 
