@@ -63,19 +63,21 @@ def depack_IMU(bytearr_):
 
     return np.array([ax, ay, az]), np.array([wx, wy, wz]), head_phi_pulse, head_theta_pulse, mode
 
-def make_ctrl(i,j,k):
+def make_ctrl(select, val1, val2, val3=0, val4=0):
 
     def constrain(i):
         return int(max(-32768, min(i, 32768-1)))
 
-    def input2bytes(i,j,k):
+    def input2bytes(i,j,k,l,m):
 
-        i = constrain(i).to_bytes(1, byteorder='little')
-        j = constrain(j).to_bytes(2, byteorder='big', signed=True)
-        k = constrain(k).to_bytes(2, byteorder='big', signed=True)
-        return i+j+k
+        b = constrain(i).to_bytes(1, byteorder='little')
+        for v in [val1, val2, val3, val4]:
+            b += constrain(v).to_bytes(2, byteorder='big', signed=True)
+        #j = constrain(j).to_bytes(2, byteorder='big', signed=True)
+        #k = constrain(k).to_bytes(2, byteorder='big', signed=True)
+        return b #i+j+k
 
-    return input2bytes(i,j,k)
+    return input2bytes(select,val1,val2,val3, val4)
 
 
 
