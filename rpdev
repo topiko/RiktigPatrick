@@ -7,6 +7,14 @@ stuff "vim^M"
 screen -t PYTHON 2
 stuff "conda activate rp^M"
 stuff "cd `pwd`/src/^M"
+screen -t SERVER 3
+stuff "conda activate rp^M"
+stuff "cd `pwd`/src/^M"
+stuff "python main.py^M"
+screen -t CONTROL 4
+stuff "conda activate rp^M"
+stuff "cd `pwd`/src/^M"
+stuff "python remote/keyboard_remote.py"
 # split -v
 select VIM
 focus
