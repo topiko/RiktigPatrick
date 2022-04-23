@@ -3,7 +3,7 @@ import socket
 
 from smbus2 import SMBus, i2c_msg
 
-NBYTESI2C = 29
+NBYTESI2C = 33
 I2C_SLAVE_ADDRESS = 11
 HOST = socket.gethostbyname('topikone.local') #'192.168.0.45'
 PORT = 1024
@@ -28,36 +28,36 @@ with SMBus(1) as I2Cbus:
     i = 0
     while True:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            print(f'Attempting to connect {HOST}:{PORT}')
+            print(f'Attempting to connect {HOST}:{PORT} press "Ctrl+C" --> quit')
             s.connect((HOST, PORT))
             t0 = time.time()
             while True:
-                try:
-                    statebytes = read_arduino(I2Cbus)
+                statebytes = read_arduino(I2Cbus)
 
-                    nsent = s.send(statebytes, NBYTESI2C+1) # There is a ending byte?
+                nsent = s.send(statebytes, NBYTESI2C+1) # There is a ending byte?
 
-                    if nsent==NBYTESI2C:
-                        #ctrl_input = bytearray([])
+                if nsent==NBYTESI2C:
+                    # Wait for control input:
+                    ctrl_input = s.recv(10)
 
-                        # Wait for the full ctrl_input to be received:
-                        ctrl_input = s.recv(9)
-                        #while len(ctrl_input) != 5:
-                        #    ctrl_input += s.recv(5)
+                    #ctrl_input = bytearray([])
+                    #while len(ctrl_input)<9:
+                    #    ctrl_input += s.recv(10)
+                    #    print(len(ctrl_input))
 
-                        # Write it to arduino:
-                        write_arduino(I2Cbus, ctrl_input)
-                    else:
-                        raise ValueError(f'Incorrect number of bytes sent: {nsent} != {NBYTESI2C}')
-                except KeyboardInterrupt:
-                    break
+                    # Write it to arduino:
+                    write_arduino(I2Cbus, ctrl_input)
+                else:
+                    raise ValueError(f'Incorrect number of bytes sent: {nsent} != {NBYTESI2C}')
 
                 i += 1
-            t1 = time.time()
+                if i%100==0:
+                    t1 = time.time()
+                    print('Period: {:.3f} ms'.format((t1-t0)/i*1000))
+
 
         #s.send(b"")
 
-print('Period: {:.3f} ms'.format((t1-t0)/i*1000))
 
 
 

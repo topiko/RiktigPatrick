@@ -34,12 +34,13 @@ struct ServoCtrlStruct {
 
 
 struct StateStruct {
-  float accel[3];            // 4*3 = 12
+  float accel[3];             // 4*3 = 12
   float w[3];                 // 12
   uint16_t servopos[NSERVOS]; // 2*2 = 4
+  uint32_t readtime;          // 4			
   uint8_t mode;               // 1
                               //------
-                              // 29
+                              // 33
 };
 
 StateStruct state;
@@ -192,7 +193,6 @@ void runServo(ServoCtrlStruct *servo){
     
     updatePos = constrain(updatePos, -servo->maxChange, servo->maxChange);
     if (abs(updatePos)>0){ 
-      if (mode != 0) { 
         if (servoreported){
           Serial.print("Updating servo : "); 
           Serial.println(servo->idx);
@@ -213,12 +213,11 @@ void runServo(ServoCtrlStruct *servo){
         // Write the new servo pos to state struct:
         state.servopos[servo->idx] = servo->pos;
       
-        // Update the servo pos:
-        servo->curservo.writeMicroseconds(servo->pos); 
-        
+        // Update the servo pos (Only if not in failsafe):
+        if (mode != 0) servo->curservo.writeMicroseconds(servo->pos); 
+
         // Store the update time: (Risk of overflow in??)
         servo->prevUpdate = millis();
-      }
     }
   }
 }
@@ -285,17 +284,18 @@ void loop(){
   // Get acceleration:
   while (IMU.accelerationAvailable()){
     IMU.readAcceleration(x, y, z);
-    state.accel[0] = x;
+    state.accel[0] = z;
     state.accel[1] = y;
-    state.accel[2] = z;
+    state.accel[2] = x;
+    state.readtime = micros();
   }
 
   // Get gyro:
   while (IMU.gyroscopeAvailable()){
     IMU.readGyroscope(wx, wy, wz);
-    state.w[0] = wx;
+    state.w[0] = wz;
     state.w[1] = wy;
-    state.w[2] = wz;
+    state.w[2] = wx;
   }
 
   
