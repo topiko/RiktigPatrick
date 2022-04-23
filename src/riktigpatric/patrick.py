@@ -6,20 +6,18 @@ import time
 import logging
 
 import numpy as np
+import pandas as pd
 
 from riktigpatric.servo import Servo
 from relay.conversions import make_ctrl
 from relay.conversions import depack
 from filters.mahony import Mahony
-from typing import Union
 
-P = 5; D=0;
 
 LOG = logging.getLogger()
 
-COMMPERIOD = 20e-3
 
-SPEEDSCALE = 4
+SPEEDSCALE = 5
 MINTHETA = -28
 MAXTHETA = 50
 MINPHI = -40
@@ -31,7 +29,7 @@ htheta_params = {'name':'head_theta',
                  'maxlim': MAXTHETA,
                  'idx':1,
                  'a':-15,
-                 'b':1670,
+                 'b':1611,
                  }
 
 hphi_params = {'name':'head_phi',
@@ -40,7 +38,7 @@ hphi_params = {'name':'head_phi',
                'maxlim': MAXPHI,
                'idx':0,
                'a': -13,
-               'b':1600,
+               'b':1664,
                }
 
 
@@ -97,15 +95,19 @@ class RPHead():
     def pulse_theta(self, pulse):
         self.thetaservo.pulse = pulse
 
-    def get_ctrl(self, phispeed=None, thetaspeed=None):
-        phispeed = self.phiservo.speed2int()
-        thetaspeed = self.thetaservo.speed2int()
+    def get_ctrl(self, deltaT=None, phispeed=None, thetaspeed=None):
+        phispeed = self.phiservo.speed2int(deltaT)
+        thetaspeed = self.thetaservo.speed2int(deltaT)
         return make_ctrl(16, phispeed, thetaspeed)
 
+    @property
     def asarray(self):
         return np.concatenate((self.phiservo.asarray,
                                self.thetaservo.asarray))
 
+    @property
+    def arrayheader(self):
+        return self.phiservo.arrayheader + self.thetaservo.arrayheader
 
     def __repr__(self):
         add = '  '
@@ -133,15 +135,40 @@ class RPatrick():
         self._target_mode = 0
         self._count = 0
         self._mode = 0
+        self.mytime = time.time()
 
+
+        self._n_collect = 1000
+        if self._n_collect > -1:
+            self.df = pd.DataFrame(data=np.zeros((self._n_collect, len(self.arrayheader))),
+                                columns=self.arrayheader)
 
     def __repr__(self):
         add = '  '
         repr_  = 'RiktigPatrick:\n'
         for k,v in self.state.items():
+            if k=='head': continue
             repr_ += f'{add}{k} : {v}\n'
         repr_ += self.head.__repr__().replace('\n', f'\n{add}')
         return repr_
+
+    @property
+    def asarray(self):
+        return np.concatenate((np.array([self.rptime, self.mytime]),
+                               self.imu_a,
+                               self.imu_w,
+                               self.rpy,
+                               self.head.asarray))
+
+    @property
+    def arrayheader(self):
+        xyz = 'xyz'
+        timehead = ['rptime', 'mytime']
+        ahead = [f'a_{k}' for k in xyz]
+        whead = [f'w_{k}' for k in xyz]
+        rpyhead = ['roll', 'pitch', 'yaw']
+
+        return timehead + ahead + whead + rpyhead + self.head.arrayheader
 
     @property
     def state(self):
@@ -169,21 +196,34 @@ class RPatrick():
                               self.dt)
             self.rpy = self._ahrs.eul.copy()
             self._send_control = True
+            self.mytime = time.time()
+
+            if self._n_collect > -1:
+                self.df.loc[self._count, :] = self.asarray
+
             self._count += 1
+
         elif key=='external_input':
             LOG.info(f'External input : phi = {data[0]}, theta = {data[1]}')
             self.head.target_phi, self.head.target_theta = data
             self._send_control = False
         elif key=='setmode-0':
-            self._target_mode = 0
+            self._mode = 0
         elif key=='setmode-1':
-            self._target_mode = 1
+            self._mode = 1
         else:
             raise KeyError(f'Invalid key "{key}" to update state.')
 
+        # TESTING AREA
+        # ======================
         if self._count%100 == 0:
             for s in self.__repr__().split('\n'): LOG.info(s)
 
+        if self._count==self._n_collect:
+            self._count = 0
+            print(self.df.head())
+            self.df.to_hdf('data/rp.hdf5', key='data')
+        # ======================
 
     def get_ctrl(self):
 
@@ -203,9 +243,11 @@ class RPatrick():
             return make_ctrl(self._mode, 0, 0)
 
 
-        self.head.target_phi = -self.rpy[0]
-        self.head.target_theta = -self.rpy[1]
-        cmd = self.head.get_ctrl()
+        # TODO: implement the controls...
+        #self.head.target_phi = -self.rpy[0]
+        #self.head.target_theta = -self.rpy[1]
+        deltaT = time.time() - self.mytime
+        cmd = self.head.get_ctrl(deltaT)
         LOG.debug('Control input: ')
         return cmd
 
