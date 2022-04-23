@@ -28,6 +28,7 @@ class Servo():
         self._pulse = None
         self._target_pulse = None
         self._speed = None
+        self._deltaT = None
         self.fac = 1 if self.a > 0 else -1 # If negative slope we need to send negative value.
 
     def pulse2angle(self, pulse):
@@ -64,14 +65,31 @@ class Servo():
         return np.array([self.speed, self.target_angle, self.angle, self.target_pulse, self.pulse])
 
     @property
+    def arrayheader(self):
+        keys = ['speed', 'target_angle', 'angle', 'target_pulse', 'pulse']
+        return [f'{self.name}_{k}' for k in keys]
+
+    @property
     def speed(self) -> float:
         "[deg/s]"
         LOG.debug(f'{self.name} speed: {self.target_angle} - {self.angle}')
+
         # TODO: fix some nice speed update here:
         if any(a is None for a in (self.target_angle, self.angle)):
             return None
-        dangle = self.target_angle - self.angle
-        return dangle
+
+        try:
+            add_angle =  self._speed*self._deltaT
+        except TypeError:
+            add_angle = 0
+
+        dangle = self.target_angle - (self.angle + add_angle)
+
+        sign = np.sign(dangle)
+        self._speed = sign*dangle**2
+
+
+        return self._speed # dangle**2 / 10
 
     @property
     def angle(self) -> float:
@@ -124,7 +142,7 @@ class Servo():
         self._target_pulse = self.angle2pulse(angle_)
         self._target_angle = angle_
 
-    def speed2int(self, speed=None):
+    def speed2int(self, deltaT=None, speed=None):
         """
         Comver current speed to value sent to arduino.
         Attr:
@@ -133,17 +151,23 @@ class Servo():
             speed_int : fraction of speed to maxspeed * 2**15.
         """
 
-        if speed is None: speed = self.speed
+        self._deltaT = deltaT
+
+        if speed is None:
+            speed = self.speed
+        if speed is None:
+            speed = 0
 
         speed_frac = (speed / self.maxspeed)
         if abs(speed_frac)>1:
-            LOG.warning('Requesting larger speed than available.')
-            if   speed_frac < -1: speed_frac = -1
-            elif speed_frac >  1: speed_frac =  1
+            LOG.warning(f'{self.name} requesting larger speed ({speed} deg/s) than available {self.maxspeed} deg/s.')
+            speed_frac = np.clip(speed_frac, -1, 1)
+            #if   speed_frac < -1: speed_frac = -1
+            #elif speed_frac >  1: speed_frac =  1
 
-        speed_int = self.fac * ( speed / self.maxspeed ) * 32768 # This is then sent to arduino.
+        speed_int = int(self.fac * speed_frac * 32768) # This is then sent to arduino.
 
-        return int(speed_int)
+        return speed_int
 
     @property
     def init_dict(self):
