@@ -1,72 +1,130 @@
+import logging
+
 import numpy as np
 
-class ServoCalc():
+LOG = logging.getLogger()
 
-    def __init__(self, params):
-        """
-        Attr:
-            params : Either dict of params or path to params file. Check params below.
-        """
+class Servo():
 
-        if isinstance(params, str):
-            params = np.load(params + 'npy').item()
-        elif isinstance(params, dict):
-            pass
-        else:
-            raise TypeError('Params need to be either path to servo params file. Or params dict.')
+    def __init__(self,
+                 name : str,
+                 max_speed : float,
+                 minlim : float,
+                 maxlim : float,
+                 idx : int,
+                 a : float,
+                 b: float):
 
-        self.params = params
-        self.name = params['name']
-        self.speed = 0
-        self.maxspeed = params['max_speed']
-        self.minlim = params['minlim']
-        self.maxlim = params['maxlim']
-        self.idx = params['idx']
+        self.name = name
+        self.maxspeed = max_speed
+        self.minlim = minlim
+        self.maxlim = maxlim
+        self.idx = idx
 
-        self.a = params['a']
-        self.b = params['b']
-        self.angle = self.b
-
-        self.showwarning = False
+        self.a = a
+        self.b = b
+        self._angle = None
+        self._target_angle = None
+        self._pulse = None
+        self._target_pulse = None
+        self._speed = None
         self.fac = 1 if self.a > 0 else -1 # If negative slope we need to send negative value.
 
-    def set_speed(self, speed):
-        """
-        Attr:
-            speed : [deg/sec]
-        """
-        self.speed=speed
+    def pulse2angle(self, pulse):
+        "pulse [ms] to [deg]"
+        LOG.debug(f'{self.name} pulse2angle {pulse}-->angle')
+        if pulse is None:
+            return None
+        return (pulse - self.b)/self.a
 
-    def get_speed(self):
-        """
-        Return:
-            speed : [deg/sec]
-        """
-        return self.speed
+    def angle2pulse(self, angle):
+        "[deg] to pulse [ms]"
+        LOG.debug(f'{self.name} angle2pulse {angle}-->pulse')
+        if angle is None:
+            return None
+        return int(self.a * angle + self.b)
 
-    def get_angle(self):
-        """
-        Return:
-            angle : deg
-        """
-        return self.angle
+    @property
+    def state(self):
+        return {'name': self.name,
+                'idx': self.idx,
+                'minlim': self.minlim,
+                'maxlim':self.maxlim,
+                'speed':self.speed,
+                'target_angle':self.target_angle,
+                'angle':self.angle,
+                'target_pulse':self.target_pulse,
+                'pulse':self.pulse}
 
-    def set_angle(self, val, key='pulse'):
-        """
-        """
-        if key=='pulse':
-            self.angle = (val - self.b)/self.a
-        elif key=='deg':
-            self.angle = val
-        else:
-            raise KeyError('Invalid key: {}'.format(key))
+    def __repr__(self):
+        return '\n'.join([f'{k} : {v}' for k,v in self.state.items()])
 
-        return self.angle
+    @property
+    def asarray(self):
+        return np.array([self.speed, self.target_angle, self.angle, self.target_pulse, self.pulse])
+
+    @property
+    def speed(self) -> float:
+        "[deg/s]"
+        LOG.debug(f'{self.name} speed: {self.target_angle} - {self.angle}')
+        # TODO: fix some nice speed update here:
+        if any(a is None for a in (self.target_angle, self.angle)):
+            return None
+        dangle = self.target_angle - self.angle
+        return dangle
+
+    @property
+    def angle(self) -> float:
+        "[deg]"
+        return self._angle
+
+    @property
+    def pulse(self) -> float:
+        "[ms]"
+        return self._pulse
+
+    @pulse.setter
+    def pulse(self, pulse) -> None:
+        "[ms]"
+        LOG.debug(f'{self.name} pulse: {self.pulse} --> {pulse}')
+        self._pulse = pulse
+        self._angle = self.pulse2angle(pulse)
+
+    @property
+    def target_pulse(self) -> float:
+        "[ms]"
+        return self._target_pulse
+
+    @target_pulse.setter
+    def target_pulse(self, pulse) -> None:
+        "[ms]"
+        pulse = int(pulse)
+        LOG.debug(f'{self.name} target_pulse: {self.target_pulse} --> {pulse}')
+        self._target_angle = self.pulse2angle(pulse)
+        self._target_pulse = pulse
+
+    @property
+    def target_angle(self) -> float:
+        "[deg]"
+        return self._target_angle
+
+    @target_angle.setter
+    def target_angle(self, angle) -> None:
+        "[deg]"
+        LOG.debug(f'{self.name} target_angle: {self.target_angle} --> {angle}')
+        if not np.isfinite(angle):
+            LOG.warning(f'Infinity/NaN encountered in setting angle for {self.name}')
+            return
+
+        angle_ = np.clip(angle, self.minlim, self.maxlim)
+        if not np.isclose(angle, angle_):
+            LOG.warning(f'Angle ({angle}) out of range [{self.minlim}, {self.maxlim}] for {self.name}')
 
 
+        self._target_pulse = self.angle2pulse(angle_)
+        self._target_angle = angle_
 
-
-    def speed_to_int(self, speed=None):
+    def speed2int(self, speed=None):
         """
         Comver current speed to value sent to arduino.
         Attr:
@@ -79,7 +137,7 @@ class ServoCalc():
 
         speed_frac = (speed / self.maxspeed)
         if abs(speed_frac)>1:
-            if self.showwarning: print('WARNING: requesting larger speed than available.')
+            LOG.warning('Requesting larger speed than available.')
             if   speed_frac < -1: speed_frac = -1
             elif speed_frac >  1: speed_frac =  1
 
@@ -87,22 +145,14 @@ class ServoCalc():
 
         return int(speed_int)
 
-    def angle_to_pulse(self, angle=None):
-
-        if angle is None: angle = self.angle
-
-        return int(self.a * angle + self.b)
-
-    def pulse_to_angle(self, pulse):
-        return (pulse - self.b)/self.a
-
-    def get_init_dict(self):
+    @property
+    def init_dict(self):
         """Produce set of commands setn to arduino to init the servo params."""
 
         init_dict = {}
 
-        lim1 = self.angle_to_pulse(self.minlim)
-        lim2 = self.angle_to_pulse(self.maxlim)
+        lim1 = self.angle2pulse(self.minlim)
+        lim2 = self.angle2pulse(self.maxlim)
 
         if self.fac == 1:
             minlim = lim1
@@ -113,12 +163,12 @@ class ServoCalc():
 
 
         init_dict['minlim'] = (64,
-                              self.idx,
-                              minlim)
+                               self.idx,
+                               minlim)
 
         init_dict['maxlim'] = (65,
-                              self.idx,
-                              maxlim)
+                               self.idx,
+                               maxlim)
 
         maxspeed_pulse = abs(int(self.a * self.maxspeed))
         init_dict['maxspeed'] = (66,
@@ -126,61 +176,4 @@ class ServoCalc():
                                  maxspeed_pulse)
         return init_dict
 
-class ServoDriver(ServoCalc):
 
-    def __init__(self, params, P=None, D=None):
-
-        super().__init__(params);
-
-        self.P = self.params['P'] if P is None else P
-        self.D = self.params['D'] if D is None else D
-
-        self.target_angle = None
-        self.target_pulse = None
-
-    def set_target_angle(self, angle):
-
-        if angle<self.minlim:
-            print('WARNING: setting anlgle outside boundaries: {:.2f}<{:.2f}(min)'.format(angle, self.minlim))
-        if angle>self.maxlim:
-            print('WARNING: setting anlgle outside boundaries: {:.2f}>{:.2f}(max)'.format(angle, self.maxlim))
-        self.target_angle = angle
-        self.target_pulse = self.angle_to_pulse(angle=angle)
-
-    def set_target_pulse(self, pulse):
-
-        self.target_pulse = pulse
-        self.set_target_angle(self.pulse_to_angle(pulse))
-
-    def update_speed(self, target_angle=None, pulse=None):
-
-        if target_angle is not None:
-            self.set_target_angle(target_angle)
-        if pulse is not None:
-            self.set_angle(pulse, key='pulse')
-
-        dangle = self.target_angle - self.angle
-
-        # TODO: this is incorrect and should be replaced with accelaration
-        # based updates on the velocity.
-
-        self.speed = self.P * dangle - self.D * self.speed
-
-    def report(self, show=False):
-
-        reportlist = {'Name': self.name,
-                      'Angle': self.angle,
-                      'Target angle': self.target_angle,
-                      'Speed': self.speed,
-                      'Speed int': self.speed_to_int(),
-                      'Pulse': self.angle_to_pulse(),
-                      'Target pulse': self.target_pulse}
-
-        fstr = '{:<25s}: {}'
-        if show:
-            print("SERVO REPORT")
-            for key, val in reportlist.items():
-                print(fstr.format(key, val))
-            print("END")
-
-        return reportlist

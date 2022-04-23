@@ -3,12 +3,14 @@ This is the module that contains RiktigPatrick!
 """
 
 import time
-import numpy as np
 import logging
 
-from riktigpatric.servo import ServoDriver
+import numpy as np
+
+from riktigpatric.servo import Servo
 from relay.conversions import make_ctrl
 from relay.conversions import depack
+from filters.mahony import Mahony
 from typing import Union
 
 P = 5; D=0;
@@ -17,9 +19,9 @@ LOG = logging.getLogger()
 
 COMMPERIOD = 20e-3
 
-SPEEDSCALE = 1
-MINTHETA = -50
-MAXTHETA = 28
+SPEEDSCALE = 4
+MINTHETA = -28
+MAXTHETA = 50
 MINPHI = -40
 MAXPHI = 40
 
@@ -28,220 +30,184 @@ htheta_params = {'name':'head_theta',
                  'minlim': MINTHETA,
                  'maxlim': MAXTHETA,
                  'idx':1,
-                 'a':15,
-                 'b':1500,
-                 'P':P,
-                 'D':D
+                 'a':-15,
+                 'b':1670,
                  }
 
-hphi_params = {'name':'head_theta',
+hphi_params = {'name':'head_phi',
                'max_speed': (MAXPHI-MINPHI)*SPEEDSCALE, #[deg/sec]
                'minlim': MINPHI,
                'maxlim': MAXPHI,
                'idx':0,
                'a': -13,
-               'b':1500,
-               'P':P,
-               'D':D
+               'b':1600,
                }
 
 
+class RPHead():
 
-class Head():
-
-    def __init__(self, saverun=False):
-        self.headphi = ServoDriver(hphi_params)
-        self.headtheta = ServoDriver(htheta_params)
-
-        self.updateperiod = COMMPERIOD
-        self.prevupdate = 0
-        self.saverun = saverun
-        self.servomode = 'speed'
-
-        self._phipulse = None
-        self._thetapulse = None
-
-        if self.saverun:
-            self.store_arr = np.zeros((1000, 8))
-            self.nstore = 0
-            self.store_vec = np.zeros(8)
-
-        self.servo_init = 0
-        self.servosinited = False
-        self.set_speeds(0, 0)
-
-    @property
-    def initlists(self):
-        cmds_theta = [make_ctrl(*t) for _, t in self.headtheta.get_init_dict().items()]
-        cmds_phi = [make_ctrl(*t) for _, t in self.headphi.get_init_dict().items()]
-
-        return cmds_phi + cmds_theta
-
-
-    @property
-    def servomode(self):
-        return self._servomode
-
-    @servomode.setter
-    def servomode(self, mode : str):
-        if mode in ['speed', 'pos']:
-            self._servomode=mode
-        else:
-            raise KeyError('Invalid servomode key')
-
-    def report(self):
-        print('Head report:')
-        self.headphi.report()
-        self.headtheta.report()
-        print()
-
-
-    def get_ctrl(self):
-        """
-        Actions performed at each loop iter.
-        """
-
-        if self.servomode == 'pos':
-            self.headphi.update_speed()
-            self.headtheta.update_speed()
-
-        phi_speed_int = self.headphi.speed_to_int()
-        theta_speed_int = self.headtheta.speed_to_int()
-
-        ctrl = make_ctrl(16, phi_speed_int, theta_speed_int)
-
-
-        if self.saverun:
-            self.store_state(1) #sentcmd)
-
-        return ctrl
-
-
-    def set_speeds(self, speedphi, speedtheta):
-        self.headphi.set_speed(speedphi)
-        self.headtheta.set_speed(speedtheta)
-
-    def set_targets(self, targetphi, targettheta):
-        self.headphi.set_target_angle(targetphi)
-        self.headtheta.set_target_angle(targettheta)
-
-
-    @property
-    def servopulses(self):
-        return self._phipulse, self._thetapulse
-
-    @servopulses.setter
-    def servopulses(self, pulses):
-        """
-        Set the current pulses read from
-        """
-        self._phipulse = pulses[0]
-        self._thetapulse = pulses[1]
-        self.headphi.set_angle(pulses[0], key='pulse')
-        self.headtheta.set_angle(pulses[1], key='pulse')
+    def __init__(self):
+        self.phiservo = Servo(**hphi_params)
+        self.thetaservo = Servo(**htheta_params)
+        self._servo_init = 0
+        self._servosinited = False
 
     @property
     def state(self):
-        return {'servomode': self.servomode,
-                'phiservo':self.headphi.report(),
-                'thetaservo':self.headtheta.report(),
-               }
+        return {'phiservo':self.phiservo.state,
+                'thetaservo':self.thetaservo.state,
+                'servo_init':self._servo_init}
+
+    @property
+    def servo_init_cmds(self) -> list:
+        cmd_tuples = list(self.thetaservo.init_dict.values()) \
+                + list(self.phiservo.init_dict.values())
+
+        return [make_ctrl(*t) for t in cmd_tuples]
+
+    @property
+    def target_phi(self):
+        return self.phiservo.target_angle
+
+    @target_phi.setter
+    def target_phi(self, angle):
+        self.phiservo.target_angle = angle
+
+    @property
+    def target_theta(self):
+        return self.thetaservo.target_angle
+
+    @target_theta.setter
+    def target_theta(self, angle):
+        self.thetaservo.target_angle = angle
+
+    @property
+    def pulse_phi(self):
+        return self.phiservo.pulse
+
+    @pulse_phi.setter
+    def pulse_phi(self, pulse):
+        self.phiservo.pulse = pulse
+
+    @property
+    def pulse_theta(self):
+        return self.thetaservo.pulse
+
+    @pulse_theta.setter
+    def pulse_theta(self, pulse):
+        self.thetaservo.pulse = pulse
+
+    def get_ctrl(self, phispeed=None, thetaspeed=None):
+        phispeed = self.phiservo.speed2int()
+        thetaspeed = self.thetaservo.speed2int()
+        return make_ctrl(16, phispeed, thetaspeed)
+
+    def asarray(self):
+        return np.concatenate((self.phiservo.asarray,
+                               self.thetaservo.asarray))
 
 
-    def store_state(self, sentcmd, save=False):
-
-        if self.nstore==len(self.store_arr)-1:
-            save = True
-
-
-        self.store_vec[0] = time.time()
-        self.store_vec[1] = sentcmd
-        self.store_vec[2] = self.headphi.angle
-        self.store_vec[3] = self.headphi.target_angle
-        self.store_vec[4] = self.headphi.speed
-        self.store_vec[5] = self.headtheta.angle
-        self.store_vec[6] = self.headtheta.target_angle
-        self.store_vec[7] = self.headtheta.speed
-
-        self.store_arr[self.nstore, :] = self.store_vec
-
-        self.nstore += 1
-
-        if save:
-            np.save('rundat/head_dat.npy', self.store_arr)
-            self.nstore=0
-
-
-
+    def __repr__(self):
+        add = '  '
+        repr_  = 'Head:\n'
+        repr_ += f'Phiservo\n'
+        repr_ += self.phiservo.__repr__().replace('\n', f'\n{add*2}')
+        repr_ += f'\nThetaservo\n'
+        repr_ += self.thetaservo.__repr__().replace('\n', f'\n{add*2}')
+        repr_ += '\n'
+        return repr_
 
 class RPatrick():
 
-    def __init__(self, save=False):
+    def __init__(self):
 
-        self.head = Head(saverun=save)
-        self._state = {}
-        self._send_control = False
+        self.head = RPHead()
+        self._ahrs = Mahony()
+
+        self.imu_a = np.zeros(3)
+        self.imu_w = np.zeros(3)
+        self.rpy  = np.zeros(3) # ahrs roll, pitch, yaw
+        self.dt = 0
+        self.rptime = 0
+        self.rpmode = 0
+        self._target_mode = 0
+        self._count = 0
         self._mode = 0
+
+
+    def __repr__(self):
+        add = '  '
+        repr_  = 'RiktigPatrick:\n'
+        for k,v in self.state.items():
+            repr_ += f'{add}{k} : {v}\n'
+        repr_ += self.head.__repr__().replace('\n', f'\n{add}')
+        return repr_
+
     @property
     def state(self):
-        return self._state
-
+        return {'a':self.imu_a,
+                'w':self.imu_w,
+                'rpy':self.rpy,
+                'rptime':self.rptime,
+                'rpmode':self.rpmode,
+                'head':self.head.state}
 
     @state.setter
-    def state(self, data = Union[bytearray, np.ndarray, dict]):
+    def state(self, data : bytearray):
 
         key, data = depack(data)
-        if key=='measurements':
-            avec, wvec, head_phi_p, head_theta_p, mode = data
-            self._state['a'] = avec
-            self._state['w'] = wvec
-            self.head.servopulses = (head_phi_p, head_theta_p)
-            self._state['head'] = self.head.state
-            self._state['mode'] = mode
-
+        if key == 'measurements':
+            LOG.debug(data)
+            rptime, self.imu_a, \
+                    self.imu_w, self.head.pulse_phi, \
+                    self.head.pulse_theta, self.rpmode = data
+            rptime /= 1e6
+            self.dt = min(.1, rptime - self.rptime)
+            self.rptime = rptime
+            self._ahrs.update(self.imu_a/np.linalg.norm(self.imu_a),
+                              self.imu_w/180*np.pi,
+                              self.dt)
+            self.rpy = self._ahrs.eul.copy()
             self._send_control = True
-
+            self._count += 1
         elif key=='external_input':
-            self.head.set_speeds(*data)
-            self._state['head'] = self.head.state
+            LOG.info(f'External input : phi = {data[0]}, theta = {data[1]}')
+            self.head.target_phi, self.head.target_theta = data
             self._send_control = False
-            self.__repr__()
         elif key=='setmode-0':
-            self._mode = 0
+            self._target_mode = 0
         elif key=='setmode-1':
-            self._mode = 1
+            self._target_mode = 1
         else:
             raise KeyError(f'Invalid key "{key}" to update state.')
 
-    def __repr__(self):
-        def print_dict(d, add=''):
-            for k,v in d.items():
-                if isinstance(v, dict):
-                    LOG.info(f'{add}{k}')
-                    print_dict(v, add + '  ')
-                else:
-                    LOG.info(f'{add}{k} : {v}')
-        LOG.info('Patrick state:')
-        print_dict(self._state)
+        if self._count%100 == 0:
+            for s in self.__repr__().split('\n'): LOG.info(s)
 
-    def get_ctrl(self) -> bytearray:
 
-        if self._send_control:
-            if not self.head.servosinited:
-                LOG.warning(f'Servos not inited - curinit: {self.head.servo_init}...')
-                cmd = self.head.initlists[self.head.servo_init]
-                self.head.servo_init += 1
-                if self.head.servo_init == len(self.head.initlists):
-                    self.head.servosinited = True
-                return cmd
+    def get_ctrl(self):
 
-            if self._mode != self.state['mode']:
-                return make_ctrl(self._mode, 0, 0)
-
-            cmd = self.head.get_ctrl()
-            LOG.debug('Control input')
-            return cmd
-        else:
+        if not self._send_control:
             return b''
+
+        if not self.head._servosinited:
+            LOG.warning(f'Servos not inited - curinit: {self.head._servo_init}...')
+            cmd = self.head.servo_init_cmds[self.head._servo_init]
+            self.head._servo_init += 1
+            if self.head._servo_init == len(self.head.servo_init_cmds):
+                self.head._servosinited = True
+            return cmd
+
+        if self._mode != self.rpmode:
+            LOG.info('Update operation mode to {self._mode}')
+            return make_ctrl(self._mode, 0, 0)
+
+
+        self.head.target_phi = -self.rpy[0]
+        self.head.target_theta = -self.rpy[1]
+        cmd = self.head.get_ctrl()
+        LOG.debug('Control input: ')
+        return cmd
+
 
 
