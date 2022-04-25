@@ -25,6 +25,7 @@ class Servo():
         self.b = b
         self._angle = None
         self._target_angle = None
+        self.target_angle = 0
         self._pulse = None
         self._target_pulse = None
         self._speed = None
