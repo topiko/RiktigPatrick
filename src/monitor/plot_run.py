@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-plt.style.use('pltstyle.mplstyle')
+plt.style.use('monitor/pltstyle.mplstyle')
 FIGS = plt.rcParams["figure.figsize"]
 
 if __name__ == '__main__':
