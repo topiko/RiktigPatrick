@@ -2,26 +2,73 @@ import struct
 import numpy as np
 import logging
 
+from typing import Union
+
 from remote.keyboard_remote import depack_KB
 
 LOG = logging.getLogger()
 
-def depack(bytearr_ : bytearray) -> dict:
+bytes_d = {'h':2, 'f':4}
+
+def np2bytes(arr : np.ndarray,
+             fmt : Union[str, list[str], tuple[str]]) -> bytearray:
+
+    if arr.ndim==1:
+        arr = arr.reshape(1, -1)
+
+    if isinstance(fmt, str):
+        fmt = [fmt]*arr.shape[1]
+    else:
+        if len(fmt) != arr.shape[1]:
+            raise KeyError('Format and array dims do not match!')
+
+    nrows, ncols = arr.shape
+    bytes_ = struct.pack('h', nrows) + struct.pack('h', ncols)
+    for i in range(nrows):
+        for j, fmt_ in zip(range(ncols), fmt):
+            bytes_ += struct.pack(fmt_, arr[i,j])
+
+    return bytes_
+
+def bytes2np(bytearray_ : bytearray,
+             fmt : Union[str, list[str], tuple[str]]) -> np.ndarray:
+
+    nrows = struct.unpack('h', bytearray_[:2])
+    ncols = struct.unpack('h', bytearray_[2:4])
+
+    if isinstance(fmt, str):
+        fmt = [fmt]*ncols
+    else:
+        if len(fmt) != ncols:
+            raise KeyError('Format and array dims do not match!')
+
+
+    arr = np.empty((nrows, ncols))
+    for i in range(nrows):
+        for j, fmt_ in zip(range(ncols), fmt):
+            start = i*nrows + idx
+            end = start + bytes_d[fmt_]
+            val = struct.unpack(fmt_, bytearray_[start:end])
+            arr[i,j] = float(val)
+
+    return arr
+
+def depack(bytearr_ : bytearray) -> tuple[str, 'data', bool]:
 
     commsel = struct.unpack('>H', b'\x00' + bytearr_[-1:])[0]
 
     if commsel in [0, 1]:
         LOG.debug('IMU input')
-        return 'measurements', depack_IMU(bytearr_)
+        return 'measurements', depack_IMU(bytearr_), True
     elif commsel==128:
         LOG.debug('External control input.')
-        return 'external_input', depack_KB(bytearr_)
+        return 'external_input', depack_KB(bytearr_), False
     elif commsel==129:
         LOG.debug('External control: mode --> 0.')
-        return 'setmode-0', None
+        return 'setmode-0', None, False
     elif commsel==130:
         LOG.debug('External control: mode --> 1.')
-        return 'setmode-1', None
+        return 'setmode-1', None, False
 
     else:
         raise KeyError(f'Invalid commsel key: {commsel}')
