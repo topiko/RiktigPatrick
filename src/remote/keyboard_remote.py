@@ -19,7 +19,7 @@ if __name__ == '__main__':
 
         phi, theta = 0., 0.
         exit = False
-        mode = 1
+        mode = 0
         i = 0
         try:
             while not exit:

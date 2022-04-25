@@ -2,6 +2,11 @@ import socket
 import selectors
 import types
 import logging
+import time
+import argparse
+
+from relay.conversions import depack
+from monitor.monitor import REPORTPORT, get_monitor_socket
 
 from riktigpatric.patrick import RPatrick
 
@@ -14,29 +19,17 @@ logging.basicConfig(
     ]
 )
 
-LOG = logging.Logger('rp_logger')
+LOG = logging.getLogger()
 
+# Arguments:
+parser = argparse.ArgumentParser(description='Run the base service for RiktigPatrick')
+parser.add_argument('--monitor', type=bool, default=False, help='report to monitor service.')
+args = parser.parse_args()
 
-sel = selectors.DefaultSelector()
-
-HOST = socket.gethostbyname('topikone.local') # "192.168.0.13"
-PORT = 1024
-MAXBYTES = 128
-
-lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-lsock.bind((HOST, PORT))
-lsock.listen()
-print(f'listening at: {HOST}:{PORT}')
-lsock.setblocking(False)
-sel.register(lsock, selectors.EVENT_READ, data=None)
-
-
-# Thsi is the RP!
-rp = RPatrick()
 
 def accept_wrapper(sock : socket.socket):
     conn, addr = sock.accept()
-    print(f'Accepting connection: {addr}')
+    LOG.info(f'Accepting connection: {addr}')
     conn.setblocking(False)
     data = types.SimpleNamespace(addr=addr, inb=b"", outb=b"")
     events = selectors.EVENT_READ | selectors.EVENT_WRITE
@@ -53,8 +46,12 @@ def service_connection(key, mask):
 
         if recv_data:
             # Set state and fetch control
-            rp.state = recv_data
-            data.outb = rp.get_ctrl()
+            key, depacked, resp = depack(recv_data)
+            rp.state = key, depacked
+            if resp:
+                data.outb = rp.get_ctrl()
+            else:
+                data.outb = b''
         else:
             print(f'Empty message -> closing connection {data.addr}')
             sel.unregister(sock)
@@ -63,6 +60,30 @@ def service_connection(key, mask):
         if data.outb:
             sent = sock.send(data.outb)
             data.outb = b''
+
+
+
+sel = selectors.DefaultSelector()
+
+#HOST = socket.gethostname() # "192.168.0.13"
+HOST = socket.gethostbyname('topikone.local') #'192.168.0.45'
+PORT = 1024
+MAXBYTES = 128
+
+lsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+lsock.bind((HOST, PORT))
+lsock.listen()
+LOG.info(f'Listening at: {HOST}:{PORT}')
+lsock.setblocking(False)
+sel.register(lsock, selectors.EVENT_READ, data=None)
+
+
+# Thsi is the RP!
+if args.monitor:
+    report_sock = get_monitor_socket(LOG)
+else:
+    report_sock = None
+rp = RPatrick(report_sock=report_sock)
 
 
 if __name__ == "__main__":
@@ -77,5 +98,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt or Exception as e:
         print('Exit', e)
     finally:
+        report_sock.send(b'')
         sel.close()
 

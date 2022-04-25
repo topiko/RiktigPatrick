@@ -28,8 +28,15 @@ with SMBus(1) as I2Cbus:
     i = 0
     while True:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            print(f'Attempting to connect {HOST}:{PORT} press "Ctrl+C" --> quit')
-            s.connect((HOST, PORT))
+            while True:
+                print(f'Attempting to connect {HOST}:{PORT} press "Ctrl+C" --> quit')
+                try:
+                    s.connect((HOST, PORT))
+                    break
+                except ConnectionRefusedError:
+                    print('Could not ocnnect retrying.')
+                    time.sleep(2)
+
             t0 = time.time()
             while True:
                 statebytes = read_arduino(I2Cbus)

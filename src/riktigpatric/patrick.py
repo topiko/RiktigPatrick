@@ -11,10 +11,11 @@ import pandas as pd
 from riktigpatric.servo import Servo
 from relay.conversions import make_ctrl
 from relay.conversions import depack
+from relay.conversions import np2bytes
 from filters.mahony import Mahony
 
 
-LOG = logging.getLogger()
+LOG = logging.getLogger('rp_logger')
 
 
 SPEEDSCALE = 5
@@ -121,7 +122,7 @@ class RPHead():
 
 class RPatrick():
 
-    def __init__(self):
+    def __init__(self, report_sock=None):
 
         self.head = RPHead()
         self._ahrs = Mahony()
@@ -136,7 +137,7 @@ class RPatrick():
         self._count = 0
         self._mode = 0
         self.mytime = time.time()
-
+        self.report_sock = report_sock
 
         self._n_collect = 1000
         if self._n_collect > -1:
@@ -170,6 +171,27 @@ class RPatrick():
 
         return timehead + ahead + whead + rpyhead + self.head.arrayheader
 
+    def send2monitor(self):
+        if self.report_sock is None:
+            return
+
+        if self._count%5==0:
+
+            arr = np.concatenate((np.array([self.rptime,
+                                            self.head.phiservo.angle,
+                                            self.head.phiservo.target_angle,
+                                            self.head.thetaservo.angle,
+                                            self.head.thetaservo.target_angle]),
+                                  self.rpy), dtype='f')
+
+
+            if arr.dtype != 'f':
+                return
+
+
+            self.report_sock.send(arr.tobytes())
+            #self.report_sock.send(np2bytes(arr, fmt='f'))
+
     @property
     def state(self):
         return {'a':self.imu_a,
@@ -180,9 +202,9 @@ class RPatrick():
                 'head':self.head.state}
 
     @state.setter
-    def state(self, data : bytearray):
+    def state(self, keydata): #data : bytearray):
 
-        key, data = depack(data)
+        key, data = keydata
         if key == 'measurements':
             LOG.debug(data)
             rptime, self.imu_a, \
@@ -195,7 +217,6 @@ class RPatrick():
                               self.imu_w/180*np.pi,
                               self.dt)
             self.rpy = self._ahrs.eul.copy()
-            self._send_control = True
             self.mytime = time.time()
 
             if self._n_collect > -1:
@@ -206,7 +227,6 @@ class RPatrick():
         elif key=='external_input':
             LOG.info(f'External input : phi = {data[0]}, theta = {data[1]}')
             self.head.target_phi, self.head.target_theta = data
-            self._send_control = False
         elif key=='setmode-0':
             self._mode = 0
         elif key=='setmode-1':
@@ -223,12 +243,13 @@ class RPatrick():
             self._count = 0
             print(self.df.head())
             self.df.to_hdf('data/rp.hdf5', key='data')
+
+        if self._count > 10:
+            self.send2monitor()
         # ======================
 
     def get_ctrl(self):
 
-        if not self._send_control:
-            return b''
 
         if not self.head._servosinited:
             LOG.warning(f'Servos not inited - curinit: {self.head._servo_init}...')
@@ -239,13 +260,13 @@ class RPatrick():
             return cmd
 
         if self._mode != self.rpmode:
-            LOG.info('Update operation mode to {self._mode}')
+            LOG.info(f'Update operation mode to {self._mode}')
             return make_ctrl(self._mode, 0, 0)
 
 
         # TODO: implement the controls...
-        #self.head.target_phi = -self.rpy[0]
-        #self.head.target_theta = -self.rpy[1]
+        self.head.target_phi = -self.rpy[0]
+        self.head.target_theta = -self.rpy[1]
         deltaT = time.time() - self.mytime
         cmd = self.head.get_ctrl(deltaT)
         LOG.debug('Control input: ')
