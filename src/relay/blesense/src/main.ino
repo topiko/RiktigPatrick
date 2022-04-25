@@ -1,6 +1,7 @@
 #include <Wire.h>
 #include <Arduino_LSM9DS1.h>
 #include <Servo.h>
+#include <AccelStepper.h>
 
 #define REFRESH_INTERVAL 3003 // KST servos operate at 333Hz --> 1/333 * 1e6
 #define SERVODISABLEPERIOD 0 // Either 0 orREFRESH_INTERVAL ? 
@@ -8,21 +9,24 @@
 #define I2C_SLAVE_ADDRESS 11 
 #define NSERVOS 2
 #define SERVOUPDATEPERIOD 20 // in ms
-#define COMMTIMEOUT 100
+#define COMMTIMEOUT 300
 #define I2CBUFFERLEN 10
+#define MOTORENABLE 5
 
 float x, y, z;
 float wx, wy, wz;
-int n;
+//int n;
 bool servoreported;
 uint32_t lastInput = 0;
-int servopins[2] = {D8, D9};
+static uint8_t servopins[2] = {D8, D9};
+static uint8_t dirpins[2] = {D5, D7};
+static uint8_t steppins[2] = {D4, D6};
 uint8_t mode = 0; // Operation mode: 0 == FAILSAFE
 bool servosattached = false;
 
 struct ServoCtrlStruct {
   int prevUpdate;
-  int speed;
+  float speed;
   int minlim;
   int maxlim;
   int idx;
@@ -32,6 +36,12 @@ struct ServoCtrlStruct {
   Servo curservo;
 };
 
+struct MotorCtrlStruct {
+  int speed;
+  int maxSpeed;
+  bool speedUpdate;
+  AccelStepper curmotor; 
+};
 
 struct StateStruct {
   float accel[3];             // 4*3 = 12
@@ -45,6 +55,7 @@ struct StateStruct {
 
 StateStruct state;
 ServoCtrlStruct servos[NSERVOS];
+MotorCtrlStruct motors[2];
 
 void setMode(short selectmode){
   
@@ -61,11 +72,13 @@ void setMode(short selectmode){
     // FAILSAFE:
     case 0: mode = 0;
             if (servosattached) detachServos();
+            disableMotors();
             //Serial.println("Entering failsafe mode.");
             break;
     // NORMAL:
     case 1: mode = 1;
             if (!servosattached) attachServos();
+            enableMotors();
             //Serial.println("Entering normal mode.");
             break;
   }
@@ -127,8 +140,10 @@ void setServoParams(int selector, short val, ServoCtrlStruct *servo){
 void setCtrlVals(short selector, short servoSpeed1, short servoSpeed2, short motorSpeed1, short motorSpeed2){
   
   switch(selector) {
-    case 16: servos[0].speed = int(servoSpeed1); 
-             servos[1].speed = int(servoSpeed2);
+    case 16: servos[0].speed = getServoSpeed(&servos[0], servoSpeed1); // int(servoSpeed1); 
+             servos[1].speed = getServoSpeed(&servos[1], servoSpeed2); // int(servoSpeed2);
+             motors[0].speed = getMotorSpeed(&motors[0], motorSpeed1); // motorSpeed1/  
+             motors[1].speed = getMotorSpeed(&motors[1], motorSpeed2); // motorSpeed1/  
 	     //Serial.println("SET SPEEDS:");
              //Serial.println(servos[0].speed);
              //Serial.println(servos[1].speed);
@@ -148,6 +163,15 @@ void attachServos(){
   }
   servosattached = true;
   Serial.println("Servos attached.");
+}
+
+void enableMotors(){
+  digitalWrite(MOTORENABLE, HIGH);
+}
+void disableMotors(){
+  digitalWrite(MOTORENABLE, LOW);
+  motors[0].speed = 0.;
+  motors[1].speed = 0.;
 }
 
 void detachServos(){
@@ -178,6 +202,43 @@ void initServos(){
 
 }
 
+void initMotors(){
+
+  for (int i=0; i<NSERVOS; i++){
+    // Pick the servo:
+    MotorCtrlStruct *motor = &motors[i];
+
+    // Initialize the various servo paramaters to some values:
+    motor->speed = 0;
+    //motor->idx = i;
+    motor->maxSpeed = 1000;
+    motor->curmotor = AccelStepper(1, steppins[i], dirpins[i]);
+    motor->curmotor.setMaxSpeed(motor->maxSpeed);
+    //motor->curmotor.setDirPin(5);
+  }
+  pinMode(OUTPUT, MOTORENABLE);
+  disableMotors();
+}
+
+
+float getServoSpeed(ServoCtrlStruct *servo, short speed){
+
+  // Compute position based on control integer:
+  float speedScale = float(speed) / 32768.;
+  return float(servo->maxSpeed * speedScale); 
+
+  //return speed_f;
+}
+	
+int getMotorSpeed(MotorCtrlStruct *motor, short speed){
+  float speedScale = float(speed) / 32768.;
+  int newSpeed = int(motor->maxSpeed * speedScale); 
+  
+  // If speed changed it needs to be updated:
+  if (newSpeed != motor->speed) motor->speedUpdate = true;
+  
+  return newSpeed;
+}
 
 void runServo(ServoCtrlStruct *servo){
   
@@ -187,9 +248,10 @@ void runServo(ServoCtrlStruct *servo){
   if (SERVOUPDATEPERIOD < sinceUpdate){
     
     // Compute position based on control integer:
-    float speedScale = float(servo->speed) / 32768.;
-    float speed = servo->maxSpeed * speedScale; 
-    int16_t updatePos = sinceUpdate * speed;
+    // MOved to getServoSpeed...
+    //float speedScale = float(servo->speed) / 32768.;
+    //float speed = servo->maxSpeed * speedScale; 
+    int16_t updatePos = sinceUpdate * servo->speed;
     
     updatePos = constrain(updatePos, -servo->maxChange, servo->maxChange);
     if (abs(updatePos)>0){ 
@@ -198,9 +260,9 @@ void runServo(ServoCtrlStruct *servo){
           Serial.println(servo->idx);
           Serial.println(sinceUpdate);
           Serial.println(servo->speed);
-          Serial.println(speedScale);
+          //Serial.println(speedScale);
           Serial.println(servo->maxSpeed);
-          Serial.println(speed);
+          //Serial.println(speed);
           Serial.println(servo->pos);
           Serial.println(updatePos);
           Serial.println("");
@@ -225,6 +287,19 @@ void runServo(ServoCtrlStruct *servo){
 void runServos(){
   // Drive allthe servos: 
   for (int i=0;i<NSERVOS;i++){runServo(&servos[i]);}
+}
+
+
+void runMotor(MotorCtrlStruct *motor){
+  if (motor->speedUpdate) {
+    motor->curmotor.setSpeed(motor->speed);
+    motor->speedUpdate=false;
+  }
+}
+
+void runMotors(){
+  for (int i=0;i<2;i++){runMotor(&motors[i]);}
+
 }
 
 void reportServo(ServoCtrlStruct *servo){
@@ -272,8 +347,9 @@ void setup()
   Serial.print(IMU.accelerationSampleRate());
   Serial.println(" Hz");
 
-  // Init servos:
+  // Init servos+motors:
   initServos();
+  initMotors();
 
 }
 
@@ -303,6 +379,7 @@ void loop(){
   runServos();
 
   //TODO: Drive motors.
+  runMotors();
   
   if ((millis() - lastInput) > COMMTIMEOUT){
     //Go to failsafe if too long since previous ctrl input.
