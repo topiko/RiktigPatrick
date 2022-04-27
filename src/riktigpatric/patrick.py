@@ -22,6 +22,7 @@ MINTHETA = -28
 MAXTHETA = 50
 MINPHI = -40
 MAXPHI = 40
+SERVOMODE='position'
 
 htheta_params = {'name':'head_theta',
                  'max_speed': (MAXTHETA - MINTHETA)*SPEEDSCALE, #[deg/sec]
@@ -30,6 +31,7 @@ htheta_params = {'name':'head_theta',
                  'idx':1,
                  'a':-15,
                  'b':1611,
+                 'operation_mode':SERVOMODE
                  }
 
 hphi_params = {'name':'head_phi',
@@ -39,6 +41,7 @@ hphi_params = {'name':'head_phi',
                'idx':0,
                'a': -13,
                'b':1664,
+               'operation_mode':SERVOMODE
                }
 
 
@@ -49,12 +52,24 @@ class RPHead():
         self.thetaservo = Servo(**htheta_params)
         self._servo_init = 0
         self._servosinited = False
+        self._servo_operation_mode = SERVOMODE
+
+    @property
+    def servo_operation_mode(self):
+        return self._servo_operation_mode
+
+    @servo_operation_mode.setter
+    def servo_operation_mode(self, mode):
+        self._servo_operation_mode = mode
+        self.phiservo.operation_mode = mode
+        self.thetaservo.operation_mode = mode
 
     @property
     def state(self):
         return {'phiservo':self.phiservo.state,
                 'thetaservo':self.thetaservo.state,
-                'servo_init':self._servo_init}
+                'servo_init':self._servo_init,
+                'servo_operation_mode':self.servo_operation_mode}
 
     @property
     def servo_init_cmds(self) -> list:
@@ -96,8 +111,14 @@ class RPHead():
         self.thetaservo.pulse = pulse
 
     def get_ctrl(self, deltaT=None, phispeed=None, thetaspeed=None):
-        phispeed = self.phiservo.speed2int(deltaT)
-        thetaspeed = self.thetaservo.speed2int(deltaT)
+
+        if self.servo_operation_mode=='position':
+            phispeed = self.phiservo.speed2int(deltaT=deltaT)
+            thetaspeed = self.thetaservo.speed2int(deltaT=deltaT)
+        elif self.servo_operation_mode=='speed':
+            phispeed = self.phiservo.speed2int(speed=phispeed)
+            thetaspeed = self.thetaservo.speed2int(speed=thetaspeed)
+
         return make_ctrl(16, phispeed, thetaspeed)
 
     @property
@@ -139,7 +160,7 @@ class RPatrick():
         self.mytime = time.time()
         self.report_sock = report_sock
 
-        self._n_collect = 100
+        self._n_collect = 1000
         if self._n_collect > -1:
             self.df = pd.DataFrame(data=np.zeros((self._n_collect, len(self.arrayheader))),
                                 columns=self.arrayheader)
@@ -215,7 +236,7 @@ class RPatrick():
 
             rptime /= 1e6
             if (rptime - self.rptime) > .1:
-                LOG.warning(f'Long break {rptime - self.rptime} s')
+                LOG.warning(f'Long break {(rptime - self.rptime)*1000:.0f} ms')
             else:
                 self.dt = rptime - self.rptime
                 # Update average on the fly
@@ -273,13 +294,11 @@ class RPatrick():
 
 
         # TODO: implement the controls...
-        LOG.info(f'Set targets t={self.rptime}')
         self.head.target_phi = (self.rptime, -self.rpy[0])
         self.head.target_theta = (self.rptime, -self.rpy[1])
 
         # TODO: think about this dt scheme a bit.
         cmd = self.head.get_ctrl(self.dt_mean)
-        LOG.debug('Control input: ')
         return cmd
 
 

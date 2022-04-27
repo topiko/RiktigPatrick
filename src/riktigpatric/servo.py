@@ -14,6 +14,7 @@ class Servo():
                  idx : int,
                  a : float,
                  b: float,
+                 operation_mode : str,
                  ):
 
         self.name = name
@@ -28,10 +29,12 @@ class Servo():
         self._target_angle = None
         self._pulse = None
         self._target_pulse = None
-        self._speed = None
-        self._deltaT = None
+        self._speed = 0
+        self._deltaT = 0
         self._target_angle_arr = np.zeros((3,2))
         self.fac = 1 if self.a > 0 else -1 # If negative slope we need to send negative value.
+        self._operation_mode = operation_mode
+
 
     def pulse2angle(self, pulse):
         "pulse [ms] to [deg]"
@@ -48,16 +51,32 @@ class Servo():
         return int(self.a * angle + self.b)
 
     @property
+    def operation_mode(self):
+        return self._operation_mode
+
+    @operation_mode.setter
+    def operation_mode(self, mode):
+        if mode == 'speed':
+            self._operation_mode = mode
+        elif mode == 'position':
+            self._operation_mode = mode
+            self._target_angle_arr = np.zeros((3,3))
+        else:
+            raise KeyError(f'{self.name} invalid mode "{mode}" for opration mode.')
+
+
+    @property
     def state(self):
         return {'name': self.name,
                 'idx': self.idx,
                 'minlim': self.minlim,
                 'maxlim':self.maxlim,
-                'speed':self.speed,
+                'speed':self._speed,
                 'target_angle':self.target_angle,
                 'angle':self.angle,
                 'target_pulse':self.target_pulse,
-                'pulse':self.pulse}
+                'pulse':self.pulse,
+                'operation_mode':self.operation_mode}
 
     def __repr__(self):
         return '\n'.join([f'{k} : {v}' for k,v in self.state.items()])
@@ -80,7 +99,7 @@ class Servo():
         # 1   t2   t2^2  | b  = a2
         # 1   t3   t3^2  | c    a3
         # -->
-        # TODO: check these!
+        # TODO: check these they are form INTERNET!!
         a = a1/(t1*t1 - t1*t2 - t1*t3 + t2*t3) \
                 + a2/(-t1*t2 + t1*t3 + t2*t2 - t2*t3) \
                 + a3/(t1*t2 - t1*t3 - t2*t3 + t3*t3)
@@ -114,14 +133,10 @@ class Servo():
         LOG.debug(f'{self.name} speed: {self.target_angle} - {self.angle}')
 
         # TODO: fix some nice speed update here:
-        if any(a is None for a in (self.target_angle, self.angle)):
-            return None
-
-        try:
-            estim_cur_angle =  self.angle #+ self._speed*self._deltaT
-        except TypeError:
-            LOG.warning(f'{self.name} issues in determining cur angle.')
-            estim_cur_angle = 0
+        if any(a is None for a in (self.target_angle,
+                                   self.angle,
+                                   self._deltaT)):
+            return 0
 
 
         if self._speed is None:
@@ -129,20 +144,16 @@ class Servo():
             self._speed = 0
 
         # TODO: fix these...
-        dangle = self.target_angle - estim_cur_angle
+        dangle = self.target_angle - self.angle
         dangledot = self.estim_target_speed - self._speed
 
-        P = 30
-        D = 2
+        # TODO: and then fix these
+        P = 600
+        D = 40
 
-        speed = self._speed
-        speed += P * dangle  + D * dangledot #/ self._deltaT
-        if abs(speed) > self.maxspeed:
-            LOG.warning(f'{self.name} requesting larger speed ({speed} deg/s) than available {self.maxspeed} deg/s.')
-            speed = np.clip(speed, -self.maxspeed, self.maxspeed)
+        #speed = self._speed
+        self._speed += (P * dangle  + D * dangledot) * self._deltaT
 
-
-        self._speed = speed
 
         return self._speed
 
@@ -172,7 +183,6 @@ class Servo():
     @target_pulse.setter
     def target_pulse(self, pulse) -> None:
         "[ms]"
-        t, pulse = tandpulse
         pulse = int(pulse)
         LOG.debug(f'{self.name} target_pulse: {self.target_pulse} --> {pulse}')
         self._target_angle = self.pulse2angle(pulse)
@@ -204,7 +214,9 @@ class Servo():
         self._target_angle_arr[1:] = self._target_angle_arr[:-1]
         self._target_angle_arr[0,:] = t, self._target_angle
 
-    def speed2int(self, deltaT=None):
+    def speed2int(self,
+                  speed : float=None,
+                  deltaT : float=None):
         """
         Comver current speed to value sent to arduino.
         Attr:
@@ -213,19 +225,22 @@ class Servo():
             speed_int : fraction of speed to maxspeed * 2**15.
         """
 
-        self._deltaT = deltaT
 
-        speed = self.speed
-        if speed is None:
-            speed = 0
+
+        if self.operation_mode=='speed':
+            if speed is None:
+                raise ValueError(f'{self.name} No speed provided!')
+        elif self.operation_mode=='position':
+            speed = self.speed
+            if deltaT is None:
+                raise ValueError(f'{self.name} no deltaT provided!')
+            self._deltaT = deltaT
+
+        if abs(speed) > self.maxspeed:
+            LOG.warning(f'{self.name} requesting larger speed ({speed} deg/s) than available {self.maxspeed} deg/s.')
+            speed = np.clip(speed, -self.maxspeed, self.maxspeed)
 
         speed_frac = speed / self.maxspeed
-
-        #if abs(speed_frac)>1:
-        #    LOG.warning(f'{self.name} requesting larger speed ({speed} deg/s) than available {self.maxspeed} deg/s.')
-        #    speed_frac = np.clip(speed_frac, -1, 1)
-            #if   speed_frac < -1: speed_frac = -1
-            #elif speed_frac >  1: speed_frac =  1
 
         speed_int = int(self.fac * speed_frac * 32768) # This is then sent to arduino.
 
