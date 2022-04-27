@@ -17,7 +17,6 @@ from filters.mahony import Mahony
 
 LOG = logging.getLogger('rp_logger')
 
-
 SPEEDSCALE = 5
 MINTHETA = -28
 MAXTHETA = 50
@@ -69,16 +68,16 @@ class RPHead():
         return self.phiservo.target_angle
 
     @target_phi.setter
-    def target_phi(self, angle):
-        self.phiservo.target_angle = angle
+    def target_phi(self, tandangle):
+        self.phiservo.target_angle = tandangle
 
     @property
     def target_theta(self):
         return self.thetaservo.target_angle
 
     @target_theta.setter
-    def target_theta(self, angle):
-        self.thetaservo.target_angle = angle
+    def target_theta(self, tandangle):
+        self.thetaservo.target_angle = tandangle
 
     @property
     def pulse_phi(self):
@@ -131,6 +130,7 @@ class RPatrick():
         self.imu_w = np.zeros(3)
         self.rpy  = np.zeros(3) # ahrs roll, pitch, yaw
         self.dt = 0
+        self.dt_mean = 0
         self.rptime = 0
         self.rpmode = 0
         self._target_mode = 0
@@ -139,7 +139,7 @@ class RPatrick():
         self.mytime = time.time()
         self.report_sock = report_sock
 
-        self._n_collect = 1000
+        self._n_collect = 100
         if self._n_collect > -1:
             self.df = pd.DataFrame(data=np.zeros((self._n_collect, len(self.arrayheader))),
                                 columns=self.arrayheader)
@@ -207,11 +207,20 @@ class RPatrick():
         key, data = keydata
         if key == 'measurements':
             LOG.debug(data)
+            self._count += 1
             rptime, self.imu_a, \
                     self.imu_w, self.head.pulse_phi, \
                     self.head.pulse_theta, self.rpmode = data
+
+
             rptime /= 1e6
-            self.dt = min(.1, rptime - self.rptime)
+            if (rptime - self.rptime) > .1:
+                LOG.warning(f'Long break {rptime - self.rptime} s')
+            else:
+                self.dt = rptime - self.rptime
+                # Update average on the fly
+                self.dt_mean = self.dt_mean \
+                        + (self.dt - self.dt_mean)/self._count
             self.rptime = rptime
             self._ahrs.update(self.imu_a/np.linalg.norm(self.imu_a),
                               self.imu_w/180*np.pi,
@@ -220,9 +229,8 @@ class RPatrick():
             self.mytime = time.time()
 
             if self._n_collect > -1:
-                self.df.loc[self._count, :] = self.asarray
+                self.df.loc[self._count-1, :] = self.asarray
 
-            self._count += 1
 
         elif key=='external_input':
             LOG.info(f'External input : phi = {data[0]}, theta = {data[1]}')
@@ -265,10 +273,12 @@ class RPatrick():
 
 
         # TODO: implement the controls...
-        self.head.target_phi = -self.rpy[0]
-        self.head.target_theta = -self.rpy[1]
-        deltaT = time.time() - self.mytime
-        cmd = self.head.get_ctrl(deltaT)
+        LOG.info(f'Set targets t={self.rptime}')
+        self.head.target_phi = (self.rptime, -self.rpy[0])
+        self.head.target_theta = (self.rptime, -self.rpy[1])
+
+        # TODO: think about this dt scheme a bit.
+        cmd = self.head.get_ctrl(self.dt_mean)
         LOG.debug('Control input: ')
         return cmd
 
