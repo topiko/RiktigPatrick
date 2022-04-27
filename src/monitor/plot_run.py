@@ -36,10 +36,13 @@ if __name__ == '__main__':
     for ax, lab in zip((axphi, axtheta), ('phi', 'theta')):
         target_col = f'head_{lab}_target_angle'
         value_col = f'head_{lab}_angle'
-
-        ax.plot(times, df.loc[:, value_col], '-x', **l_d, label='Value')
-        ax.plot(times, df.loc[:, target_col], '-.o', **l_d, label='Target')
-        ax.set_title(f'head_{lab}')
+        t, v = df.loc[:, target_col], df.loc[:, value_col]
+        ax.plot(times, df.loc[:, value_col], '-.|', **l_d, label='Value')
+        ax.plot(times, df.loc[:, target_col], '-|', **l_d, label='Target')
+        ax.fill_between(times, t, v, where=v<t, color='blue', alpha=.4)
+        ax.fill_between(times, t, v, where=t<v, color='red', alpha=.4)
+        rms = np.sqrt(((t-v)**2).mean())
+        ax.set_title(f'head_{lab} - RMS={rms:.2f}')
         ax.set_ylabel('deg')
         ax.legend()
 
