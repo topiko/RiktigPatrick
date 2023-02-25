@@ -8,11 +8,10 @@ import logging
 import numpy as np
 import pandas as pd
 
-from riktigpatric.servo import Servo
 from relay.conversions import make_ctrl
-from relay.conversions import depack
-from relay.conversions import np2bytes
 from filters.mahony import Mahony
+
+from riktigpatric.servo import Servo
 
 
 LOG = logging.getLogger('rp_logger')
@@ -138,6 +137,7 @@ class RPHead():
         repr_ += f'\nThetaservo\n'
         repr_ += self.thetaservo.__repr__().replace('\n', f'\n{add*2}')
         repr_ += '\n'
+
         return repr_
 
 class RPatrick():
@@ -161,6 +161,7 @@ class RPatrick():
         self.report_sock = report_sock
 
         self._n_collect = 1000
+
         if self._n_collect > -1:
             self.df = pd.DataFrame(data=np.zeros((self._n_collect, len(self.arrayheader))),
                                 columns=self.arrayheader)
@@ -168,10 +169,12 @@ class RPatrick():
     def __repr__(self):
         add = '  '
         repr_  = 'RiktigPatrick:\n'
+
         for k,v in self.state.items():
             if k=='head': continue
             repr_ += f'{add}{k} : {v}\n'
         repr_ += self.head.__repr__().replace('\n', f'\n{add}')
+
         return repr_
 
     @property
@@ -226,6 +229,7 @@ class RPatrick():
     def state(self, keydata): #data : bytearray):
 
         key, data = keydata
+
         if key == 'measurements':
             LOG.debug(data)
             self._count += 1
@@ -235,6 +239,7 @@ class RPatrick():
 
 
             rptime /= 1e6
+
             if (rptime - self.rptime) > .1:
                 LOG.warning(f'Long break {(rptime - self.rptime)*1000:.0f} ms')
             else:
@@ -254,7 +259,7 @@ class RPatrick():
 
 
         elif key=='external_input':
-            LOG.info(f'External input : phi = {data[0]}, theta = {data[1]}')
+            LOG.info(f'External input : phi={data[0]:.2f}, theta={data[1]:.2f}')
             self.head.target_phi, self.head.target_theta = data
         elif key=='setmode-0':
             self._mode = 0
@@ -265,12 +270,12 @@ class RPatrick():
 
         # TESTING AREA
         # ======================
-        if self._count%100 == 0:
-            for s in self.__repr__().split('\n'): LOG.info(s)
+        #if self._count%100 == 0:
+        #    for s in self.__repr__().split('\n'): LOG.info(s)
 
         if self._count==self._n_collect:
+            LOG.info('Savin dataframe.')
             self._count = 0
-            print(self.df.head())
             self.df.to_hdf('data/rp.hdf5', key='data')
 
         if self._count > 10:
@@ -284,12 +289,15 @@ class RPatrick():
             LOG.warning(f'Servos not inited - curinit: {self.head._servo_init}...')
             cmd = self.head.servo_init_cmds[self.head._servo_init]
             self.head._servo_init += 1
+
             if self.head._servo_init == len(self.head.servo_init_cmds):
                 self.head._servosinited = True
+
             return cmd
 
         if self._mode != self.rpmode:
             LOG.info(f'Update operation mode to {self._mode}')
+
             return make_ctrl(self._mode, 0, 0)
 
 
@@ -299,7 +307,5 @@ class RPatrick():
 
         # TODO: think about this dt scheme a bit.
         cmd = self.head.get_ctrl(self.dt_mean)
+
         return cmd
-
-
-
