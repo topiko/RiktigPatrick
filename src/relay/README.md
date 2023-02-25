@@ -1,3 +1,7 @@
+# This is the part of RP that sits in the RP --> RPi + arduino.
+
+Talks with the main controller through wifi. RPi talks to ble though i2c.
+ 
 ## I2C:
 
 [smbus](https://pypi.org/project/smbus2/)
