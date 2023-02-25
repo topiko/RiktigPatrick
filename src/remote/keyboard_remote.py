@@ -5,6 +5,8 @@ import struct
 HOST = socket.gethostbyname('topikone.local') #'192.168.0.45'
 PORT = 1024
 INCS = [0, 1, 5, 10]
+INC = INCS[0]
+
 tobytes = lambda val, fmt='f': bytearray(struct.pack(fmt, val))
 
 def depack_KB(bytearray_ : bytearray) -> tuple[float, float]:
@@ -23,7 +25,7 @@ if __name__ == '__main__':
         i = 0
         try:
             while not exit:
-                ctrl = input('Q - quit, s-stop, [h,j,k,l] to steer: ')
+                ctrl = input('Q - quit, s-stop, m- change mode, [h,j,k,l] to steer: ')
                 if ctrl == 'h':
                     phi -= INC
                 elif ctrl == 'l':
