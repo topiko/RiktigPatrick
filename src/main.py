@@ -2,11 +2,10 @@ import socket
 import selectors
 import types
 import logging
-import time
 import argparse
 
 from relay.conversions import depack
-from monitor.monitor import REPORTPORT, get_monitor_socket
+from monitor.monitor import get_monitor_socket
 
 from riktigpatric.patrick import RPatrick
 
@@ -48,6 +47,7 @@ def service_connection(key, mask):
             # Set state and fetch control
             key, depacked, resp = depack(recv_data)
             rp.state = key, depacked
+
             if resp:
                 data.outb = rp.get_ctrl()
             else:
@@ -56,6 +56,7 @@ def service_connection(key, mask):
             print(f'Empty message -> closing connection {data.addr}')
             sel.unregister(sock)
             sock.close()
+
     if mask & selectors.EVENT_WRITE:
         if data.outb:
             sent = sock.send(data.outb)
@@ -79,6 +80,7 @@ sel.register(lsock, selectors.EVENT_READ, data=None)
 
 
 # Thsi is the RP!
+
 if args.monitor:
     report_sock = get_monitor_socket(LOG)
 else:
@@ -90,6 +92,7 @@ if __name__ == "__main__":
     try:
         while True:
             events = sel.select(timeout=None)
+
             for key, mask in events:
                 if key.data is None:
                     accept_wrapper(key.fileobj)
@@ -100,4 +103,3 @@ if __name__ == "__main__":
     finally:
         report_sock.send(b'')
         sel.close()
-
