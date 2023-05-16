@@ -2,6 +2,8 @@
 This is the module that contains RiktigPatrick!
 """
 from __future__ import annotations
+from typing import Union
+from typing import Optional
 
 import time
 import logging
@@ -9,7 +11,7 @@ import logging
 import numpy as np
 import pandas as pd
 import torch
-
+from gymnasium import spaces
 
 from relay.conversions import make_ctrl
 from filters.mahony import Mahony
@@ -18,7 +20,7 @@ from riktigpatric.servo import Servo
 
 
 LOG = logging.getLogger("rp_logger")
-
+G = 9.81
 SPEEDSCALE = 5
 MINTHETA = -28
 MAXTHETA = 50
@@ -50,17 +52,111 @@ hphi_params = {
 
 
 class Obs:
-    acc: np.ndarray
-    gyro: np.ndarray
-    head_pitch: float
-    head_turn: float
-
-    def to_tensor(self) -> torch.Tensor:
-        return torch.Tensor([*self.acc, *self.gyro, self.head_pitch, self.head_turn])
+    def __init__(self):
+        self._acc: np.ndarray = np.zeros(3)
+        self._gyro: np.ndarray = np.zeros(3)
+        self._head_pitch: np.ndarray = np.zeros(1)
+        self._head_turn: np.ndarray = np.zeros(1)
+        self._t: float = 0
 
     @property
     def ndim(self) -> int:
         return 8
+
+    @property
+    def acc(self) -> np.ndarray:
+        return self._acc
+
+    @acc.setter
+    def update_acc(self, acc: Union[np.ndarray, torch.Tensor]):
+        if isinstance(acc, torch.Tensor):
+            acc = acc.numpy()
+        self._acc = acc
+
+    @property
+    def gyro(self) -> np.ndarray:
+        return self._gyro
+
+    @gyro.setter
+    def update_gyro(self, gyro: Union[np.ndarray, torch.Tensor]):
+        if isinstance(gyro, torch.Tensor):
+            gyro = gyro.numpy()
+        self._gyro = gyro
+
+    @property
+    def head_pitch(self) -> np.ndarray:
+        return self._head_pitch
+
+    @head_pitch.setter
+    def update_head_pitch(self, head_pitch: float):
+        self._head_pitch = np.array([head_pitch])
+
+    @property
+    def head_turn(self) -> np.ndarray:
+        return self._head_turn
+
+    @head_turn.setter
+    def update_head_turn(self, head_turn: float):
+        self._head_turn = np.array([head_turn])
+
+    @property
+    def t(self) -> float:
+        return self._t
+
+    @t.setter
+    def update_t(self, t: float):
+        self._t = t
+
+
+class State:
+    def __init__(self, keys: list[str] = ["sens/acc", "sens/gyro"]):
+        self.obs = Obs()
+        self.keys = keys
+
+    def update(self):
+        # TODO: update the orientation filter.
+        raise NotImplementedError("Do this")
+
+    def orientation(self) -> torch.Tensor:
+        raise NotImplementedError("Do this")
+
+    def state_dict(self, wlimits: bool = False) -> dict[str, np.ndarray]:
+        d = {
+            "sens/acc": (self.obs.acc, -10 * G, 10 * G, 3),
+            "sens/gyro": (self.obs.gyro, -100, 100, 3),
+            "sens/head_pitch": (self.obs.head_pitch, -np.pi / 3 * 2, np.pi / 3, 1),
+            "sens/head_turn": (self.obs.head_turn, -np.pi / 2, np.pi / 2, 1),
+            "time": (self.obs.t, 0, np.inf, 1),
+        }
+
+        d = {k: v for k, v in d.items() if k in self.keys}
+
+        if wlimits:
+            return d
+
+        return {k: v[0] for k, v in d.items()}
+
+    def state_arr(self, state_d: Optional[dict[str, np.ndarray]] = None) -> np.ndarray:
+        if state_d is None:
+            state_d = self.state_dict()
+
+        arrs = []
+        for k in self.keys:
+            arrs.append(state_d[k])
+
+        return np.concatenate(arrs)
+
+    def sdict2sarr(self, state_d: dict[str, np.ndarray]) -> np.ndarray:
+        return self.state_arr(state_d)
+
+    def to_obs_space(self) -> spaces.Dict:
+        return spaces.Dict(
+            {
+                k: spaces.Box(v[1], v[2], shape=(v[3],), dtype=float)
+                for k, v in self.state_dict(wlimits=True).items()
+                if k in self.keys
+            }
+        )
 
 
 class StepReturn:

@@ -1,17 +1,20 @@
-import time
+import torch
+import gymnasium
+from gymnasium import spaces
 
 from typing import Optional
+from typing import Any
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 from dm_control import mjcf
-from utils import display_video
 
-from riktigpatric.patrick import Obs
+from riktigpatric.patrick import State
 from riktigpatric.patrick import StepReturn
 from riktigpatric.patrick import StepAction
 
+from utils import display_video
 
 BODY_D = 0.05
 BODY_H = 0.25
@@ -180,18 +183,10 @@ def make_arena() -> mjcf.RootElement:
     return arena
 
 
-def quatrot(q: np.ndarray, v: np.ndarray) -> np.ndarray:
-    q_vec = q[1:]
-    q_real = q[0]
+class GymRP(gymnasium.Env):
+    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
-    # Way to represent q.v.q*:
-    t = np.cross(q_vec, v)
-    v_rot = v + q_real * t + np.cross(q_vec, t)
-    return v_rot
-
-
-class RPenvWrap:
-    def __init__(self, simultime: float = 5, render: bool = False):
+    def __init__(self, render_mode="rgb_array"):
         # Make rp:
         rp = MujocoRP()
 
@@ -224,47 +219,65 @@ class RPenvWrap:
         self.head_picth_sens = rp.model.find("sensor", "headpitch_sensor")
         self.head_turn_sens = rp.model.find("sensor", "headturn_sensor")
 
-        self.frames = []
-        self.framerate = 30
-        self.simultime = simultime
-        self.render = render
-        self.obs = Obs()
+        self.state = State()
 
-    def _get_obs(self) -> Obs:
-        # TODO: make obs.get_obs() --> final formatted observation that is fead into nn.
-        obs = Obs()
-        obs.acc = self.dm_env.bind(self.acc_sens).sensordata.copy()
-        obs.gyro = self.dm_env.bind(self.gyro_sens).sensordata.copy()
-        obs.head_pitch = self.dm_env.bind(self.head_picth_sens).sensordata.copy()[0]
-        obs.head_turn = self.dm_env.bind(self.head_turn_sens).sensordata.copy()[0]
+        self.observation_space = self.state.to_obs_space()
 
-        self.obs = obs
-        return obs
+        # TODO: import these from somwehere
+        max_w_wheel = np.pi * 2 * 5
+        max_w_head = np.pi * 2
+        self.action_space = spaces.Dict(
+            {
+                "left_wheel": spaces.Box(
+                    -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
+                ),
+                "right_wheel": spaces.Box(
+                    -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
+                ),
+                "head_pitch_v": spaces.Box(
+                    -max_w_head, max_w_head, shape=(1,), dtype=float
+                ),
+                "head_turn_v": spaces.Box(
+                    -max_w_head, max_w_head, shape=(1,), dtype=float
+                ),
+            }
+        )
 
-    def _get_reward(self, type: str = "time", obs: Optional[Obs] = None) -> float:
+        self.render_mode = render_mode
+        self.step_time = 0.01  # s
+
+    def _get_obs(self) -> dict:
+        self.state.obs.update_t = self.dm_env.data.time
+        self.state.obs.update_acc = self.dm_env.bind(self.acc_sens).sensordata.copy()
+        self.state.obs.update_gyro = self.dm_env.bind(self.gyro_sens).sensordata.copy()
+        self.state.obs.update_head_pitch = self.dm_env.bind(
+            self.head_picth_sens
+        ).sensordata.copy()[0]
+        self.state.obs.update_head_turn = self.dm_env.bind(
+            self.head_turn_sens
+        ).sensordata.copy()[0]
+
+        return self.state.state_dict()
+
+    def _get_reward(self, type: str = "time", obs: Optional[State] = None) -> float:
         """Function of obs and ?"""
-        # TODO: device a propert reward.
-        head_reward = self.obs.head_pitch**2 + self.obs.head_turn**2
-
-        orient_reward = 1 - self._get_theta() ** 2
-
-        if type == "time":
-            return orient_reward + head_reward
-        else:
-            raise KeyError(f"Invalid reward type: {type}")
+        # TODO: device a proper reward.
+        return 1.0
 
     def _get_theta(self) -> float:
+        # return self.state.pitch
         # TODO: state.get_theta()
-        q = self.dm_env.named.data.xquat["frame/torso"]
-        rot_z = quatrot(q, np.array([0, 0, 1]))
-        theta = np.pi / 2 - np.arcsin(rot_z[2])
-        return theta
+        return 0.0
 
-    def reset(self, seed: Optional[int] = None):
+    def _get_info(self) -> dict:
+        return {}
+
+    def reset(
+        self, options: Optional[Any] = None, seed: Optional[int] = None
+    ) -> tuple[dict, dict]:
         self.dm_env.reset()
-        self.frames = []
 
-        return self._get_obs()
+        return self._get_obs(), self._get_info()
 
     @property
     def terminated(self) -> bool:
@@ -272,68 +285,38 @@ class RPenvWrap:
 
     @property
     def truncated(self) -> bool:
-        return self.dm_env.data.time >= self.simultime
+        return False
 
-    def record_frame(self):
-        if not self.render:
-            return
-
-        if len(self.frames) < self.dm_env.data.time * self.framerate:
-            pixels = self.dm_env.render(camera_id=0, height=480, width=640)
-            self.frames.append(pixels)
+    def render(self):
+        if self.render_mode == "rgb_array":
+            return self.dm_env.render(camera_id=0, height=480, width=640)
 
     def step(
-        self, action: Optional[StepAction] = None, step_time: Optional[float] = None
-    ) -> StepReturn:
+        self, action: Optional[StepAction] = None
+    ) -> tuple[dict, float, bool, bool, dict]:
         if action is not None:
             self.dm_env.bind(self.left_wheel_act).ctrl = action.left_wheel
             self.dm_env.bind(self.right_wheel_act).ctrl = action.right_wheel  # rad/s
             self.dm_env.bind(self.head_pitch_act).ctrl = action.head_pitch  # rad/s
             self.dm_env.bind(self.head_turn_act).ctrl = action.head_turn  # rad/s
 
-        if step_time is None:
+        if self.step_time is None:
             step_time = self.dm_env.timestep()
+        else:
+            step_time = self.step_time
 
         t0 = self.dm_env.data.time
         t = t0
         while (t < t0 + step_time) and (not self.terminated):
             self.dm_env.step()
             t = self.dm_env.data.time
-            self.record_frame()
 
-        self._get_obs()
+        obs = self._get_obs()
 
-        sr = StepReturn()
-        sr.obs = self.obs
-        sr.reward = self._get_reward()
-        sr.terminated = self.terminated
-        sr.truncated = self.truncated
-
-        return sr
-
-
-if __name__ == "__main__":
-    rpenv = RPenvWrap(simultime=5, render=True)
-
-    sa = StepAction()
-    sa.left_wheel = 0
-    sa.right_wheel = 0
-    sa.head_pitch = 0
-    sa.head_turn = 0
-
-    t0 = time.time()
-    while True:
-        sr = rpenv.step(sa, 0.1)
-        if rpenv.dm_env.data.time > 0.2:
-            sa.right_wheel = 5.14634413173
-            sa.left_wheel = 5.14634413173
-            sa.head_turn = 2
-
-        if sr.terminated:
-            simul_t = rpenv.dm_env.data.time
-            break
-
-    t1 = time.time()
-    print(f"Runtime: {t1 -t0:.2f}")
-    print(f"Simultime: {simul_t:.2f}")
-    display_video(rpenv.frames, framerate=rpenv.framerate)
+        return (
+            obs,
+            self._get_reward(),
+            self.terminated,
+            self.truncated,
+            self._get_info(),
+        )
