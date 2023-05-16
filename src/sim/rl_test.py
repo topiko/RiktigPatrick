@@ -182,7 +182,7 @@ class REINFORCE:
 
 def run_episode(
     agent: REINFORCE,
-    rp_env: GymRP,
+    rp_env: gym.Env,
     step_time: float = 0.01,
     seed: int = 42,
     show: bool = False,
@@ -196,6 +196,7 @@ def run_episode(
         agent.rollout_index = rollout
         rp_env.reset()
         while True:
+            # TODO: Wrap the rpenv into something the flattens the observation.
             obs = torch.Tensor(rp_env.state.get_state_arr())
             action = agent.sample_action(obs)
 
@@ -237,13 +238,7 @@ if __name__ == "__main__":
         if episode % 10 == 0:
             reward = np.array(rewards).mean()
             rewards = []
-            print(f"Episode {episode:<6d} ({nrollouts} rollouts) --> {reward:.3f}")
-            if episode % 100 == 0:
-                run_episode(
-                    agent,
-                    rpenv,
-                    fname=f"rp_ep={episode:06d}.mp4",
-                )
             agent.net.store()
+            print(f"Episode {episode:<6d} ({nrollouts} rollouts) --> {reward:.3f}")
 
     run_episode(agent, rpenv, show=True)
