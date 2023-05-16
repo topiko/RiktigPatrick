@@ -279,7 +279,7 @@ class GymRP(gymnasium.Env):
 
     @property
     def terminated(self) -> bool:
-        if self.dm_env.data.time < self.step_time * 10:
+        if self.dm_env.data.time < self.step_time * 5:
             return False
 
         return abs(self.state.euler[1]) > 10
