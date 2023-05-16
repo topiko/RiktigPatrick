@@ -9,13 +9,15 @@ LOG = logging.getLogger()
 class Mahony:
     def __init__(self):
         self._qhat = None
-        self.bhat = None # set in reset
+        self.bhat = None  # set in reset
         self.g = np.array([0, 0, -1])
         self.kp = 1
         self.ki = 0.3
         self.reset()
 
     def update(self, acc: np.ndarray, gyro: np.ndarray, dt: float):
+        assert dt > 0
+
         if not np.isclose(np.linalg.norm(acc), 1):
             acc /= np.linalg.norm(acc)
 
@@ -43,6 +45,7 @@ class Mahony:
         self._qhat /= self.qhat.norm()
 
         self.bhat += dt * bhatdot
+        self._euler = q2eul(self.qhat)
 
     @property
     def qhat(self) -> qt.quaternion:
@@ -50,8 +53,9 @@ class Mahony:
 
     @property
     def eul(self) -> np.ndarray:
-        return q2eul(self.qhat) / np.pi * 180
+        return self._euler / np.pi * 180
 
     def reset(self):
         self.bhat = np.zeros(3)
         self._qhat = eul2q(0, 0, 0)
+        self._euler = np.zeros(3)

@@ -156,6 +156,8 @@ class State:
 
     def reset(self):
         self.mahony.reset()
+        self.prev_t = 0
+
 
     def get_state_dict(self, wlimits: bool = False) -> dict[str, np.ndarray]:
         d = {
