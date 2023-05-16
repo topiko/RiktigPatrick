@@ -1,16 +1,20 @@
 from __future__ import annotations
 import torch
+from torch import nn
+from torch.distributions.normal import Normal
+
 import numpy as np
 
-import torch.nn as nn
-from torch.distributions.normal import Normal
+
+import gymnasium as gym
+from gymnasium.envs.registration import register
 
 
 from utils import display_video
-from sim.rp_sim import RPenvWrap
 
 from riktigpatric.patrick import StepAction
-from riktigpatric.patrick import Obs
+
+from sim.envs.rp_env import GymRP
 
 
 class Policy_Network(nn.Module):
@@ -110,7 +114,7 @@ class REINFORCE:
     def rollout_index(self, idx: int):
         self._rollout_index = idx
 
-    def sample_action(self, obs: Obs) -> StepAction:
+    def sample_action(self, obs: torch.Tensor) -> StepAction:
         """Returns an action, conditioned on the policy and observation.
 
         Args:
@@ -119,9 +123,8 @@ class REINFORCE:
         Returns:
             action: Action to be performed
         """
-        obs_ = obs.to_tensor()
 
-        action_means, action_stddevs = self.net(obs_)
+        action_means, action_stddevs = self.net(obs)
 
         # create a normal distribution from the predicted
         #   mean and standard deviation and sample an action
@@ -185,7 +188,7 @@ class REINFORCE:
 
 def run_episode(
     agent: REINFORCE,
-    wrapped_env: RPenvWrap,
+    wrapped_env: GymRP,
     step_time: float = 0.01,
     seed: int = 42,
     show: bool = False,
@@ -200,34 +203,35 @@ def run_episode(
         wrapped_env.reset()
         done = False
         while not done:
+            obs = torch.Tensor(wrapped_env.state.get_state_arr())
             action = agent.sample_action(obs)
 
-            # Step return type - `tuple[ObsType, SupportsFloat, bool, bool, dict[str, Any]]`
-            # These represent the next observation, the reward from the step,
-            # if the episode is terminated, if the episode is truncated and
-            # additional info from the step
-            so = wrapped_env.step(action, step_time=step_time)
-            reward = so.reward
+            obs_d, reward, terminated, truncated, _ = wrapped_env.step(action)
 
             sum_rewards[rollout] += reward
             agent.reward = reward
 
-            # End the episode when either truncated or terminated is true
-            #  - truncated: The episode duration reaches max number of timesteps
-            #  - terminated: Any of the state space values is no longer finite.
-            done = so.terminated or so.truncated
-
-    if fname:
-        display_video(wrapped_env.frames, fname=fname)
+            done = terminated or truncated
 
     return np.array(sum_rewards)
 
 
 if __name__ == "__main__":
-    rpenv = RPenvWrap(render=True)
-    agent = REINFORCE(Obs().ndim, 1)  # StepAction().ndim)
+    register(
+        id="RiktigPatrick-v0",
+        entry_point="sim.envs.rp_env:GymRP",
+        max_episode_steps=300,
+    )
 
-    nrollouts = 32
+    rpenv = gym.make("RiktigPatrick-v0", render_mode="rgb_array")
+    rpenv.reset()
+
+    from riktigpatric.patrick import State
+
+    indim = len(State().get_state_arr())
+    agent = REINFORCE(indim, 1)  # StepAction().ndim)
+
+    nrollouts = 1
 
     rewards = []
     for episode in range(10001):
