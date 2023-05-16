@@ -264,7 +264,7 @@ class GymRP(gymnasium.Env):
         return self.state.get_state_dict()
 
     def _get_reward(self, type: str = "time", obs: Optional[State] = None) -> float:
-        return 1.0
+        return (10**2 - self.state.euler[1] ** 2) / 100
 
     def _get_info(self) -> dict:
         return {}

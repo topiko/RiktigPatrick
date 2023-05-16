@@ -90,7 +90,7 @@ class REINFORCE:
 
         # Hyperparameters
         self.learning_rate = 1e-4  # orig = 1e-4 Learning rate for policy optimization
-        self.gamma = 0.90  # Discount factor
+        self.gamma = 0.8  # Discount factor
         self.eps = 1e-6  # small number for mathematical stability
 
         self._rollout_index = 0
@@ -122,7 +122,7 @@ class REINFORCE:
 
         # create a normal distribution from the predicted
         #   mean and standard deviation and sample an action
-        distrib = Normal(action_means + self.eps, action_stddevs + self.eps)
+        distrib = Normal(action_means, action_stddevs + self.eps)
 
         action = distrib.sample()
         prob = distrib.log_prob(action)
@@ -158,6 +158,7 @@ class REINFORCE:
         for rollout_log_probs, rollout_rewards in zip(self.probs, self.rewards):
             running_g = 0
             gs = []
+
             # Discounted return (backwards) - [::-1] will return an array in reverse
             for R in rollout_rewards[::-1]:
                 running_g = R + self.gamma * running_g
@@ -168,7 +169,8 @@ class REINFORCE:
             # minimize -1 * prob * reward obtained
             for log_prob, delta in zip(rollout_log_probs, deltas):
                 # log(p1*p2*..) = log(p1) + log(p2) + ...
-                loss += log_prob.sum() * delta * (-1)
+                loss -= log_prob.sum() * delta
+
 
         # Update the policy network
         self.optimizer.zero_grad()
@@ -220,7 +222,12 @@ if __name__ == "__main__":
 
     rpenv = gym.make(
         "RiktigPatrick-v0",
-        state_keys=["sens/gyro", "filter/rp_pitch"],
+        state_keys=[
+            "sens/gyro",
+            "act/left_wheel",
+            "act/right_wheel",
+            "filter/rp_pitch",
+        ],
         render_mode="rgb_array",
     )
     rpenv.reset()
@@ -228,7 +235,7 @@ if __name__ == "__main__":
     indim = len(rpenv.state.get_state_arr())
     agent = REINFORCE(indim, 1)  # StepAction().ndim)
 
-    nrollouts = 16
+    nrollouts = 32
 
     rewards = []
     for episode in range(10001):
