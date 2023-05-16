@@ -115,12 +115,12 @@ class State:
 
     def update(self):
         # TODO: update the orientation filter.
-        raise NotImplementedError("Do this")
+        pass
 
     def orientation(self) -> torch.Tensor:
         raise NotImplementedError("Do this")
 
-    def state_dict(self, wlimits: bool = False) -> dict[str, np.ndarray]:
+    def get_state_dict(self, wlimits: bool = False) -> dict[str, np.ndarray]:
         d = {
             "sens/acc": (self.obs.acc, -10 * G, 10 * G, 3),
             "sens/gyro": (self.obs.gyro, -100, 100, 3),
@@ -136,9 +136,9 @@ class State:
 
         return {k: v[0] for k, v in d.items()}
 
-    def state_arr(self, state_d: Optional[dict[str, np.ndarray]] = None) -> np.ndarray:
+    def get_state_arr(self, state_d: Optional[dict[str, np.ndarray]] = None) -> np.ndarray:
         if state_d is None:
-            state_d = self.state_dict()
+            state_d = self.get_state_dict()
 
         arrs = []
         for k in self.keys:
@@ -147,13 +147,13 @@ class State:
         return np.concatenate(arrs)
 
     def sdict2sarr(self, state_d: dict[str, np.ndarray]) -> np.ndarray:
-        return self.state_arr(state_d)
+        return self.get_state_arr(state_d)
 
     def to_obs_space(self) -> spaces.Dict:
         return spaces.Dict(
             {
                 k: spaces.Box(v[1], v[2], shape=(v[3],), dtype=float)
-                for k, v in self.state_dict(wlimits=True).items()
+                for k, v in self.get_state_dict(wlimits=True).items()
                 if k in self.keys
             }
         )

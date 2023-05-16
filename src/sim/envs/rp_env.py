@@ -256,8 +256,9 @@ class GymRP(gymnasium.Env):
         self.state.obs.update_head_turn = self.dm_env.bind(
             self.head_turn_sens
         ).sensordata.copy()[0]
+        self.state.update()
 
-        return self.state.state_dict()
+        return self.state.get_state_dict()
 
     def _get_reward(self, type: str = "time", obs: Optional[State] = None) -> float:
         """Function of obs and ?"""
@@ -311,10 +312,10 @@ class GymRP(gymnasium.Env):
             self.dm_env.step()
             t = self.dm_env.data.time
 
-        obs = self._get_obs()
+        obs_d = self._get_obs()
 
         return (
-            obs,
+            obs_d,
             self._get_reward(),
             self.terminated,
             self.truncated,
