@@ -186,7 +186,7 @@ def make_arena() -> mjcf.RootElement:
 class GymRP(gymnasium.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
 
-    def __init__(self, render_mode="rgb_array"):
+    def __init__(self, state_keys: list[str], render_mode="rgb_array"):
         # Make rp:
         rp = MujocoRP()
 
@@ -219,7 +219,7 @@ class GymRP(gymnasium.Env):
         self.head_picth_sens = rp.model.find("sensor", "headpitch_sensor")
         self.head_turn_sens = rp.model.find("sensor", "headturn_sensor")
 
-        self.state = State()
+        self.state = State(keys=state_keys)
 
         self.observation_space = self.state.to_obs_space()
 
@@ -245,8 +245,9 @@ class GymRP(gymnasium.Env):
 
         self.render_mode = render_mode
         self.step_time = 0.01  # s
+        self._prev_action = None
 
-    def _get_obs(self) -> dict:
+    def _update_state(self):
         self.state.obs.update_t = self.dm_env.data.time
         self.state.obs.update_acc = self.dm_env.bind(self.acc_sens).sensordata.copy()
         self.state.obs.update_gyro = self.dm_env.bind(self.gyro_sens).sensordata.copy()
@@ -256,19 +257,14 @@ class GymRP(gymnasium.Env):
         self.state.obs.update_head_turn = self.dm_env.bind(
             self.head_turn_sens
         ).sensordata.copy()[0]
-        self.state.update()
 
+        self.state.update(self._prev_action)
+
+    def _get_obs(self) -> dict:
         return self.state.get_state_dict()
 
     def _get_reward(self, type: str = "time", obs: Optional[State] = None) -> float:
-        """Function of obs and ?"""
-        # TODO: device a proper reward.
         return 1.0
-
-    def _get_theta(self) -> float:
-        # return self.state.pitch
-        # TODO: state.get_theta()
-        return 0.0
 
     def _get_info(self) -> dict:
         return {}
@@ -277,12 +273,16 @@ class GymRP(gymnasium.Env):
         self, options: Optional[Any] = None, seed: Optional[int] = None
     ) -> tuple[dict, dict]:
         self.dm_env.reset()
+        self.state.reset()
 
         return self._get_obs(), self._get_info()
 
     @property
     def terminated(self) -> bool:
-        return self._get_theta() > (10 / 180 * np.pi)
+        if self.dm_env.data.time < self.step_time * 10:
+            return False
+
+        return abs(self.state.euler[1]) > 10
 
     @property
     def truncated(self) -> bool:
@@ -296,6 +296,7 @@ class GymRP(gymnasium.Env):
         self, action: Optional[StepAction] = None
     ) -> tuple[dict, float, bool, bool, dict]:
         if action is not None:
+            self._prev_action = action
             self.dm_env.bind(self.left_wheel_act).ctrl = action.left_wheel
             self.dm_env.bind(self.right_wheel_act).ctrl = action.right_wheel  # rad/s
             self.dm_env.bind(self.head_pitch_act).ctrl = action.head_pitch  # rad/s
@@ -308,10 +309,11 @@ class GymRP(gymnasium.Env):
 
         t0 = self.dm_env.data.time
         t = t0
-        while (t < t0 + step_time) and (not self.terminated):
+        while t < t0 + step_time:
             self.dm_env.step()
             t = self.dm_env.data.time
 
+        self._update_state()
         obs_d = self._get_obs()
 
         return (

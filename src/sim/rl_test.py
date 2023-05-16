@@ -5,16 +5,10 @@ from torch.distributions.normal import Normal
 
 import numpy as np
 
-
 import gymnasium as gym
 from gymnasium.envs.registration import register
 
-
-from utils import display_video
-
 from riktigpatric.patrick import StepAction
-
-from sim.envs.rp_env import GymRP
 
 
 class Policy_Network(nn.Module):
@@ -30,8 +24,8 @@ class Policy_Network(nn.Module):
         """
         super().__init__()
 
-        hidden_space1 = 32  # Nothing special with 16, feel free to change
-        hidden_space2 = 64  # Nothing special with 32, feel free to change
+        hidden_space1 = 16  # Nothing special with 16, feel free to change
+        hidden_space2 = 32  # Nothing special with 32, feel free to change
 
         # Shared Network
         self.shared_net = nn.Sequential(
@@ -188,30 +182,30 @@ class REINFORCE:
 
 def run_episode(
     agent: REINFORCE,
-    wrapped_env: GymRP,
+    rp_env: GymRP,
     step_time: float = 0.01,
     seed: int = 42,
     show: bool = False,
     fname: str = "",
     nrollouts: int = 1,
 ) -> np.ndarray:
-    obs = wrapped_env.reset(seed=seed)
+    obs = rp_env.reset(seed=seed)
 
     sum_rewards = [0.0] * nrollouts
     for rollout in range(nrollouts):
         agent.rollout_index = rollout
-        wrapped_env.reset()
-        done = False
-        while not done:
-            obs = torch.Tensor(wrapped_env.state.get_state_arr())
+        rp_env.reset()
+        while True:
+            obs = torch.Tensor(rp_env.state.get_state_arr())
             action = agent.sample_action(obs)
 
-            obs_d, reward, terminated, truncated, _ = wrapped_env.step(action)
+            obs_d, reward, terminated, truncated, _ = rp_env.step(action)
 
             sum_rewards[rollout] += reward
             agent.reward = reward
 
-            done = terminated or truncated
+            if terminated or truncated:
+                break
 
     return np.array(sum_rewards)
 
@@ -223,15 +217,17 @@ if __name__ == "__main__":
         max_episode_steps=300,
     )
 
-    rpenv = gym.make("RiktigPatrick-v0", render_mode="rgb_array")
+    rpenv = gym.make(
+        "RiktigPatrick-v0",
+        state_keys=["sens/gyro", "filter/rp_pitch"],
+        render_mode="rgb_array",
+    )
     rpenv.reset()
 
-    from riktigpatric.patrick import State
-
-    indim = len(State().get_state_arr())
+    indim = len(rpenv.state.get_state_arr())
     agent = REINFORCE(indim, 1)  # StepAction().ndim)
 
-    nrollouts = 1
+    nrollouts = 16
 
     rewards = []
     for episode in range(10001):

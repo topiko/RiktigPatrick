@@ -51,6 +51,32 @@ hphi_params = {
 }
 
 
+class StepAction:
+    left_wheel: float = 0
+    right_wheel: float = 0
+    head_pitch: float = 0
+    head_turn: float = 0
+
+    @property
+    def ndim(self) -> int:
+        return 4
+
+    def to_dict(self) -> dict[str, np.ndarray]:
+        return {
+            "act/left_wheel": np.array([self.left_wheel]),
+            "act/right_wheel": np.array([self.right_wheel]),
+            "act/head_pitch": np.array([self.head_pitch]),
+            "act/head_turn": np.array([self.head_turn]),
+        }
+
+    def from_tensor(self, action: torch.Tensor) -> StepAction:
+        self.left_wheel = action[0].item() + action[1].item()
+        self.right_wheel = action[0].item() - action[1].item()
+        self.head_pitch = action[2].item()
+        self.head_turn = action[3].item()
+        return self
+
+
 class Obs:
     def __init__(self):
         self._acc: np.ndarray = np.zeros(3)
@@ -109,34 +135,46 @@ class Obs:
 
 
 class State:
-    def __init__(self, keys: list[str] = ["sens/acc", "sens/gyro"]):
+    def __init__(self, keys: list[str] = ["sens/gyro", "filter/rp_pitch", "act/left_wheel"]):
         self.obs = Obs()
         self.keys = keys
+        self.mahony = Mahony()
+        self.prev_t = 0
+        self._action_dict = StepAction().to_dict()
 
-    def update(self):
+    def update(self, action: Optional[StepAction] = None):
         # TODO: update the orientation filter.
-        pass
+        self.mahony.update(self.obs.acc, self.obs.gyro, self.obs.t - self.prev_t)
+        self.prev_t = self.obs.t
 
-    def orientation(self) -> torch.Tensor:
-        raise NotImplementedError("Do this")
+        if action is not None:
+            self._action_dict = action.to_dict()
+
+    @property
+    def euler(self) -> np.ndarray:
+        return self.mahony.eul
+
+    def reset(self):
+        self.mahony.reset()
 
     def get_state_dict(self, wlimits: bool = False) -> dict[str, np.ndarray]:
         d = {
-            "sens/acc": (self.obs.acc, -10 * G, 10 * G, 3),
-            "sens/gyro": (self.obs.gyro, -100, 100, 3),
-            "sens/head_pitch": (self.obs.head_pitch, -np.pi / 3 * 2, np.pi / 3, 1),
-            "sens/head_turn": (self.obs.head_turn, -np.pi / 2, np.pi / 2, 1),
-            "time": (self.obs.t, 0, np.inf, 1),
+            "sens/acc": self.obs.acc,
+            "sens/gyro": self.obs.gyro,
+            "sens/head_pitch": self.obs.head_pitch,
+            "sens/heado_turn": self.obs.head_turn,
+            "filter/rp_pitch": np.array([self.euler[1]]),
+            "time": self.obs.t,
         }
+        d.update(self._action_dict)
 
         d = {k: v for k, v in d.items() if k in self.keys}
 
-        if wlimits:
-            return d
+        return d
 
-        return {k: v[0] for k, v in d.items()}
-
-    def get_state_arr(self, state_d: Optional[dict[str, np.ndarray]] = None) -> np.ndarray:
+    def get_state_arr(
+        self, state_d: Optional[dict[str, np.ndarray]] = None
+    ) -> np.ndarray:
         if state_d is None:
             state_d = self.get_state_dict()
 
@@ -152,9 +190,8 @@ class State:
     def to_obs_space(self) -> spaces.Dict:
         return spaces.Dict(
             {
-                k: spaces.Box(v[1], v[2], shape=(v[3],), dtype=float)
-                for k, v in self.get_state_dict(wlimits=True).items()
-                if k in self.keys
+                k: spaces.Box(-np.inf, np.inf, shape=(len(v),), dtype=float)
+                for k, v in self.get_state_dict().items()
             }
         )
 
@@ -164,24 +201,6 @@ class StepReturn:
     reward: float
     terminated: bool
     truncated: bool
-
-
-class StepAction:
-    left_wheel: float
-    right_wheel: float
-    head_pitch: float
-    head_turn: float
-
-    @property
-    def ndim(self) -> int:
-        return 4
-
-    def from_tensor(self, action: torch.Tensor) -> StepAction:
-        self.left_wheel = action[0].item() + action[1].item()
-        self.right_wheel = action[0].item() - action[1].item()
-        self.head_pitch = action[2].item()
-        self.head_turn = action[3].item()
-        return self
 
 
 class RPHead:
