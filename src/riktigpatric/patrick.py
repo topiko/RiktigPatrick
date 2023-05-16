@@ -1,12 +1,15 @@
 """
 This is the module that contains RiktigPatrick!
 """
+from __future__ import annotations
 
 import time
 import logging
 
 import numpy as np
 import pandas as pd
+import torch
+
 
 from relay.conversions import make_ctrl
 from filters.mahony import Mahony
@@ -14,38 +17,78 @@ from filters.mahony import Mahony
 from riktigpatric.servo import Servo
 
 
-LOG = logging.getLogger('rp_logger')
+LOG = logging.getLogger("rp_logger")
 
 SPEEDSCALE = 5
 MINTHETA = -28
 MAXTHETA = 50
 MINPHI = -40
 MAXPHI = 40
-SERVOMODE='position'
+SERVOMODE = "position"
 
-htheta_params = {'name':'head_theta',
-                 'max_speed': (MAXTHETA - MINTHETA)*SPEEDSCALE, #[deg/sec]
-                 'minlim': MINTHETA,
-                 'maxlim': MAXTHETA,
-                 'idx':1,
-                 'a':-15,
-                 'b':1611,
-                 'operation_mode':SERVOMODE
-                 }
+htheta_params = {
+    "name": "head_theta",
+    "max_speed": (MAXTHETA - MINTHETA) * SPEEDSCALE,  # [deg/sec]
+    "minlim": MINTHETA,
+    "maxlim": MAXTHETA,
+    "idx": 1,
+    "a": -15,
+    "b": 1611,
+    "operation_mode": SERVOMODE,
+}
 
-hphi_params = {'name':'head_phi',
-               'max_speed': (MAXPHI-MINPHI)*SPEEDSCALE, #[deg/sec]
-               'minlim': MINPHI,
-               'maxlim': MAXPHI,
-               'idx':0,
-               'a': -13,
-               'b':1664,
-               'operation_mode':SERVOMODE
-               }
+hphi_params = {
+    "name": "head_phi",
+    "max_speed": (MAXPHI - MINPHI) * SPEEDSCALE,  # [deg/sec]
+    "minlim": MINPHI,
+    "maxlim": MAXPHI,
+    "idx": 0,
+    "a": -13,
+    "b": 1664,
+    "operation_mode": SERVOMODE,
+}
 
 
-class RPHead():
+class Obs:
+    acc: np.ndarray
+    gyro: np.ndarray
+    head_pitch: float
+    head_turn: float
 
+    def to_tensor(self) -> torch.Tensor:
+        return torch.Tensor([*self.acc, *self.gyro, self.head_pitch, self.head_turn])
+
+    @property
+    def ndim(self) -> int:
+        return 8
+
+
+class StepReturn:
+    obs: Obs
+    reward: float
+    terminated: bool
+    truncated: bool
+
+
+class StepAction:
+    left_wheel: float
+    right_wheel: float
+    head_pitch: float
+    head_turn: float
+
+    @property
+    def ndim(self) -> int:
+        return 4
+
+    def from_tensor(self, action: torch.Tensor) -> StepAction:
+        self.left_wheel = action[0].item() + action[1].item()
+        self.right_wheel = action[0].item() - action[1].item()
+        self.head_pitch = action[2].item()
+        self.head_turn = action[3].item()
+        return self
+
+
+class RPHead:
     def __init__(self):
         self.phiservo = Servo(**hphi_params)
         self.thetaservo = Servo(**htheta_params)
@@ -65,15 +108,18 @@ class RPHead():
 
     @property
     def state(self):
-        return {'phiservo':self.phiservo.state,
-                'thetaservo':self.thetaservo.state,
-                'servo_init':self._servo_init,
-                'servo_operation_mode':self.servo_operation_mode}
+        return {
+            "phiservo": self.phiservo.state,
+            "thetaservo": self.thetaservo.state,
+            "servo_init": self._servo_init,
+            "servo_operation_mode": self.servo_operation_mode,
+        }
 
     @property
     def servo_init_cmds(self) -> list:
-        cmd_tuples = list(self.thetaservo.init_dict.values()) \
-                + list(self.phiservo.init_dict.values())
+        cmd_tuples = list(self.thetaservo.init_dict.values()) + list(
+            self.phiservo.init_dict.values()
+        )
 
         return [make_ctrl(*t) for t in cmd_tuples]
 
@@ -110,11 +156,10 @@ class RPHead():
         self.thetaservo.pulse = pulse
 
     def get_ctrl(self, deltaT=None, phispeed=None, thetaspeed=None):
-
-        if self.servo_operation_mode=='position':
+        if self.servo_operation_mode == "position":
             phispeed = self.phiservo.speed2int(deltaT=deltaT)
             thetaspeed = self.thetaservo.speed2int(deltaT=deltaT)
-        elif self.servo_operation_mode=='speed':
+        elif self.servo_operation_mode == "speed":
             phispeed = self.phiservo.speed2int(speed=phispeed)
             thetaspeed = self.thetaservo.speed2int(speed=thetaspeed)
 
@@ -122,34 +167,32 @@ class RPHead():
 
     @property
     def asarray(self):
-        return np.concatenate((self.phiservo.asarray,
-                               self.thetaservo.asarray))
+        return np.concatenate((self.phiservo.asarray, self.thetaservo.asarray))
 
     @property
     def arrayheader(self):
         return self.phiservo.arrayheader + self.thetaservo.arrayheader
 
     def __repr__(self):
-        add = '  '
-        repr_  = 'Head:\n'
-        repr_ += f'Phiservo\n'
-        repr_ += self.phiservo.__repr__().replace('\n', f'\n{add*2}')
-        repr_ += f'\nThetaservo\n'
-        repr_ += self.thetaservo.__repr__().replace('\n', f'\n{add*2}')
-        repr_ += '\n'
+        add = "  "
+        repr_ = "Head:\n"
+        repr_ += f"Phiservo\n"
+        repr_ += self.phiservo.__repr__().replace("\n", f"\n{add*2}")
+        repr_ += f"\nThetaservo\n"
+        repr_ += self.thetaservo.__repr__().replace("\n", f"\n{add*2}")
+        repr_ += "\n"
 
         return repr_
 
-class RPatrick():
 
+class RPatrick:
     def __init__(self, report_sock=None):
-
         self.head = RPHead()
         self._ahrs = Mahony()
 
         self.imu_a = np.zeros(3)
         self.imu_w = np.zeros(3)
-        self.rpy  = np.zeros(3) # ahrs roll, pitch, yaw
+        self.rpy = np.zeros(3)  # ahrs roll, pitch, yaw
         self.dt = 0
         self.dt_mean = 0
         self.rptime = 0
@@ -163,35 +206,42 @@ class RPatrick():
         self._n_collect = 1000
 
         if self._n_collect > -1:
-            self.df = pd.DataFrame(data=np.zeros((self._n_collect, len(self.arrayheader))),
-                                columns=self.arrayheader)
+            self.df = pd.DataFrame(
+                data=np.zeros((self._n_collect, len(self.arrayheader))),
+                columns=self.arrayheader,
+            )
 
     def __repr__(self):
-        add = '  '
-        repr_  = 'RiktigPatrick:\n'
+        add = "  "
+        repr_ = "RiktigPatrick:\n"
 
-        for k,v in self.state.items():
-            if k=='head': continue
-            repr_ += f'{add}{k} : {v}\n'
-        repr_ += self.head.__repr__().replace('\n', f'\n{add}')
+        for k, v in self.state.items():
+            if k == "head":
+                continue
+            repr_ += f"{add}{k} : {v}\n"
+        repr_ += self.head.__repr__().replace("\n", f"\n{add}")
 
         return repr_
 
     @property
     def asarray(self):
-        return np.concatenate((np.array([self.rptime, self.mytime]),
-                               self.imu_a,
-                               self.imu_w,
-                               self.rpy,
-                               self.head.asarray))
+        return np.concatenate(
+            (
+                np.array([self.rptime, self.mytime]),
+                self.imu_a,
+                self.imu_w,
+                self.rpy,
+                self.head.asarray,
+            )
+        )
 
     @property
     def arrayheader(self):
-        xyz = 'xyz'
-        timehead = ['rptime', 'mytime']
-        ahead = [f'a_{k}' for k in xyz]
-        whead = [f'w_{k}' for k in xyz]
-        rpyhead = ['roll', 'pitch', 'yaw']
+        xyz = "xyz"
+        timehead = ["rptime", "mytime"]
+        ahead = [f"a_{k}" for k in xyz]
+        whead = [f"w_{k}" for k in xyz]
+        rpyhead = ["roll", "pitch", "yaw"]
 
         return timehead + ahead + whead + rpyhead + self.head.arrayheader
 
@@ -199,94 +249,103 @@ class RPatrick():
         if self.report_sock is None:
             return
 
-        if self._count%5==0:
+        if self._count % 5 == 0:
+            arr = np.concatenate(
+                (
+                    np.array(
+                        [
+                            self.rptime,
+                            self.head.phiservo.angle,
+                            self.head.phiservo.target_angle,
+                            self.head.thetaservo.angle,
+                            self.head.thetaservo.target_angle,
+                        ]
+                    ),
+                    self.rpy,
+                ),
+                dtype="f",
+            )
 
-            arr = np.concatenate((np.array([self.rptime,
-                                            self.head.phiservo.angle,
-                                            self.head.phiservo.target_angle,
-                                            self.head.thetaservo.angle,
-                                            self.head.thetaservo.target_angle]),
-                                  self.rpy), dtype='f')
-
-
-            if arr.dtype != 'f':
+            if arr.dtype != "f":
                 return
 
-
             self.report_sock.send(arr.tobytes())
-            #self.report_sock.send(np2bytes(arr, fmt='f'))
+            # self.report_sock.send(np2bytes(arr, fmt='f'))
 
     @property
     def state(self):
-        return {'a':self.imu_a,
-                'w':self.imu_w,
-                'rpy':self.rpy,
-                'rptime':self.rptime,
-                'rpmode':self.rpmode,
-                'head':self.head.state}
+        return {
+            "a": self.imu_a,
+            "w": self.imu_w,
+            "rpy": self.rpy,
+            "rptime": self.rptime,
+            "rpmode": self.rpmode,
+            "head": self.head.state,
+        }
 
     @state.setter
-    def state(self, keydata): #data : bytearray):
-
+    def state(self, keydata):  # data : bytearray):
         key, data = keydata
 
-        if key == 'measurements':
+        if key == "measurements":
             LOG.debug(data)
             self._count += 1
-            rptime, self.imu_a, \
-                    self.imu_w, self.head.pulse_phi, \
-                    self.head.pulse_theta, self.rpmode = data
-
+            (
+                rptime,
+                self.imu_a,
+                self.imu_w,
+                self.head.pulse_phi,
+                self.head.pulse_theta,
+                self.rpmode,
+            ) = data
 
             rptime /= 1e6
 
-            if (rptime - self.rptime) > .1:
-                LOG.warning(f'Long break {(rptime - self.rptime)*1000:.0f} ms')
+            if (rptime - self.rptime) > 0.1:
+                LOG.warning(f"Long break {(rptime - self.rptime)*1000:.0f} ms")
             else:
                 self.dt = rptime - self.rptime
                 # Update average on the fly
-                self.dt_mean = self.dt_mean \
-                        + (self.dt - self.dt_mean)/self._count
+                self.dt_mean = self.dt_mean + (self.dt - self.dt_mean) / self._count
             self.rptime = rptime
-            self._ahrs.update(self.imu_a/np.linalg.norm(self.imu_a),
-                              self.imu_w/180*np.pi,
-                              self.dt)
+            self._ahrs.update(
+                self.imu_a / np.linalg.norm(self.imu_a),
+                self.imu_w / 180 * np.pi,
+                self.dt,
+            )
             self.rpy = self._ahrs.eul.copy()
             self.mytime = time.time()
 
             if self._n_collect > -1:
-                self.df.loc[self._count-1, :] = self.asarray
+                self.df.loc[self._count - 1, :] = self.asarray
 
-
-        elif key=='external_input':
-            LOG.info(f'External input : phi={data[0]:.2f}, theta={data[1]:.2f}')
+        elif key == "external_input":
+            LOG.info(f"External input : phi={data[0]:.2f}, theta={data[1]:.2f}")
             self.head.target_phi, self.head.target_theta = data
-        elif key=='setmode-0':
+        elif key == "setmode-0":
             self._mode = 0
-        elif key=='setmode-1':
+        elif key == "setmode-1":
             self._mode = 1
         else:
             raise KeyError(f'Invalid key "{key}" to update state.')
 
         # TESTING AREA
         # ======================
-        #if self._count%100 == 0:
+        # if self._count%100 == 0:
         #    for s in self.__repr__().split('\n'): LOG.info(s)
 
-        if self._count==self._n_collect:
-            LOG.info('Savin dataframe.')
+        if self._count == self._n_collect:
+            LOG.info("Savin dataframe.")
             self._count = 0
-            self.df.to_hdf('data/rp.hdf5', key='data')
+            self.df.to_hdf("data/rp.hdf5", key="data")
 
         if self._count > 10:
             self.send2monitor()
         # ======================
 
     def get_ctrl(self):
-
-
         if not self.head._servosinited:
-            LOG.warning(f'Servos not inited - curinit: {self.head._servo_init}...')
+            LOG.warning(f"Servos not inited - curinit: {self.head._servo_init}...")
             cmd = self.head.servo_init_cmds[self.head._servo_init]
             self.head._servo_init += 1
 
@@ -296,10 +355,9 @@ class RPatrick():
             return cmd
 
         if self._mode != self.rpmode:
-            LOG.info(f'Update operation mode to {self._mode}')
+            LOG.info(f"Update operation mode to {self._mode}")
 
             return make_ctrl(self._mode, 0, 0)
-
 
         # TODO: implement the controls...
         self.head.target_phi = (self.rptime, -self.rpy[0])
