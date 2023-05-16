@@ -52,10 +52,10 @@ hphi_params = {
 
 
 class StepAction:
-    left_wheel: float = 0
-    right_wheel: float = 0
-    head_pitch: float = 0
-    head_turn: float = 0
+    left_wheel: float = 0.
+    right_wheel: float = 0.
+    head_pitch: float = 0.
+    head_turn: float = 0.
 
     @property
     def ndim(self) -> int:
