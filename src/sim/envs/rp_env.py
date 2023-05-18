@@ -184,9 +184,11 @@ def make_arena() -> mjcf.RootElement:
 
 
 class GymRP(gymnasium.Env):
-    metadata = {"render_modes": ["rgb_array"], "render_fps": 30}
+    metadata = {"render_modes": ["rgb_array"], "render_fps": 100}
 
-    def __init__(self, state_keys: list[str], render_mode="rgb_array"):
+    def __init__(
+        self, state_keys: list[str], render_mode="rgb_array", record: bool = False
+    ):
         # Make rp:
         rp = MujocoRP()
 
@@ -219,7 +221,7 @@ class GymRP(gymnasium.Env):
         self.head_picth_sens = rp.model.find("sensor", "headpitch_sensor")
         self.head_turn_sens = rp.model.find("sensor", "headturn_sensor")
 
-        self.state = State(keys=state_keys)
+        self.state = State(keys=state_keys, record=record)
 
         self.observation_space = self.state.to_obs_space()
 
@@ -244,21 +246,20 @@ class GymRP(gymnasium.Env):
         )
 
         self.render_mode = render_mode
-        self.step_time = 0.01  # s
+        self.step_time = 0.010  # s
+        self.metadata["render_fps"] = int(1 / self.step_time)
         self._prev_action = None
 
     def _update_state(self):
-        self.state.obs.update_t = self.dm_env.data.time
-        self.state.obs.update_acc = self.dm_env.bind(self.acc_sens).sensordata.copy()
-        self.state.obs.update_gyro = self.dm_env.bind(self.gyro_sens).sensordata.copy()
-        self.state.obs.update_head_pitch = self.dm_env.bind(
-            self.head_picth_sens
-        ).sensordata.copy()[0]
-        self.state.obs.update_head_turn = self.dm_env.bind(
-            self.head_turn_sens
-        ).sensordata.copy()[0]
-
-        self.state.update(self._prev_action)
+        self.state.update(
+            t=self.dm_env.data.time,
+            acc=self.dm_env.bind(self.acc_sens).sensordata.copy(),
+            gyro=self.dm_env.bind(self.gyro_sens).sensordata.copy(),
+            head_pitch=self.dm_env.bind(self.head_picth_sens).sensordata.copy()[0],
+            head_turn=self.dm_env.bind(self.head_turn_sens).sensordata.copy()[0],
+            action=self._prev_action,
+            reward=self._get_reward(),
+        )
 
     def _get_obs(self) -> dict:
         return self.state.get_state_dict()
