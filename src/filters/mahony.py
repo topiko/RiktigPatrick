@@ -19,9 +19,11 @@ class Mahony:
         assert dt > 0
 
         if not np.isclose(np.linalg.norm(acc), 1):
-            acc /= np.linalg.norm(acc)
+            acc_ = acc/np.linalg.norm(acc)
+        else:
+            acc_ = acc
 
-        v = acc
+        v = acc_
         R = qt.as_rotation_matrix(self.qhat)
         vhat = -R.T @ self.g
 
