@@ -198,6 +198,8 @@ class State:
         self.mahony.reset()
         self.prev_t = 0
         self._history = []
+        self._action_dict = StepAction().to_dict()
+        self._info_dict = {"reward": 0}
 
     def get_state_dict(
         self, keys: Optional[Union[str, list[str]]] = None

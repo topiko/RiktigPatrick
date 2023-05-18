@@ -248,7 +248,7 @@ class GymRP(gymnasium.Env):
         self.render_mode = render_mode
         self.step_time = 0.010  # s
         self.metadata["render_fps"] = int(1 / self.step_time)
-        self._prev_action = None
+        self._prev_action = StepAction()
 
     def _update_state(self):
         self.state.update(
@@ -281,6 +281,8 @@ class GymRP(gymnasium.Env):
     @property
     def terminated(self) -> bool:
         if self.dm_env.data.time < self.step_time * 5:
+            if abs(self.state.euler[1]) > 10:
+                raise ValueError("This should not happen?")
             return False
 
         return abs(self.state.euler[1]) > 10
@@ -315,10 +317,9 @@ class GymRP(gymnasium.Env):
             t = self.dm_env.data.time
 
         self._update_state()
-        obs_d = self._get_obs()
 
         return (
-            obs_d,
+            self._get_obs(),
             self._get_reward(),
             self.terminated,
             self.truncated,
