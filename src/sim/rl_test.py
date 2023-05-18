@@ -1,4 +1,5 @@
 from __future__ import annotations
+import mlflow
 import torch
 from torch import nn
 from torch.distributions.normal import Normal
@@ -7,6 +8,10 @@ import numpy as np
 
 import gymnasium as gym
 from gymnasium.envs.registration import register
+from gymnasium.wrappers import RecordVideo
+from gymnasium.wrappers import RecordEpisodeStatistics
+
+from mlflow.client import MlflowClient
 
 from riktigpatric.patrick import StepAction
 
@@ -171,7 +176,6 @@ class REINFORCE:
                 # log(p1*p2*..) = log(p1) + log(p2) + ...
                 loss -= log_prob.sum() * delta
 
-
         # Update the policy network
         self.optimizer.zero_grad()
         loss.backward()
@@ -182,13 +186,19 @@ class REINFORCE:
         self.rewards = []
 
 
+def record(ep_id) -> bool:
+    global NEW_VID
+    if NEW_VID:
+        NEW_VID = False
+        return True
+
+    return False
+
+
 def run_episode(
     agent: REINFORCE,
     rp_env: gym.Env,
-    step_time: float = 0.01,
     seed: int = 42,
-    show: bool = False,
-    fname: str = "",
     nrollouts: int = 1,
 ) -> np.ndarray:
     obs = rp_env.reset(seed=seed)
@@ -214,6 +224,9 @@ def run_episode(
 
 
 if __name__ == "__main__":
+    NROLLOUTS = 32
+    NEW_VID = False
+
     register(
         id="RiktigPatrick-v0",
         entry_point="sim.envs.rp_env:GymRP",
@@ -230,22 +243,52 @@ if __name__ == "__main__":
         ],
         render_mode="rgb_array",
     )
+
+    rpenv = RecordVideo(rpenv, "./video", episode_trigger=record, name_prefix="rp")
+    rpenv = RecordEpisodeStatistics(rpenv, deque_size=NROLLOUTS)
+
     rpenv.reset()
 
     indim = len(rpenv.state.get_state_arr())
     agent = REINFORCE(indim, 1)  # StepAction().ndim)
 
-    nrollouts = 32
+    RUN_NAME = "rp_test"
+    client = MlflowClient()
+    try:
+        experiment_id = client.create_experiment(RUN_NAME)
+    except:
+        experiment_id = client.get_experiment_by_name(RUN_NAME).experiment_id
 
-    rewards = []
-    for episode in range(10001):
-        rewards.append(run_episode(agent, rpenv, nrollouts=nrollouts))
+    returns = []
+    MAX_RETURN = 0
+    with mlflow.start_run(experiment_id=experiment_id, run_name=RUN_NAME):
+        for episode in range(10001):
+            returns.append(run_episode(agent, rpenv, nrollouts=NROLLOUTS))
 
-        agent.update()
-        if episode % 10 == 0:
-            reward = np.array(rewards).mean()
-            rewards = []
-            agent.net.store()
-            print(f"Episode {episode:<6d} ({nrollouts} rollouts) --> {reward:.3f}")
+            mlflow.log_metrics(
+                {
+                    f"episode_dur_{i:02d}": v[0]
+                    for i, v in enumerate(rpenv.length_queue)
+                },
+                step=episode,
+            )
+            mlflow.log_metrics(
+                {
+                    f"episode_ret_{i:02d}": v[0]
+                    for i, v in enumerate(rpenv.return_queue)
+                },
+                step=episode,
+            )
 
-    run_episode(agent, rpenv, show=True)
+            agent.update()
+            if episode % 10 == 0:
+                mean_return = np.array(returns).mean()
+                returns = []
+                if mean_return > MAX_RETURN:
+                    print(f"Best return {mean_return:.02f} -> saving")
+                    agent.net.store()
+                    MAX_RETURN = mean_return
+                    NEW_VID = True
+                print(
+                    f"Episode {episode:<6d} ({NROLLOUTS} rollouts) --> {mean_return:.3f}"
+                )
