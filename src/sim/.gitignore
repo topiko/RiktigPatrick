@@ -2,3 +2,5 @@
 *.mp4
 *.pth
 *.bak*
+video/
+mlruns/

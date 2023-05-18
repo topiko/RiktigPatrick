@@ -76,7 +76,7 @@ rpenv = gym.make(
 
 make_vid = True
 rpenv = RecordVideo(
-    rpenv, "./video_try_policy", episode_trigger=lambda _: make_vid, name_prefix="rp"
+    rpenv, "./video", episode_trigger=lambda _: make_vid, name_prefix="try_policy_rp"
 )
 
 rpenv.reset()
