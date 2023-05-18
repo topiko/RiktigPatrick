@@ -35,14 +35,18 @@ class Policy_Network(nn.Module):
         # Shared Network
         self.shared_net = nn.Sequential(
             nn.Linear(obs_space_dims, hidden_space1),
-            nn.Tanh(),
+            nn.LeakyReLU(),
+            # nn.Sigmoid(),
             nn.Linear(hidden_space1, hidden_space2),
-            nn.Tanh(),
+            nn.LeakyReLU()
+            # nn.Sigmoid(),
         )
 
         # Policy Mean specific Linear Layer
         self.policy_mean_net = nn.Sequential(
-            nn.Linear(hidden_space2, action_space_dims)
+            nn.Linear(hidden_space2, hidden_space2),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_space2, action_space_dims),
         )
 
         # Policy Std Dev specific Linear Layer
@@ -94,7 +98,7 @@ class REINFORCE:
         """
 
         # Hyperparameters
-        self.learning_rate = 1e-4  # orig = 1e-4 Learning rate for policy optimization
+        self.learning_rate = 5e-4  # orig = 1e-4 Learning rate for policy optimization
         self.gamma = 0.8  # Discount factor
         self.eps = 1e-6  # small number for mathematical stability
 
@@ -201,12 +205,10 @@ def run_episode(
     seed: int = 42,
     nrollouts: int = 1,
 ) -> np.ndarray:
-    obs = rp_env.reset(seed=seed)
-
     sum_rewards = [0.0] * nrollouts
     for rollout in range(nrollouts):
         agent.rollout_index = rollout
-        rp_env.reset()
+        rp_env.reset(seed=seed)
         while True:
             # TODO: Wrap the rpenv into something the flattens the observation.
             obs = torch.Tensor(rp_env.state.get_state_arr())
@@ -265,26 +267,25 @@ if __name__ == "__main__":
         for episode in range(10001):
             returns.append(run_episode(agent, rpenv, nrollouts=NROLLOUTS))
 
-            mlflow.log_metrics(
-                {
-                    f"episode_dur_{i:02d}": v[0]
-                    for i, v in enumerate(rpenv.length_queue)
-                },
-                step=episode,
-            )
-            mlflow.log_metrics(
-                {
-                    f"episode_ret_{i:02d}": v[0]
-                    for i, v in enumerate(rpenv.return_queue)
-                },
-                step=episode,
-            )
-
             agent.update()
             if episode % 10 == 0:
+                mlflow.log_metrics(
+                    {
+                        f"episode_dur_{i:02d}": v[0]
+                        for i, v in enumerate(rpenv.length_queue)
+                    },
+                    step=episode,
+                )
+                mlflow.log_metrics(
+                    {
+                        f"episode_ret_{i:02d}": v[0]
+                        for i, v in enumerate(rpenv.return_queue)
+                    },
+                    step=episode,
+                )
                 mean_return = np.array(returns).mean()
                 returns = []
-                if mean_return > MAX_RETURN:
+                if mean_return > (MAX_RETURN + 5):
                     print(f"Best return {mean_return:.02f} -> saving")
                     agent.net.store()
                     MAX_RETURN = mean_return
