@@ -52,10 +52,10 @@ hphi_params = {
 
 
 class StepAction:
-    left_wheel: float = 0.
-    right_wheel: float = 0.
-    head_pitch: float = 0.
-    head_turn: float = 0.
+    left_wheel: float = 0.0
+    right_wheel: float = 0.0
+    head_pitch: float = 0.0
+    head_turn: float = 0.0
 
     @property
     def ndim(self) -> int:
@@ -135,20 +135,60 @@ class Obs:
 
 
 class State:
-    def __init__(self, keys: list[str] = ["sens/gyro", "filter/rp_pitch", "act/left_wheel"]):
+    def __init__(
+        self,
+        keys: list[str] = ["sens/gyro", "filter/rp_pitch", "act/left_wheel"],
+        record: bool = False,
+    ):
         self.obs = Obs()
         self.keys = keys
         self.mahony = Mahony()
         self.prev_t = 0
         self._action_dict = StepAction().to_dict()
+        self._info_dict = {}
+        self._record = record
+        self._history = []
 
-    def update(self, action: Optional[StepAction] = None):
-        # TODO: update the orientation filter.
-        self.mahony.update(self.obs.acc, self.obs.gyro, self.obs.t - self.prev_t)
-        self.prev_t = self.obs.t
+    def update(
+        self,
+        *,  # Force names
+        t: float,
+        acc: np.ndarray,
+        gyro: np.ndarray,
+        head_pitch: float,
+        head_turn: float,
+        action: Optional[StepAction] = None,
+        reward: Optional[float] = None,
+    ):
+        self.obs.update_t = t
+        self.obs.update_gyro = gyro
+        self.obs.update_acc = acc
+        self.obs.update_head_pitch = head_pitch
+        self.obs.update_head_turn = head_turn
+
+        # Sens fusion:
+        self.mahony.update(acc, gyro, t - self.prev_t)
+        self.prev_t = t
 
         if action is not None:
             self._action_dict = action.to_dict()
+
+        self._info_dict = {}
+        if reward is not None:
+            self._info_dict["reward"] = np.array([reward])
+
+        # TODO: store history:
+        if self._record:
+            self._history.append(self.get_state_arr(keys="all"))
+
+    @property
+    def history(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        if not self._record:
+            raise KeyError("You have not recorded history.")
+        return (
+            np.vstack(self._history),
+            self.get_state_arr(keys="all", ret_idxs=True)[1],
+        )
 
     @property
     def euler(self) -> np.ndarray:
@@ -157,37 +197,61 @@ class State:
     def reset(self):
         self.mahony.reset()
         self.prev_t = 0
+        self._history = []
 
-
-    def get_state_dict(self, wlimits: bool = False) -> dict[str, np.ndarray]:
+    def get_state_dict(
+        self, keys: Optional[Union[str, list[str]]] = None
+    ) -> dict[str, np.ndarray]:
         d = {
             "sens/acc": self.obs.acc,
             "sens/gyro": self.obs.gyro,
             "sens/head_pitch": self.obs.head_pitch,
-            "sens/heado_turn": self.obs.head_turn,
+            "sens/head_turn": self.obs.head_turn,
             "filter/rp_pitch": np.array([self.euler[1]]),
-            "time": self.obs.t,
+            "time": np.array([self.obs.t]),
         }
         d.update(self._action_dict)
+        d.update(self._info_dict)
 
-        d = {k: v for k, v in d.items() if k in self.keys}
+        if keys is None:
+            keys = self.keys
+        elif keys == "all":
+            keys = sorted(list(d.keys()))
+        elif isinstance(keys, list):
+            pass
+        else:
+            raise ValueError("Invalid keys!")
+
+        d = {k: v for k, v in d.items() if k in keys}
 
         return d
 
     def get_state_arr(
-        self, state_d: Optional[dict[str, np.ndarray]] = None
-    ) -> np.ndarray:
-        if state_d is None:
-            state_d = self.get_state_dict()
+        self, keys: Optional[Union[str, list[str]]] = None, ret_idxs: bool = False
+    ) -> Union[np.ndarray, tuple[np.ndarray, dict[str, np.ndarray]]]:
+        """
 
-        arrs = []
-        for k in self.keys:
-            arrs.append(state_d[k])
+        Args:
+            keys: list of keys to include.
+            ret_idxs: Whether to return dictionary with idxs for the measurements.
 
-        return np.concatenate(arrs)
+        Returns:
 
-    def sdict2sarr(self, state_d: dict[str, np.ndarray]) -> np.ndarray:
-        return self.get_state_arr(state_d)
+
+        """
+        state_d = self.get_state_dict(keys=keys)
+
+        state_arr = np.concatenate([arr for arr in state_d.values()], axis=0)
+        if ret_idxs:
+            start_idx = 0
+            idxs_d = {}
+            for k, v in state_d.items():
+                idxs_d[k] = np.arange(len(v)) + start_idx
+                start_idx += len(v)
+
+            return state_arr, idxs_d
+
+        return state_arr
 
     def to_obs_space(self) -> spaces.Dict:
         return spaces.Dict(
