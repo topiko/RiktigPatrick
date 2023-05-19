@@ -4,6 +4,7 @@ from gymnasium import spaces
 
 from typing import Optional
 from typing import Any
+from typing import Union
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,27 +15,37 @@ from riktigpatric.patrick import State
 from riktigpatric.patrick import StepReturn
 from riktigpatric.patrick import StepAction
 
-from utils import display_video
 
 BODY_D = 0.05
 BODY_H = 0.25
 BODY_W = 0.1
-BODY_M = 400
+BODY_M = 0.400
 
 WHEEL_D = BODY_D * 2
 
 HEAD_D = 0.03
 HEAD_H = 0.1
 HEAD_W = 0.1
-HEAD_M = 200
+HEAD_M = 0.200
 
 
 class MujocoRP:
     def __init__(
         self,
         rgba: list[float] = [0.20269912, 0.4307427, 0.33218761, 1.0],
-        markers: bool = True,
+        wheel_markers: bool = True,
+        seed: Optional[int] = None,
     ):
+        """
+
+        Args:
+            rgba:
+            markers:
+            seed: random seed to introduce variance None for deterministic env. NOT IMPLEMENTED
+
+        """
+        # TODO: seed to introduce variance to RP
+
         self.model = mjcf.RootElement("frame")
 
         # Body:
@@ -51,7 +62,7 @@ class MujocoRP:
         )
 
         # Wheels
-        kv_wheel = 3200
+        kv_wheel = 1.200
         for diry, key in zip([-1, 1], ["rightwheel", "leftwheel"]):
             y = diry * (BODY_W / 2 + 0.001)
             # Wheel
@@ -63,9 +74,9 @@ class MujocoRP:
                 fromto=[0, 0, 0, 0, diry * 0.02, 0],
                 friction=(2, 0.005, 0.0001),
                 size=[WHEEL_D / 2],
-                mass=20,  # g
+                mass=0.020,  # kg
             )
-            if markers:
+            if wheel_markers:
                 wheel.add(
                     "geom",
                     type="cylinder",
@@ -90,7 +101,7 @@ class MujocoRP:
             )
 
         # Head:
-        kp_servo = 2500
+        kp_servo = 1.500
 
         head = self.model.worldbody.add(
             "body", name="head", pos=[BODY_D / 2, 0, BODY_H]
@@ -230,16 +241,16 @@ class GymRP(gymnasium.Env):
         max_w_head = np.pi * 2
         self.action_space = spaces.Dict(
             {
-                "left_wheel": spaces.Box(
+                "act/left_wheel": spaces.Box(
                     -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
                 ),
-                "right_wheel": spaces.Box(
+                "act/right_wheel": spaces.Box(
                     -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
                 ),
-                "head_pitch_v": spaces.Box(
+                "act/head_pitch": spaces.Box(
                     -max_w_head, max_w_head, shape=(1,), dtype=float
                 ),
-                "head_turn_v": spaces.Box(
+                "act/head_turn": spaces.Box(
                     -max_w_head, max_w_head, shape=(1,), dtype=float
                 ),
             }
@@ -265,9 +276,15 @@ class GymRP(gymnasium.Env):
         return self.state.get_state_dict()
 
     def _get_reward(self, type: str = "time", obs: Optional[State] = None) -> float:
-        return (10**2 - self.state.euler[1] ** 2) / 100 - (
-            self.state.get_state_dict()["act/left_wheel"] / (np.pi * 2 * 5)
-        ) ** 2
+        return (
+            (10**2 - self.state.euler[1] ** 2) / 100
+            - abs(self.state.get_state_dict(keys="all")["sens/head_pitch"])
+            / np.pi
+            * 0.5
+            - abs(self.state.get_state_dict(keys="all")["sens/head_turn"])
+            / (np.pi / 2)
+            * 0.5
+        )
 
     def _get_info(self) -> dict:
         return {}
@@ -298,9 +315,11 @@ class GymRP(gymnasium.Env):
             return self.dm_env.render(camera_id=0, height=480, width=640)
 
     def step(
-        self, action: Optional[StepAction] = None
+        self, action: Optional[Union[dict[str, np.ndarray], StepAction]] = None
     ) -> tuple[dict, float, bool, bool, dict]:
         if action is not None:
+            if isinstance(action, dict):
+                action = StepAction().from_dict(action)
             self._prev_action = action
             self.dm_env.bind(self.left_wheel_act).ctrl = action.left_wheel
             self.dm_env.bind(self.right_wheel_act).ctrl = action.right_wheel  # rad/s
@@ -327,3 +346,31 @@ class GymRP(gymnasium.Env):
             self.truncated,
             self._get_info(),
         )
+
+
+if __name__ == "__main__":
+    # Make rp:
+    rp = MujocoRP()
+
+    # Make arena:
+    arena = make_arena()
+
+    # Spawn rp at arena:
+    xpos, ypos, zpos = 0.0, 0.0, WHEEL_D / 2
+    spawn_site = arena.worldbody.add(
+        "site", name="rp_site", pos=[xpos, ypos, zpos], group=3
+    )
+    spawn_site.attach(rp.model).add("freejoint")  # "freejoint"
+
+    dm_env = mjcf.Physics.from_mjcf_model(arena)
+
+    frames = []
+    FRAMERATE = 30
+    for _ in range(2000):
+        dm_env.step()
+        if dm_env.data.time > (1.0 / FRAMERATE) * len(frames):
+            frames.append(dm_env.render(camera_id=0, height=480, width=640))
+
+    from sim.utils import display_video
+
+    display_video(frames, FRAMERATE)

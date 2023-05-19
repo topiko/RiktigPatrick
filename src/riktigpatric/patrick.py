@@ -52,29 +52,54 @@ hphi_params = {
 
 
 class StepAction:
-    left_wheel: float = 0.0
-    right_wheel: float = 0.0
-    head_pitch: float = 0.0
-    head_turn: float = 0.0
+    left_wheel: Union[np.ndarray, float] = 0.0
+    right_wheel: Union[np.ndarray, float] = 0.0
+    head_pitch: Union[np.ndarray, float] = 0.0
+    head_turn: Union[np.ndarray, float] = 0.0
 
     @property
     def ndim(self) -> int:
         return 4
 
     def to_dict(self) -> dict[str, np.ndarray]:
+        if isinstance(self.left_wheel, float):
+            return {
+                "act/left_wheel": np.array([self.left_wheel]),
+                "act/right_wheel": np.array([self.right_wheel]),
+                "act/head_pitch": np.array([self.head_pitch]),
+                "act/head_turn": np.array([self.head_turn]),
+            }
+
         return {
-            "act/left_wheel": np.array([self.left_wheel]),
-            "act/right_wheel": np.array([self.right_wheel]),
-            "act/head_pitch": np.array([self.head_pitch]),
-            "act/head_turn": np.array([self.head_turn]),
+            "act/left_wheel": self.left_wheel,
+            "act/right_wheel": self.right_wheel,
+            "act/head_pitch": self.head_pitch,
+            "act/head_turn": self.head_turn,
         }
 
-    def from_tensor(self, action: torch.Tensor) -> StepAction:
-        self.left_wheel = action[0].item() + action[1].item()
-        self.right_wheel = action[0].item() - action[1].item()
-        self.head_pitch = action[2].item()
-        self.head_turn = action[3].item()
+    def from_dict(self, d: dict[str, np.ndarray]) -> StepAction:
+        if d["act/left_wheel"].ndim != 1:
+            raise NotImplementedError()
+        self.left_wheel = d["act/left_wheel"][0]
+        self.right_wheel = d["act/right_wheel"][0]
+        self.head_pitch = d["act/head_pitch"][0]
+        self.head_turn = d["act/head_turn"][0]
         return self
+
+    def from_array(self, action: np.ndarray) -> StepAction:
+        if action.ndim == 1:
+            print("Ndim == 1")
+            action = action.reshape(1, -1)
+
+        action = action.astype(np.float64)
+        self.left_wheel = (action[:, 0] + action[:, 1]).reshape(-1, 1)
+        self.right_wheel = (action[:, 0] - action[:, 1]).reshape(-1, 1)
+        self.head_pitch = action[:, 2].reshape(-1, 1)
+        self.head_turn = action[:, 3].reshape(-1, 1)
+        return self
+
+    def __str__(self) -> str:
+        return f"left_wheel : {self.left_wheel}"
 
 
 class Obs:
@@ -218,13 +243,13 @@ class State:
         if keys is None:
             keys = self.keys
         elif keys == "all":
-            keys = sorted(list(d.keys()))
+            keys = list(d.keys())
         elif isinstance(keys, list):
             pass
         else:
             raise ValueError("Invalid keys!")
 
-        d = {k: v for k, v in d.items() if k in keys}
+        d = {k: d[k] for k in sorted(keys)}
 
         return d
 
