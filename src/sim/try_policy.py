@@ -59,7 +59,6 @@ def plot_state_history(
 register(
     id="RiktigPatrick-v0",
     entry_point="sim.envs.rp_env:GymRP",
-    max_episode_steps=300,
 )
 
 rpenv = gym.make(

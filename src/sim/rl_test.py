@@ -98,8 +98,8 @@ class REINFORCE:
         """
 
         # Hyperparameters
-        self.learning_rate = 5e-4  # orig = 1e-4 Learning rate for policy optimization
-        self.gamma = 0.8  # Discount factor
+        self.learning_rate = 1e-4  # orig = 1e-4 Learning rate for policy optimization
+        self.gamma = 0.9  # Discount factor
         self.eps = 1e-6  # small number for mathematical stability
 
         self._rollout_index = 0
@@ -232,7 +232,7 @@ if __name__ == "__main__":
     register(
         id="RiktigPatrick-v0",
         entry_point="sim.envs.rp_env:GymRP",
-        max_episode_steps=300,
+        max_episode_steps=2000,
     )
 
     rpenv = gym.make(
