@@ -142,6 +142,7 @@ class REINFORCE:
         losses = torch.zeros(len(tapes))
 
         # TODO: should rewards be normalized somehow?
+        # TODO: Yes! implement the -b thing from here -> https://mcneela.github.io/machine_learning/2019/06/03/The-Problem-With-Policy-Gradient.html
         for i, tape in enumerate(tapes):
             running_g = 0
             gs = []
