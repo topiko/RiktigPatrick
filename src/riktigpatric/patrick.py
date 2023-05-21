@@ -197,12 +197,12 @@ class State:
 
         if action is not None:
             self._action_dict = action.to_dict()
+            # TODO: infer the turning speed and put into state_d
 
         self._info_dict = {}
         if reward is not None:
             self._info_dict["reward"] = np.array([reward])
 
-        # TODO: store history:
         if self._record:
             self._history.append(self.get_state_arr(keys="all"))
 
