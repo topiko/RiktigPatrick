@@ -38,7 +38,7 @@ class Policy_Network(nn.Module):
         """
         super().__init__()
 
-        hidden_space1 = 16  # Nothing special with 16, feel free to change
+        hidden_space1 = 32  # Nothing special with 16, feel free to change
         hidden_space2 = 32  # Nothing special with 32, feel free to change
 
         # Shared Network
@@ -105,11 +105,11 @@ class REINFORCE:
         """
 
         # Hyperparameters
-        self.learning_rate = 1e-4  # orig = 1e-4 Learning rate for policy optimization
+        self.learning_rate = 1e-5  # orig = 1e-4 Learning rate for policy optimization
         self.gamma = 0.9  # Discount factor
         self.eps = 1e-6  # small number for mathematical stability
 
-        self.net = Policy_Network(obs_space_dims, action_space_dims)
+        self.net = Policy_Network(obs_space_dims, action_space_dims).load()
         self.optimizer = torch.optim.AdamW(self.net.parameters(), lr=self.learning_rate)
 
     def sample_action(
@@ -196,6 +196,8 @@ if __name__ == "__main__":
                 "RiktigPatrick-v0",
                 state_keys=[
                     "sens/gyro",
+                    "sens/head_pitch",
+                    "sens/head_turn",
                     "act/left_wheel",
                     "act/right_wheel",
                     "filter/rp_pitch",
@@ -219,47 +221,60 @@ if __name__ == "__main__":
     RUN_NAME = "rp_test_parallel"
     client = MlflowClient()
     try:
-        experiment_id = client.create_experiment(RUN_NAME)
-    except:
         experiment_id = client.get_experiment_by_name(RUN_NAME).experiment_id
+    except:
+        experiment_id = client.create_experiment(RUN_NAME)
 
-    returns = []
     MAX_RETURN = 0
     seed = 42
     with mlflow.start_run(experiment_id=experiment_id, run_name=RUN_NAME):
-        mean_return = 0
-        for episode in range(100001):
+        for episode in range(200001):
+            obs, _ = rpenv_p.reset(seed=seed)
             tapes = [Tape(i) for i in range(BATCH_SIZE)]
             full_tapes = []
-            obs, _ = rpenv_p.reset(seed=seed)
             ready_ = np.zeros(BATCH_SIZE, dtype=bool)
-            for _ in range(100):
+            while True:
                 actions, probs = agent.sample_action(obs)
 
                 obs, rewards, terminated, truncated, _ = rpenv_p.step(actions)
 
                 for i, t in enumerate(tapes):
-                    t.rewards.append(rewards[i, 0])
+                    t.rewards.append(rewards[i])
                     t.probs.append(probs[i])
                     if terminated[i]:
                         full_tapes.append(t)
                         ready_[i] = True
 
+                        # New tape to tapes list
+                        tapes[i] = Tape(i)
+
                 if all(ready_):
-                    agent.update(full_tapes)
-                    rets = [t.ep_return for t in full_tapes]
-                    mean_return = np.mean(rets)
-                    std_return = np.std(rets)
-                    mlflow.log_metrics(
-                        {"mean_ret": mean_return, "std_ret": std_return},
-                        step=episode,
-                    )
                     break
 
-            if episode % 10 == 0:
-                if mean_return > (MAX_RETURN + 5):
+            assert (
+                len(full_tapes) >= BATCH_SIZE
+            ), f"len(full_tapes) = {len(full_tapes)}, {len(ready_)}"
+            agent.update(full_tapes)
+
+            # Record stats:
+            rets = [t.ep_return for t in full_tapes]
+            mean_return = np.mean(rets)
+            std_return = np.std(rets)
+            mlflow.log_metrics(
+                {
+                    "mean_ret": mean_return,
+                    "std_ret": std_return,
+                    "max_ret": max(rets),
+                    "min_ret": min(rets),
+                },
+                step=episode,
+            )
+            if mean_return > (MAX_RETURN + 5):
+                if episode >= 10:
                     print(f"Best return {mean_return:.02f} -> saving")
                     agent.net.store()
-                    MAX_RETURN = mean_return
-                    NEW_VID = True
-                print(f"Episode {episode:<6d} (bs={BATCH_SIZE}) --> {mean_return:.3f}")
+                MAX_RETURN = mean_return
+
+            print(
+                f"Episode {episode:<6d} (bs={len(full_tapes)}) --> {mean_return:6.02f} \u00B1 {std_return:5.02f}, min={min(rets):6.02f} max={max(rets):6.02f}"
+            )
