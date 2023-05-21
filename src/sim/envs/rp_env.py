@@ -276,15 +276,17 @@ class GymRP(gymnasium.Env):
         return self.state.get_state_dict()
 
     def _get_reward(self, type: str = "time", obs: Optional[State] = None) -> float:
-        return (
+        rew = (
             (10**2 - self.state.euler[1] ** 2) / 100
-            - abs(self.state.get_state_dict(keys="all")["sens/head_pitch"])
+            - abs(self.state.get_state_dict(keys="all")["sens/head_pitch"][0])
             / np.pi
             * 0.5
-            - abs(self.state.get_state_dict(keys="all")["sens/head_turn"])
+            - abs(self.state.get_state_dict(keys="all")["sens/head_turn"][0])
             / (np.pi / 2)
             * 0.5
         )
+
+        return rew
 
     def _get_info(self) -> dict:
         return {}
