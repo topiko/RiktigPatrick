@@ -301,11 +301,6 @@ class GymRP(gymnasium.Env):
 
     @property
     def terminated(self) -> bool:
-        if self.dm_env.data.time < self.step_time * 5:
-            if abs(self.state.euler[1]) > 10:
-                raise ValueError("This should not happen?")
-            return False
-
         return abs(self.state.euler[1]) > 10
 
     @property
