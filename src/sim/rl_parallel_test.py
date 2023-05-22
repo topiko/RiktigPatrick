@@ -1,4 +1,5 @@
 from __future__ import annotations
+import logging
 import mlflow
 import torch
 from torch import nn
@@ -16,6 +17,34 @@ from gymnasium import ActionWrapper
 from mlflow.client import MlflowClient
 
 from riktigpatric.patrick import StepAction
+
+config = {
+    "version": 1,
+    "disable_existing_loggers": True,
+    "formatters": {
+        "standard": {
+            "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+    "handlers": {
+        "default": {
+            "level": "INFO",
+            "formatter": "standard",
+            "class": "logging.StreamHandler",
+            "stream": "ext://sys.stdout",  # Default is stderr
+        },
+    },
+    "loggers": {
+        "": {  # root logger
+            "handlers": ["default"],
+            "level": "INFO",
+            "propagate": False,
+        }
+    },
+}
+logging.config.dictConfig(config)
+log = logging.getLogger(__name__)
 
 
 def dict2tensor(obs_d: dict[str, np.ndarray]) -> torch.Tensor:
@@ -105,7 +134,7 @@ class REINFORCE:
         """
 
         # Hyperparameters
-        self.learning_rate = 1e-5  # orig = 1e-4 Learning rate for policy optimization
+        self.learning_rate = 1e-4  # orig = 1e-4 Learning rate for policy optimization
         self.gamma = 0.9  # Discount factor
         self.eps = 1e-6  # small number for mathematical stability
 
@@ -271,10 +300,10 @@ if __name__ == "__main__":
             )
             if mean_return > (MAX_RETURN + 5):
                 if episode >= 10:
-                    print(f"Best return {mean_return:.02f} -> saving")
+                    log.info(f"Best return {mean_return:.02f} -> saving")
                     agent.net.store()
                 MAX_RETURN = mean_return
 
-            print(
+            log.info(
                 f"Episode {episode:<6d} (bs={len(full_tapes)}) --> {mean_return:6.02f} \u00B1 {std_return:5.02f}, min={min(rets):6.02f} max={max(rets):6.02f}"
             )
