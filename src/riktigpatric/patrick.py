@@ -98,8 +98,11 @@ class StepAction:
             action = action.reshape(1, -1)
 
         action = action.astype(np.float64)
+
+        # TODO: implement control mapping here.
         self.left_wheel = (action[:, 0] + action[:, 1]).reshape(-1, 1)
         self.right_wheel = (action[:, 0] - action[:, 1]).reshape(-1, 1)
+
         if not self.lock_head:
             self.head_pitch = action[:, 2].reshape(-1, 1)
             self.head_turn = action[:, 3].reshape(-1, 1)
