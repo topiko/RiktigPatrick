@@ -124,7 +124,6 @@ class Policy_Network(nn.Module):
         # Policy Std Dev specific Linear Layer
         self.policy_stddev_net = nn.Sequential(
             nn.Linear(hidden_space2, action_space_dims),
-            nn.Sigmoid()
         )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
