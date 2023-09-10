@@ -1,15 +1,43 @@
 from typing import Optional
 
-import numpy as np
-
 import gymnasium as gym
-from gymnasium.envs.registration import register
-from gymnasium.wrappers import RecordVideo
-from sim.rl_test import REINFORCE
-from sim.rl_test import Policy_Network
-from sim.rl_test import run_episode
-
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from gymnasium.envs.registration import register
+from gymnasium.wrappers import (RecordEpisodeStatistics, RecordVideo,
+                                TransformObservation)
+
+from sim.rl_parallel_test2 import (REINFORCE, Policy_Network, ValueNet,
+                                   dict2tensor)
+
+
+def run_episode(
+    agent: REINFORCE,
+    rp_env: gym.Env,
+    seed: int = 42,
+    nrollouts: int = 1,
+) -> np.ndarray:
+    sum_rewards = [0.0] * nrollouts
+    for rollout in range(nrollouts):
+        agent.rollout_index = rollout
+        rp_env.reset(seed=seed)
+        while True:
+            # TODO: Wrap the rpenv into something the flattens the observation.
+            obs = torch.Tensor(rp_env.state.get_state_arr())
+            action, _, _ = agent.sample_action(obs)
+
+            action = {k: v[0] for k, v in action.items()}
+
+            obs_d, reward, terminated, truncated, _ = rp_env.step(action)
+
+            sum_rewards[rollout] += reward
+            agent.reward = reward
+
+            if terminated or truncated:
+                break
+
+    return np.array(sum_rewards)
 
 
 def plot_state_history(
@@ -28,7 +56,7 @@ def plot_state_history(
 
     groups = {
         "wheels_lr": ("act/left_wheel", "act/right_wheel"),
-        "head_pt": ("act/head_pitch", "act/head_turn"),
+        # "head_pt": ("act/head_pitch", "act/head_turn"),
         "sens/head_pt": ("sens/head_pitch", "sens/head_turn"),
     }
 
@@ -56,35 +84,46 @@ def plot_state_history(
     plt.show()
 
 
-register(
-    id="RiktigPatrick-v0",
-    entry_point="sim.envs.rp_env:GymRP",
-)
+if __name__ == "__main__":
+    register(
+        id="RiktigPatrick-v0",
+        entry_point="sim.envs.rp_env:GymRP",
+        max_episode_steps=2000,
+        kwargs={"record": True},
+    )
 
-rpenv = gym.make(
-    "RiktigPatrick-v0",
-    state_keys=[
-        "sens/gyro",
-        "act/left_wheel",
-        "act/right_wheel",
-        "filter/rp_pitch",
-    ],
-    record=True,
-    render_mode="rgb_array",
-)
+    rpenv = gym.make(
+        "RiktigPatrick-v0",
+        state_keys=[
+            "sens/gyro",
+            "sens/head_pitch",
+            "sens/head_turn",
+            "act/left_wheel",
+            "act/right_wheel",
+            "filter/rp_pitch",
+        ],
+        render_mode="rgb_array",
+        disable_env_checker=True,
+    )
 
-make_vid = True
-rpenv = RecordVideo(
-    rpenv, "./video", episode_trigger=lambda _: make_vid, name_prefix="try_policy_rp"
-)
+    rpenv = TransformObservation(rpenv, dict2tensor)
+    make_vid = True
+    rpenv = RecordVideo(
+        rpenv,
+        "./video",
+        episode_trigger=lambda _: make_vid,
+        name_prefix="try_policy_rp",
+    )
 
-rpenv.reset()
+    rpenv.reset()
 
-indim = len(rpenv.state.get_state_arr())
-agent = REINFORCE(indim, 1)  # StepAction().ndim)
+    indim = sum(v.shape[0] for v in rpenv.observation_space.values())
+    actiondim = sum(v.shape[0] for v in rpenv.action_space.values())
 
-run_episode(agent, rpenv)
+    agent = REINFORCE(indim, actiondim)  # StepAction().ndim)
 
-history, idx_d = rpenv.state.history
+    run_episode(agent, rpenv)
 
-plot_state_history(history=history, idx_dict=idx_d)
+    history, idx_d = rpenv.state.history
+
+    plot_state_history(history=history, idx_dict=idx_d)
