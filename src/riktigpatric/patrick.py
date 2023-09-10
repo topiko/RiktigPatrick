@@ -94,7 +94,7 @@ class StepAction:
 
     def from_array(self, action: np.ndarray) -> StepAction:
         if action.ndim == 1:
-            print("Ndim == 1")
+            # print("Ndim == 1")
             action = action.reshape(1, -1)
 
         action = action.astype(np.float64)
