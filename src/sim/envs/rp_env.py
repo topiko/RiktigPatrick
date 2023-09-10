@@ -1,23 +1,15 @@
-import torch
+from typing import Any, Optional, Union
+
 import gymnasium
-from gymnasium import spaces
-
-from typing import Optional
-from typing import Any
-from typing import Union
-
-import numpy as np
 import matplotlib.pyplot as plt
-
+import numpy as np
+import torch
 from dm_control import mjcf
-
-from riktigpatric.patrick import State
-from riktigpatric.patrick import StepReturn
-from riktigpatric.patrick import StepAction
-
+from gymnasium import spaces
+from riktigpatric.patrick import State, StepAction, StepReturn
 
 BODY_D = 0.05
-BODY_H = 0.25
+BODY_H = 0.4 # 0.25
 BODY_W = 0.1
 BODY_M = 0.400
 
@@ -198,7 +190,11 @@ class GymRP(gymnasium.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 100}
 
     def __init__(
-        self, state_keys: list[str], render_mode="rgb_array", record: bool = False
+        self,
+        state_keys: list[str],
+        render_mode="rgb_array",
+        record: bool = False,
+        lock_head: bool = True,
     ):
         # Make rp:
         rp = MujocoRP()
@@ -223,8 +219,6 @@ class GymRP(gymnasium.Env):
         # Actuators:
         self.left_wheel_act = rp.model.find("actuator", "leftwheel_actuator")
         self.right_wheel_act = rp.model.find("actuator", "rightwheel_actuator")
-        self.head_pitch_act = rp.model.find("actuator", "headpitch_actuator")
-        self.head_turn_act = rp.model.find("actuator", "headturn_actuator")
 
         # Sensors:
         self.gyro_sens = rp.model.find("sensor", "gyro")
@@ -239,23 +233,32 @@ class GymRP(gymnasium.Env):
         # TODO: import these from somwehere
         max_w_wheel = np.pi * 2 * 5
         max_w_head = np.pi * 2
-        self.action_space = spaces.Dict(
-            {
-                "act/left_wheel": spaces.Box(
-                    -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
-                ),
-                "act/right_wheel": spaces.Box(
-                    -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
-                ),
-                "act/head_pitch": spaces.Box(
-                    -max_w_head, max_w_head, shape=(1,), dtype=float
-                ),
-                "act/head_turn": spaces.Box(
-                    -max_w_head, max_w_head, shape=(1,), dtype=float
-                ),
-            }
-        )
 
+        action_space = {
+            "act/left_wheel": spaces.Box(
+                -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
+            ),
+            "act/right_wheel": spaces.Box(
+                -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
+            ),
+        }
+
+        if not lock_head:
+            self.head_pitch_act = rp.model.find("actuator", "headpitch_actuator")
+            self.head_turn_act = rp.model.find("actuator", "headturn_actuator")
+            action_space.update(
+                {
+                    "act/head_pitch": spaces.Box(
+                        -max_w_head, max_w_head, shape=(1,), dtype=float
+                    ),
+                    "act/head_turn": spaces.Box(
+                        -max_w_head, max_w_head, shape=(1,), dtype=float
+                    ),
+                }
+            )
+
+        self.lock_head = lock_head
+        self.action_space = spaces.Dict(action_space)
         self.render_mode = render_mode
         self.step_time = 0.010  # s
         self.metadata["render_fps"] = int(1 / self.step_time)
@@ -320,8 +323,9 @@ class GymRP(gymnasium.Env):
             self._prev_action = action
             self.dm_env.bind(self.left_wheel_act).ctrl = action.left_wheel
             self.dm_env.bind(self.right_wheel_act).ctrl = action.right_wheel  # rad/s
-            self.dm_env.bind(self.head_pitch_act).ctrl = action.head_pitch  # rad/s
-            self.dm_env.bind(self.head_turn_act).ctrl = action.head_turn  # rad/s
+            if not self.lock_head:
+                self.dm_env.bind(self.head_pitch_act).ctrl = action.head_pitch  # rad/s
+                self.dm_env.bind(self.head_turn_act).ctrl = action.head_turn  # rad/s
 
         if self.step_time is None:
             step_time = self.dm_env.timestep()

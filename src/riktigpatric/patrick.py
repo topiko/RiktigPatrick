@@ -2,22 +2,19 @@
 This is the module that contains RiktigPatrick!
 """
 from __future__ import annotations
-from typing import Union
-from typing import Optional
 
-import time
 import logging
+import time
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
 import torch
-from gymnasium import spaces
-
-from relay.conversions import make_ctrl
 from filters.mahony import Mahony
+from gymnasium import spaces
+from relay.conversions import make_ctrl
 
 from riktigpatric.servo import Servo
-
 
 LOG = logging.getLogger("rp_logger")
 G = 9.81
@@ -57,33 +54,42 @@ class StepAction:
     head_pitch: Union[np.ndarray, float] = 0.0
     head_turn: Union[np.ndarray, float] = 0.0
 
+    def __init__(self, lock_head: bool = True):
+        self.lock_head = lock_head
+        if self.lock_head:
+            self._ndim = 2
+        else:
+            self._ndim = 4
+
     @property
     def ndim(self) -> int:
-        return 4
+        return self._ndim
 
     def to_dict(self) -> dict[str, np.ndarray]:
-        if isinstance(self.left_wheel, float):
-            return {
-                "act/left_wheel": np.array([self.left_wheel]),
-                "act/right_wheel": np.array([self.right_wheel]),
-                "act/head_pitch": np.array([self.head_pitch]),
-                "act/head_turn": np.array([self.head_turn]),
-            }
-
-        return {
+        act_arr = {
             "act/left_wheel": self.left_wheel,
             "act/right_wheel": self.right_wheel,
-            "act/head_pitch": self.head_pitch,
-            "act/head_turn": self.head_turn,
         }
+        if not self.lock_head:
+            act_arr.update(
+                {
+                    "act/head_pitch": self.head_pitch,
+                    "act/head_turn": self.head_turn,
+                }
+            )
+        if isinstance(self.left_wheel, float):
+            return {k: np.array([v]) for k, v in act_arr.items()}
+
+        return act_arr
 
     def from_dict(self, d: dict[str, np.ndarray]) -> StepAction:
         if d["act/left_wheel"].ndim != 1:
             raise NotImplementedError()
         self.left_wheel = d["act/left_wheel"][0]
         self.right_wheel = d["act/right_wheel"][0]
-        self.head_pitch = d["act/head_pitch"][0]
-        self.head_turn = d["act/head_turn"][0]
+        if not self.lock_head:
+            self.head_pitch = d["act/head_pitch"][0]
+            self.head_turn = d["act/head_turn"][0]
         return self
 
     def from_array(self, action: np.ndarray) -> StepAction:
@@ -94,8 +100,9 @@ class StepAction:
         action = action.astype(np.float64)
         self.left_wheel = (action[:, 0] + action[:, 1]).reshape(-1, 1)
         self.right_wheel = (action[:, 0] - action[:, 1]).reshape(-1, 1)
-        self.head_pitch = action[:, 2].reshape(-1, 1)
-        self.head_turn = action[:, 3].reshape(-1, 1)
+        if not self.lock_head:
+            self.head_pitch = action[:, 2].reshape(-1, 1)
+            self.head_turn = action[:, 3].reshape(-1, 1)
         return self
 
     def __str__(self) -> str:
