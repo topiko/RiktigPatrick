@@ -210,7 +210,7 @@ class GymRP(gymnasium.Env):
         spawn_site.attach(rp.model).add("freejoint")  # "freejoint"
 
         # Make environment:
-        self.simul_timestep = 0.002  # MuJoCo default 0.002
+        self.simul_timestep = 0.001  # MuJoCo default 0.002
         self.dm_env = mjcf.Physics.from_mjcf_model(arena)
         assert self.dm_env is not None
 
@@ -260,7 +260,7 @@ class GymRP(gymnasium.Env):
         self.lock_head = lock_head
         self.action_space = spaces.Dict(action_space)
         self.render_mode = render_mode
-        self.step_time = 0.010  # s
+        self.step_time = 0.006  # s
         self.metadata["render_fps"] = int(1 / self.step_time)
         self._prev_action = StepAction()
 
