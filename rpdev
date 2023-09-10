@@ -1,20 +1,20 @@
 source /home/topiko/.screenrc
 sessionname rpdev 
 screen -t VIM 1
-stuff "conda activate rp^M"
-stuff "cd `pwd`/src/^M"
+stuff "conda activate rl2^M"
+stuff "cd `pwd`/src/sim^M"
 stuff "vim^M"
 screen -t PYTHON 2
-stuff "conda activate rp^M"
-stuff "cd `pwd`/src/^M"
+stuff "conda activate rl2^M"
+stuff "cd `pwd`/src/sim^M"
 screen -t SERVER 3
-stuff "conda activate rp^M"
-stuff "cd `pwd`/src/^M"
-stuff "python main.py^M"
+stuff "conda activate rl2^M"
+stuff "cd `pwd`/src/sim^M"
+stuff "mlflow server^M"
 screen -t CONTROL 4
-stuff "conda activate rp^M"
-stuff "cd `pwd`/src/^M"
-stuff "python remote/keyboard_remote.py"
+stuff "conda activate rl2^M"
+stuff "cd `pwd`/src/sim^M"
+# stuff "python remote/keyboard_remote.py"
 # split -v
 select VIM
 focus
