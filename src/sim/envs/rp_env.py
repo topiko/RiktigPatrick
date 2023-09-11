@@ -9,16 +9,16 @@ from gymnasium import spaces
 from riktigpatric.patrick import State, StepAction, StepReturn
 
 BODY_D = 0.05
-BODY_H = 0.4 # 0.25
+BODY_H = 1  # 0.25
 BODY_W = 0.1
-BODY_M = 0.400
+BODY_M = 0.00001 #0.400
 
 WHEEL_D = BODY_D * 2
 
 HEAD_D = 0.03
 HEAD_H = 0.1
 HEAD_W = 0.1
-HEAD_M = 0.200
+HEAD_M = 0.02 #0.200
 
 
 class MujocoRP:
@@ -54,7 +54,7 @@ class MujocoRP:
         )
 
         # Wheels
-        kv_wheel = 1.200
+        kv_wheel = 1.2  # was 1.2
         for diry, key in zip([-1, 1], ["rightwheel", "leftwheel"]):
             y = diry * (BODY_W / 2 + 0.001)
             # Wheel
@@ -90,6 +90,9 @@ class MujocoRP:
                 gear=(1,),
                 actrange=[-50, 50],
                 kp=kv_wheel,  # <-- velocity feedback gain
+            )
+            self.model.sensor.add(
+                "jointvel", name=f"{key}_vel_sensor", joint=f"{key}_joint"
             )
 
         # Head:
@@ -210,7 +213,7 @@ class GymRP(gymnasium.Env):
         spawn_site.attach(rp.model).add("freejoint")  # "freejoint"
 
         # Make environment:
-        self.simul_timestep = 0.001  # MuJoCo default 0.002
+        self.simul_timestep = 0.002  # MuJoCo default 0.002
         self.dm_env = mjcf.Physics.from_mjcf_model(arena)
         assert self.dm_env is not None
 
@@ -225,6 +228,8 @@ class GymRP(gymnasium.Env):
         self.acc_sens = rp.model.find("sensor", "accelerometer")
         self.head_picth_sens = rp.model.find("sensor", "headpitch_sensor")
         self.head_turn_sens = rp.model.find("sensor", "headturn_sensor")
+        self.left_wheel_vel_sens = rp.model.find("sensor", "leftwheel_vel_sensor")
+        self.right_wheel_vel_sens = rp.model.find("sensor", "rightwheel_vel_sensor")
 
         self.state = State(keys=state_keys, record=record)
 
@@ -260,8 +265,9 @@ class GymRP(gymnasium.Env):
         self.lock_head = lock_head
         self.action_space = spaces.Dict(action_space)
         self.render_mode = render_mode
-        self.step_time = 0.006  # s
+        self.step_time = 0.002  # s
         self.metadata["render_fps"] = int(1 / self.step_time)
+        self.ctrl_mode = "acc"
         self._prev_action = StepAction()
 
     def _update_state(self):
@@ -271,6 +277,12 @@ class GymRP(gymnasium.Env):
             gyro=self.dm_env.bind(self.gyro_sens).sensordata.copy(),
             head_pitch=self.dm_env.bind(self.head_picth_sens).sensordata.copy()[0],
             head_turn=self.dm_env.bind(self.head_turn_sens).sensordata.copy()[0],
+            left_wheel_vel=self.dm_env.bind(self.left_wheel_vel_sens).sensordata.copy()[
+                0
+            ],
+            right_wheel_vel=self.dm_env.bind(
+                self.right_wheel_vel_sens
+            ).sensordata.copy()[0],
             action=self._prev_action,
             reward=self._get_reward(),
         )
@@ -320,9 +332,22 @@ class GymRP(gymnasium.Env):
         if action is not None:
             if isinstance(action, dict):
                 action = StepAction().from_dict(action)
+
             self._prev_action = action
-            self.dm_env.bind(self.left_wheel_act).ctrl = action.left_wheel
-            self.dm_env.bind(self.right_wheel_act).ctrl = action.right_wheel  # rad/s
+
+            if self.ctrl_mode == "acc":
+                mul_ = self.step_time
+                vl = self.state.obs.left_wheel_vel
+                vr = self.state.obs.right_wheel_vel
+            else:
+                mul_ = 1
+                vl = 0
+                vr = 0
+
+            self.dm_env.bind(self.left_wheel_act).ctrl = action.left_wheel * mul_ + vl
+            self.dm_env.bind(self.right_wheel_act).ctrl = (
+                action.right_wheel * mul_ + vr
+            )  # rad/s
             if not self.lock_head:
                 self.dm_env.bind(self.head_pitch_act).ctrl = action.head_pitch  # rad/s
                 self.dm_env.bind(self.head_turn_act).ctrl = action.head_turn  # rad/s
@@ -336,6 +361,7 @@ class GymRP(gymnasium.Env):
         t = t0
         while t < t0 + step_time:
             self.dm_env.step()
+
             t = self.dm_env.data.time
 
         self._update_state()
