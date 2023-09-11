@@ -303,6 +303,16 @@ class Tape:
         return len(self.probs)
 
 
+OBS_SPACE = [
+    "filter/rp_pitch",
+    # "sens/gyro",
+    # "sens/head_pitch",
+    # "sens/head_turn",
+    # "sens/left_wheel_vel",
+    # "sens/right_wheel_vel",
+]
+
+
 if __name__ == "__main__":
     BATCH_SIZE = 32
 
@@ -316,14 +326,7 @@ if __name__ == "__main__":
         [
             lambda: gym.make(
                 "RiktigPatrick-v0",
-                state_keys=[
-                    "sens/gyro",
-                    "sens/head_pitch",
-                    "sens/head_turn",
-                    "act/left_wheel",
-                    "act/right_wheel",
-                    "filter/rp_pitch",
-                ],
+                state_keys=OBS_SPACE,
                 render_mode="rgb_array",
                 disable_env_checker=True,
             )
@@ -393,7 +396,7 @@ if __name__ == "__main__":
                 step=episode,
             )
             if mean_return > (MAX_RETURN + 5):
-                if episode >= 10:
+                if episode >= 0:
                     log.info(f"Best return {mean_return:.02f} -> saving")
                     agent.net.store()
                     agent.value_net.store()

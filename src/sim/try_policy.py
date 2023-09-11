@@ -92,16 +92,11 @@ if __name__ == "__main__":
         kwargs={"record": True},
     )
 
+    from sim.rl_parallel_test2 import OBS_SPACE
+
     rpenv = gym.make(
         "RiktigPatrick-v0",
-        state_keys=[
-            "sens/gyro",
-            "sens/head_pitch",
-            "sens/head_turn",
-            "act/left_wheel",
-            "act/right_wheel",
-            "filter/rp_pitch",
-        ],
+        state_keys=OBS_SPACE,
         render_mode="rgb_array",
         disable_env_checker=True,
     )
