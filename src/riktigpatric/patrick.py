@@ -118,6 +118,8 @@ class Obs:
         self._gyro: np.ndarray = np.zeros(3)
         self._head_pitch: np.ndarray = np.zeros(1)
         self._head_turn: np.ndarray = np.zeros(1)
+        self._left_wheel_vel: np.ndarray = np.zeros(1)
+        self._right_wheel_vel: np.ndarray = np.zeros(1)
         self._t: float = 0
 
     @property
@@ -161,6 +163,22 @@ class Obs:
         self._head_turn = np.array([head_turn])
 
     @property
+    def left_wheel_vel(self) -> np.ndarray:
+        return self._left_wheel_vel
+
+    @left_wheel_vel.setter
+    def update_left_wheel_vel(self, vel: float):
+        self._left_wheel_vel = np.array([vel])
+
+    @property
+    def right_wheel_vel(self) -> np.ndarray:
+        return self._right_wheel_vel
+
+    @right_wheel_vel.setter
+    def update_right_wheel_vel(self, vel: float):
+        self._right_wheel_vel = np.array([vel])
+
+    @property
     def t(self) -> float:
         return self._t
 
@@ -192,6 +210,8 @@ class State:
         gyro: np.ndarray,
         head_pitch: float,
         head_turn: float,
+        left_wheel_vel: float,
+        right_wheel_vel: float,
         action: Optional[StepAction] = None,
         reward: Optional[float] = None,
     ):
@@ -200,6 +220,8 @@ class State:
         self.obs.update_acc = acc
         self.obs.update_head_pitch = head_pitch
         self.obs.update_head_turn = head_turn
+        self.obs.update_left_wheel_vel = left_wheel_vel
+        self.obs.update_right_wheel_vel = right_wheel_vel
 
         # Sens fusion:
         self.mahony.update(acc, gyro, t - self.prev_t)
@@ -244,6 +266,8 @@ class State:
             "sens/gyro": self.obs.gyro,
             "sens/head_pitch": self.obs.head_pitch,
             "sens/head_turn": self.obs.head_turn,
+            "sens/left_wheel_vel": self.obs.left_wheel_vel,
+            "sens/right_wheel_vel": self.obs.right_wheel_vel,
             "filter/rp_pitch": np.array([self.euler[1]]),
             "time": np.array([self.obs.t]),
         }
