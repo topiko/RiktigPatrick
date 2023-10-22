@@ -9,12 +9,17 @@ import numpy as np
 import torch
 from gymnasium import ActionWrapper
 from gymnasium.envs.registration import register
-from gymnasium.wrappers import (RecordEpisodeStatistics, RecordVideo,
-                                TransformObservation)
+from gymnasium.wrappers import (
+    RecordEpisodeStatistics,
+    RecordVideo,
+    TransformObservation,
+)
 from mlflow.client import MlflowClient
 from riktigpatric.patrick import StepAction
 from torch import nn
 from torch.distributions.normal import Normal
+
+from sim.envs.rp_env import MAXV
 
 config = {
     "version": 1,
@@ -103,14 +108,20 @@ class Policy_Network(nn.Module):
         """
         super().__init__()
 
-        hidden_space1 = 32  # Nothing special with 16, feel free to change
-        hidden_space2 = 32  # Nothing special with 32, feel free to change
+        hidden_space1 = 512  # 32  # Nothing special with 16, feel free to change
+        hidden_space2 = 512  # 32  # Nothing special with 32, feel free to change
+        hidden_space3 = 512  # 32  # Nothing special with 32, feel free to change
+        hidden_space4 = 512  # 32  # Nothing special with 32, feel free to change
 
         # Shared Network
         self.shared_net = nn.Sequential(
             nn.Linear(obs_space_dims, hidden_space1),
             nn.LeakyReLU(),
             nn.Linear(hidden_space1, hidden_space2),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_space2, hidden_space3),
+            nn.LeakyReLU(),
+            nn.Linear(hidden_space3, hidden_space4),
             nn.LeakyReLU(),
         )
 
@@ -119,6 +130,7 @@ class Policy_Network(nn.Module):
             nn.Linear(hidden_space2, hidden_space2),
             nn.LeakyReLU(),
             nn.Linear(hidden_space2, action_space_dims),
+            nn.Sigmoid(),
         )
 
         # Policy Std Dev specific Linear Layer
@@ -139,7 +151,7 @@ class Policy_Network(nn.Module):
         """
         shared_features = self.shared_net(x.float())
 
-        action_means = self.policy_mean_net(shared_features)
+        action_means = (self.policy_mean_net(shared_features) - 0.5) * 2 * MAXV
         action_stddevs = torch.log(
             1 + torch.exp(self.policy_stddev_net(shared_features))
         )
@@ -172,13 +184,13 @@ class REINFORCE:
         """
 
         # Hyperparameters
-        self.learning_rate = 1e-4  # orig = 1e-4 Learning rate for policy optimization
+        self.learning_rate = 1e-5  # orig = 1e-4 Learning rate for policy optimization
         self.gamma = 0.9  # Discount factor
         self.eps = 1e-6  # small number for mathematical stability
 
         self.net = Policy_Network(obs_space_dims, action_space_dims).load()
         self.polizy_optimizer = torch.optim.SGD(
-            self.net.parameters(), lr=self.learning_rate, momentum=0.0
+            self.net.parameters(), lr=self.learning_rate, momentum=0.1
         )
 
         self.value_net = ValueNet(obs_space_dims).load()
@@ -305,21 +317,24 @@ class Tape:
 
 OBS_SPACE = [
     "filter/rp_pitch",
-    # "sens/gyro",
+    "sens/gyro",
     # "sens/head_pitch",
     # "sens/head_turn",
-    # "sens/left_wheel_vel",
-    # "sens/right_wheel_vel",
+    "sens/left_wheel_vel",
+    "sens/right_wheel_vel",
 ]
-
+CTRL_MODE = "vel"
+ENV_CONFIG = {"ctrl_mode": CTRL_MODE, "lock_head": True, "step_time": 0.01}
+USE_BASELINE = True
 
 if __name__ == "__main__":
-    BATCH_SIZE = 32
+    BATCH_SIZE = 16
 
     register(
         id="RiktigPatrick-v0",
         entry_point="sim.envs.rp_env:GymRP",
         max_episode_steps=2000,
+        kwargs=ENV_CONFIG,
     )
 
     rpenv_p = gym.vector.AsyncVectorEnv(
@@ -341,7 +356,7 @@ if __name__ == "__main__":
     indim = sum(v.shape[0] for v in rpenv_p.single_observation_space.values())
     actiondim = sum(v.shape[0] for v in rpenv_p.single_action_space.values())
 
-    agent = REINFORCE(indim, actiondim)  # StepAction().ndim)
+    agent = REINFORCE(indim, actiondim, use_baseline=USE_BASELINE)  # StepAction().ndim)
 
     RUN_NAME = "rp_test_parallel"
     client = MlflowClient()
@@ -395,7 +410,7 @@ if __name__ == "__main__":
                 },
                 step=episode,
             )
-            if mean_return > (MAX_RETURN + 5):
+            if mean_return > (MAX_RETURN + 1):
                 if episode >= 0:
                     log.info(f"Best return {mean_return:.02f} -> saving")
                     agent.net.store()
