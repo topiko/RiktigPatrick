@@ -1,5 +1,7 @@
+## ALARM!!!:
 
-Currently there seems to be an issue with the ability of the feels to execute what the controller demands.
+***Currently there is doubt that the Mahony filter is somehow failing to provide accurate pitch estimates. PIDPolicy fails to keep the bot upright mainly since the pitch readings do not seem to correspond to the true values.***
+
 
 `python rl_test_parallel2.py`
 
