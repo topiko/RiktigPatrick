@@ -172,13 +172,16 @@ class REINFORCE:
 
         # TODO: should rewards be normalized somehow?
         # TODO: Yes! implement the -b thing from here -> https://mcneela.github.io/machine_learning/2019/06/03/The-Problem-With-Policy-Gradient.html
+
+        b = np.concatenate([t.rewards for t in tapes]).mean()
+
         for i, tape in enumerate(tapes):
             running_g = 0
             gs = []
 
             # Discounted return (backwards) - [::-1] will return an array in reverse
             for R in tape.rewards[::-1]:
-                running_g = R + self.gamma * running_g
+                running_g = (R - b) + self.gamma * running_g
                 gs.insert(0, running_g)
 
             deltas = torch.tensor(gs)
