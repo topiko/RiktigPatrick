@@ -11,14 +11,17 @@ from riktigpatric.patrick import State, StepAction, StepReturn
 BODY_D = 0.05
 BODY_H = 1  # 0.25
 BODY_W = 0.1
-BODY_M = 0.00001 #0.400
+BODY_M = 0.4  # 0.400
 
 WHEEL_D = BODY_D * 2
 
 HEAD_D = 0.03
 HEAD_H = 0.1
 HEAD_W = 0.1
-HEAD_M = 0.02 #0.200
+HEAD_M = 0.2  # 0.200
+
+FORCERANGE = 15
+MAXV = 20
 
 
 class MujocoRP:
@@ -43,7 +46,7 @@ class MujocoRP:
         # Body:
         frame = self.model.worldbody.add("body", name="torso")
 
-        frame.add(
+        body = frame.add(
             "geom",
             name="body",
             type="box",
@@ -54,7 +57,7 @@ class MujocoRP:
         )
 
         # Wheels
-        kv_wheel = 1.2  # was 1.2
+        kp_wheel = 20.0  # was 1.2
         for diry, key in zip([-1, 1], ["rightwheel", "leftwheel"]):
             y = diry * (BODY_W / 2 + 0.001)
             # Wheel
@@ -79,8 +82,8 @@ class MujocoRP:
                     size=[WHEEL_D / 12],
                 )
 
-            # Weel joint
-            wheel = wheel.add("joint", name=key + "_joint", axis=[0, 1, 0])
+            # Wheel joint
+            wheel = wheel.add("joint", name=key + "_joint", axis=[0, 1, 0], damping=0.1)
 
             # Wheel actuator
             self.model.actuator.add(
@@ -88,8 +91,12 @@ class MujocoRP:
                 name=key + "_actuator",
                 joint=wheel,
                 gear=(1,),
-                actrange=[-50, 50],
-                kp=kv_wheel,  # <-- velocity feedback gain
+                ctrllimited=True,
+                ctrlrange=[-MAXV, MAXV],
+                # forcelimited=True,
+                # forcerange=[-FORCERANGE, FORCERANGE],
+                actrange=[-(10**6), 10**6],
+                kp=kp_wheel,  # <-- intvelocity feedback gain
             )
             self.model.sensor.add(
                 "jointvel", name=f"{key}_vel_sensor", joint=f"{key}_joint"
@@ -103,12 +110,14 @@ class MujocoRP:
         )
 
         # Joints
-        head_pitch = head.add("joint", name="headpitch_joint", axis=[0, 1, 0])
+        head_pitch = head.add(
+            "joint", name="headpitch_joint", axis=[0, 1, 0], damping=0.1
+        )
         self.model.sensor.add(
             "jointpos", name="headpitch_sensor", joint="headpitch_joint"
         )
 
-        head_lr = head.add("joint", name="headturn_joint", axis=[0, 0, 1])
+        head_lr = head.add("joint", name="headturn_joint", axis=[0, 0, 1], damping=0.1)
         self.model.sensor.add(
             "jointpos", name="headturn_sensor", joint="headturn_joint"
         )
@@ -128,14 +137,14 @@ class MujocoRP:
             name="headpitch_actuator",
             joint=head_pitch,
             kp=kp_servo,
-            actrange=[-50, 50],
+            actrange=[-1, 1],  # <--- range in radians
         )
         self.model.actuator.add(
             "intvelocity",
             name="headturn_actuator",
             joint=head_lr,
             kp=kp_servo,
-            actrange=[-50, 50],
+            actrange=[-1, 1],  # <--- range in radians
         )
 
         # Sensors:
@@ -145,9 +154,15 @@ class MujocoRP:
             pos=[0, 0, 0],
         )
 
+        self.body_quat = self.model.sensor.add(
+            "framequat",
+            objtype="site",
+            objname="imu_site",
+            name="framequat_sensor",
+        )
         self.gyro = self.model.sensor.add("gyro", site=imu_site, name="gyro")
         self.acc = self.model.sensor.add(
-            "accelerometer", site=imu_site, name="accelerometer"
+            "accelerometer", site=imu_site, name="accelerometer", cutoff=9.81 * 10
         )
 
 
@@ -198,6 +213,8 @@ class GymRP(gymnasium.Env):
         render_mode="rgb_array",
         record: bool = False,
         lock_head: bool = True,
+        ctrl_mode: str = "vel",
+        step_time: float = 0.01,
     ):
         # Make rp:
         rp = MujocoRP()
@@ -226,8 +243,9 @@ class GymRP(gymnasium.Env):
         # Sensors:
         self.gyro_sens = rp.model.find("sensor", "gyro")
         self.acc_sens = rp.model.find("sensor", "accelerometer")
-        self.head_picth_sens = rp.model.find("sensor", "headpitch_sensor")
+        self.head_pitch_sens = rp.model.find("sensor", "headpitch_sensor")
         self.head_turn_sens = rp.model.find("sensor", "headturn_sensor")
+        self.body_quat = rp.model.find("sensor", "framequat_sensor")
         self.left_wheel_vel_sens = rp.model.find("sensor", "leftwheel_vel_sensor")
         self.right_wheel_vel_sens = rp.model.find("sensor", "rightwheel_vel_sensor")
 
@@ -265,9 +283,9 @@ class GymRP(gymnasium.Env):
         self.lock_head = lock_head
         self.action_space = spaces.Dict(action_space)
         self.render_mode = render_mode
-        self.step_time = 0.002  # s
+        self.step_time = step_time  # s
         self.metadata["render_fps"] = int(1 / self.step_time)
-        self.ctrl_mode = "acc"
+        self.ctrl_mode = ctrl_mode
         self._prev_action = StepAction()
 
     def _update_state(self):
@@ -275,7 +293,7 @@ class GymRP(gymnasium.Env):
             t=self.dm_env.data.time,
             acc=self.dm_env.bind(self.acc_sens).sensordata.copy(),
             gyro=self.dm_env.bind(self.gyro_sens).sensordata.copy(),
-            head_pitch=self.dm_env.bind(self.head_picth_sens).sensordata.copy()[0],
+            head_pitch=self.dm_env.bind(self.head_pitch_sens).sensordata.copy()[0],
             head_turn=self.dm_env.bind(self.head_turn_sens).sensordata.copy()[0],
             left_wheel_vel=self.dm_env.bind(self.left_wheel_vel_sens).sensordata.copy()[
                 0
@@ -288,20 +306,31 @@ class GymRP(gymnasium.Env):
         )
 
     def _get_obs(self) -> dict:
+        if self.body_quat is not None:
+            true_pitch = self.dm_env.bind(self.body_quat).sensordata.copy()
+            # TODO: map this quat into body_pitch
+            print(true_pitch)
+
         return self.state.get_state_dict()
 
     def _get_reward(self, type: str = "time", obs: Optional[State] = None) -> float:
-        rew = (
-            (10**2 - self.state.euler[1] ** 2) / 100
-            - abs(self.state.get_state_dict(keys="all")["sens/head_pitch"][0])
-            / np.pi
-            * 0.5
-            - abs(self.state.get_state_dict(keys="all")["sens/head_turn"][0])
-            / (np.pi / 2)
-            * 0.5
+        rew = 1 - abs(self.state.euler[1]) / 10
+        dir_rew = (
+            -((self.state.obs.left_wheel_vel - self.state.obs.right_wheel_vel)[0] ** 2)
+            / 100
         )
 
-        return rew
+        # rew = (
+        #     (10**2 - self.state.euler[1] ** 2) / 100
+        #     - abs(self.state.get_state_dict(keys="all")["sens/head_pitch"][0])
+        #     / np.pi
+        #     * 0.5
+        #     - abs(self.state.get_state_dict(keys="all")["sens/head_turn"][0])
+        #     / (np.pi / 2)
+        #     * 0.5
+        # )
+
+        return rew + dir_rew
 
     def _get_info(self) -> dict:
         return {}
@@ -339,10 +368,12 @@ class GymRP(gymnasium.Env):
                 mul_ = self.step_time
                 vl = self.state.obs.left_wheel_vel
                 vr = self.state.obs.right_wheel_vel
-            else:
+            elif self.ctrl_mode == "vel":
                 mul_ = 1
                 vl = 0
                 vr = 0
+            else:
+                raise KeyError(f"Invalid ctrl_mode {self.ctrl_mode}")
 
             self.dm_env.bind(self.left_wheel_act).ctrl = action.left_wheel * mul_ + vl
             self.dm_env.bind(self.right_wheel_act).ctrl = (
@@ -388,6 +419,11 @@ if __name__ == "__main__":
         "site", name="rp_site", pos=[xpos, ypos, zpos], group=3
     )
     spawn_site.attach(rp.model).add("freejoint")  # "freejoint"
+
+    # print(arena.to_xml_string())
+    print(arena.to_xml_string())
+    with open("rp_env.xml", "w") as text_file:
+        text_file.write(arena.to_xml_string())
 
     dm_env = mjcf.Physics.from_mjcf_model(arena)
 
