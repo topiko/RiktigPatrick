@@ -7,3 +7,8 @@ Currently there seems to be an issue with the ability of the feels to execute wh
 
 Run the server:
 `mlflow server`
+
+
+## Installing MuJoCo:
+(https://github.com/google-deepmind/mujoco)
+`pip install mujoco-py`
