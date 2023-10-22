@@ -1,3 +1,4 @@
+import argparse
 from typing import Optional
 
 import gymnasium as gym
@@ -5,11 +6,28 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from gymnasium.envs.registration import register
-from gymnasium.wrappers import (RecordEpisodeStatistics, RecordVideo,
-                                TransformObservation)
+from gymnasium.wrappers import (
+    RecordEpisodeStatistics,
+    RecordVideo,
+    TransformObservation,
+)
 
-from sim.rl_parallel_test2 import (REINFORCE, Policy_Network, ValueNet,
-                                   dict2tensor)
+from sim.PIDPolicy import PIDPolicy
+from sim.rl_parallel_test2 import (
+    ENV_CONFIG,
+    OBS_SPACE,
+    REINFORCE,
+    Policy_Network,
+    ValueNet,
+    dict2tensor,
+)
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument("--policy", type=str, default="REINFORCE")
+
+args = parser.parse_args()
+agent_type = args.policy
 
 
 def run_episode(
@@ -24,8 +42,12 @@ def run_episode(
         rp_env.reset(seed=seed)
         while True:
             # TODO: Wrap the rpenv into something the flattens the observation.
-            obs = torch.Tensor(rp_env.state.get_state_arr())
-            action, _, _ = agent.sample_action(obs)
+            if isinstance(agent, REINFORCE):
+                obs = torch.Tensor(rp_env.state.get_state_arr())
+                action, _, _ = agent.sample_action(obs)
+            elif isinstance(agent, PIDPolicy):
+                obs = rp_env.state.get_state_dict()
+                action = agent.sample_action(obs)
 
             action = {k: v[0] for k, v in action.items()}
 
@@ -54,8 +76,10 @@ def plot_state_history(
 
     time_idx = idx_dict.pop("time")
 
+    print(idx_dict)
     groups = {
-        "wheels_lr": ("act/left_wheel", "act/right_wheel"),
+        "wheel_left": ("act/left_wheel", "sens/left_wheel_vel"),
+        "wheel_right": ("act/right_wheel", "sens/right_wheel_vel"),
         # "head_pt": ("act/head_pitch", "act/head_turn"),
         "sens/head_pt": ("sens/head_pitch", "sens/head_turn"),
     }
@@ -78,21 +102,22 @@ def plot_state_history(
         ax.plot(times, data, "-|", markersize=5, lw=1)
         ax.set_title(f"{k}")
         ax.spines[["right", "top"]].set_visible(False)
+        ax.legend(frameon=False)
 
     ax.set_xlabel("Time [s]")
     plt.tight_layout()
     plt.show()
 
 
+ENV_CONFIG.update({"record": True}),
+
 if __name__ == "__main__":
     register(
         id="RiktigPatrick-v0",
         entry_point="sim.envs.rp_env:GymRP",
         max_episode_steps=2000,
-        kwargs={"record": True},
+        kwargs=ENV_CONFIG,
     )
-
-    from sim.rl_parallel_test2 import OBS_SPACE
 
     rpenv = gym.make(
         "RiktigPatrick-v0",
@@ -115,7 +140,12 @@ if __name__ == "__main__":
     indim = sum(v.shape[0] for v in rpenv.observation_space.values())
     actiondim = sum(v.shape[0] for v in rpenv.action_space.values())
 
-    agent = REINFORCE(indim, actiondim)  # StepAction().ndim)
+    if agent_type == "REINFORCE":
+        agent = REINFORCE(indim, actiondim)  # StepAction().ndim)
+    elif agent_type == "pid":
+        agent = PIDPolicy(60, -0.0, 10, ENV_CONFIG["step_time"])
+    else:
+        raise KeyError("Invalid agent type")
 
     run_episode(agent, rpenv)
 
