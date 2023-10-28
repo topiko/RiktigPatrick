@@ -120,6 +120,7 @@ class Obs:
         self._head_turn: np.ndarray = np.zeros(1)
         self._left_wheel_vel: np.ndarray = np.zeros(1)
         self._right_wheel_vel: np.ndarray = np.zeros(1)
+        self._true_pitch: np.ndarray = np.zeros(1)
         self._t: float = 0
 
     @property
@@ -179,6 +180,14 @@ class Obs:
         self._right_wheel_vel = np.array([vel])
 
     @property
+    def true_pitch(self) -> np.ndarray:
+        return self._true_pitch
+
+    @true_pitch.setter
+    def update_true_pitch(self, pitch: float):
+        self._true_pitch = np.array([pitch])
+
+    @property
     def t(self) -> float:
         return self._t
 
@@ -212,6 +221,7 @@ class State:
         head_turn: float,
         left_wheel_vel: float,
         right_wheel_vel: float,
+        true_pitch: float,
         action: Optional[StepAction] = None,
         reward: Optional[float] = None,
     ):
@@ -222,6 +232,7 @@ class State:
         self.obs.update_head_turn = head_turn
         self.obs.update_left_wheel_vel = left_wheel_vel
         self.obs.update_right_wheel_vel = right_wheel_vel
+        self.obs.update_true_pitch = true_pitch
 
         # Sens fusion:
         self.mahony.update(acc, gyro, t - self.prev_t)
@@ -269,6 +280,7 @@ class State:
             "sens/left_wheel_vel": self.obs.left_wheel_vel,
             "sens/right_wheel_vel": self.obs.right_wheel_vel,
             "filter/rp_pitch": np.array([self.euler[1]]),
+            "simul/rp_pitch": self.obs.true_pitch,
             "time": np.array([self.obs.t]),
         }
         d.update(self._action_dict)

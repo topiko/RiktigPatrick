@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from dm_control import mjcf
+from filters.qutils import q2eul
 from gymnasium import spaces
 from riktigpatric.patrick import State, StepAction, StepReturn
 
@@ -289,6 +290,9 @@ class GymRP(gymnasium.Env):
         self._prev_action = StepAction()
 
     def _update_state(self):
+        body_quat = self.dm_env.bind(self.body_quat).sensordata.copy()
+        pitch = q2eul(body_quat)[1] / np.pi * 180
+
         self.state.update(
             t=self.dm_env.data.time,
             acc=self.dm_env.bind(self.acc_sens).sensordata.copy(),
@@ -301,16 +305,12 @@ class GymRP(gymnasium.Env):
             right_wheel_vel=self.dm_env.bind(
                 self.right_wheel_vel_sens
             ).sensordata.copy()[0],
+            true_pitch=pitch,
             action=self._prev_action,
             reward=self._get_reward(),
         )
 
     def _get_obs(self) -> dict:
-        if self.body_quat is not None:
-            true_pitch = self.dm_env.bind(self.body_quat).sensordata.copy()
-            # TODO: map this quat into body_pitch
-            print(true_pitch)
-
         return self.state.get_state_dict()
 
     def _get_reward(self, type: str = "time", obs: Optional[State] = None) -> float:
@@ -319,16 +319,6 @@ class GymRP(gymnasium.Env):
             -((self.state.obs.left_wheel_vel - self.state.obs.right_wheel_vel)[0] ** 2)
             / 100
         )
-
-        # rew = (
-        #     (10**2 - self.state.euler[1] ** 2) / 100
-        #     - abs(self.state.get_state_dict(keys="all")["sens/head_pitch"][0])
-        #     / np.pi
-        #     * 0.5
-        #     - abs(self.state.get_state_dict(keys="all")["sens/head_turn"][0])
-        #     / (np.pi / 2)
-        #     * 0.5
-        # )
 
         return rew + dir_rew
 
