@@ -1,9 +1,13 @@
-import quaternion as qt
 import numpy as np
+import quaternion as qt
 
 
-def q2eul(q: qt.quaternion) -> np.ndarray:
-    q0, q1, q2, q3 = qt.as_float_array(q)
+def q2eul(q: qt.quaternion | np.ndarray) -> np.ndarray:
+    if isinstance(q, qt.quaternion):
+        q0, q1, q2, q3 = qt.as_float_array(q)
+    else:
+        q0, q1, q2, q3 = q
+
     roll = np.arctan2(2 * (q0 * q1 + q2 * q3), 1 - 2 * (q1**2 + q2**2))
     pitch = np.arcsin(2 * (q0 * q2 - q3 * q1))
     yaw = np.arctan2(2 * (q0 * q3 + q1 * q2), 1 - 2 * (q2**2 + q3**2))
