@@ -29,6 +29,13 @@ parser.add_argument("--policy", type=str, default="REINFORCE")
 args = parser.parse_args()
 agent_type = args.policy
 
+PLOTGROUPS = {
+    "pitch": ("filter/rp_pitch", "simul/rp_pitch"),
+    "wheel_left": ("act/left_wheel", "sens/left_wheel_vel"),
+    "wheel_right": ("act/right_wheel", "sens/right_wheel_vel"),
+    "sens/head_pt": ("sens/head_pitch", "sens/head_turn"),
+}
+
 
 def run_episode(
     agent: REINFORCE,
@@ -67,6 +74,7 @@ def plot_state_history(
     idx_dict: dict[str, np.ndarray],
     keys: Optional[list[str]] = None,
     show_actions: bool = True,
+    plot_groups: dict[str, tuple[str, ...] | str] = PLOTGROUPS,
 ):
     if keys is None:
         keys = list(idx_dict.keys())
@@ -77,29 +85,16 @@ def plot_state_history(
     time_idx = idx_dict.pop("time")
 
     print(idx_dict)
-    groups = {
-        "wheel_left": ("act/left_wheel", "sens/left_wheel_vel"),
-        "wheel_right": ("act/right_wheel", "sens/right_wheel_vel"),
-        # "head_pt": ("act/head_pitch", "act/head_turn"),
-        "sens/head_pt": ("sens/head_pitch", "sens/head_turn"),
-    }
 
-    grouped_d = {k: [] for k in groups}
-    for key, group in groups.items():
-        for gi in group:
-            grouped_d[key].append(idx_dict.pop(gi))
-
-    grouped_d = {k: np.concatenate(v) for k, v in grouped_d.items()}
-    idx_dict.update(grouped_d)
-
-    n_rows = len(idx_dict)
+    n_rows = len(plot_groups)
 
     _, axarr = plt.subplots(n_rows, 1, sharex=True, figsize=(8, n_rows * 2))
 
     times = history[:, time_idx]
-    for ax, k in zip(axarr, idx_dict):
-        data = history[:, idx_dict[k]]
-        ax.plot(times, data, "-|", markersize=5, lw=1)
+    for ax, k in zip(axarr, plot_groups):
+        for g in plot_groups[k]:
+            data = history[:, idx_dict[g]]
+            ax.plot(times, data, "-|", markersize=5, lw=1, label=g)
         ax.set_title(f"{k}")
         ax.spines[["right", "top"]].set_visible(False)
         ax.legend(frameon=False)
@@ -143,7 +138,7 @@ if __name__ == "__main__":
     if agent_type == "REINFORCE":
         agent = REINFORCE(indim, actiondim)  # StepAction().ndim)
     elif agent_type == "pid":
-        agent = PIDPolicy(60, -0.0, 10, ENV_CONFIG["step_time"])
+        agent = PIDPolicy(10, 0.0, 0, ENV_CONFIG["step_time"])
     else:
         raise KeyError("Invalid agent type")
 
