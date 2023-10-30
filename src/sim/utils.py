@@ -1,12 +1,31 @@
 from __future__ import annotations
 
-
 import gymnasium as gym
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from gymnasium.envs.registration import register
+
+
+def model_indim(
+    rpenv: gym.Env | gym.vector.AsyncVectorEnv, model_input: list[str]
+) -> int:
+    if isinstance(rpenv, gym.vector.AsyncVectorEnv):
+        obs_space = rpenv.single_observation_space
+    else:
+        obs_space = rpenv.observation_space
+
+    return sum(v.shape[0] for k, v in obs_space.items() if k in model_input)
+
+
+def actiondim(rpenv: gym.Env | gym.vector.AsyncVectorEnv) -> int:
+    if isinstance(rpenv, gym.vector.AsyncVectorEnv):
+        act_space = rpenv.single_action_space
+    else:
+        act_space = rpenv.action_space
+
+    return sum(v.shape[0] for v in act_space.values())
 
 
 def register_and_make_env(

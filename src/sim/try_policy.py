@@ -15,7 +15,7 @@ from gymnasium.wrappers import (
 from sim.algos import REINFORCE
 from sim.PIDPolicy import PIDPolicy
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
-from sim.utils import register_and_make_env
+from sim.utils import Tape, register_and_make_env
 
 parser = argparse.ArgumentParser()
 
@@ -47,16 +47,17 @@ def run_episode(
     rp_env: gym.Env,
     seed: int = 42,
     nrollouts: int = 1,
-) -> np.ndarray:
-    sum_rewards = [0.0] * nrollouts
+    tapes: list[Tape] | None = None,
+) -> list[Tape] | None:
     for rollout in range(nrollouts):
         agent.rollout_index = rollout
         obs_d, _ = rp_env.reset(seed=seed)
 
         while True:
-            # TODO: Wrap the rpenv into something the flattens the observation.
             if isinstance(agent, REINFORCE):
-                action, _, _ = agent.sample_action(obs_d, dt=ENV_CONFIG["step_time"])
+                action, probs, values = agent.sample_action(
+                    obs_d, dt=ENV_CONFIG["step_time"]
+                )
             elif isinstance(agent, PIDPolicy):
                 obs = rp_env.state.get_state_dict()
                 action = agent.sample_action(obs)
@@ -65,13 +66,19 @@ def run_episode(
 
             obs_d, reward, terminated, truncated, _ = rp_env.step(action)
 
-            sum_rewards[rollout] += reward
-            agent.reward = reward
+            if tapes is not None:
+                tapes[rollout].rewards.append(reward)
+                tapes[rollout].probs.append(probs)
+                tapes[rollout].values.append(values)
 
-            if terminated or truncated:
+            if terminated:
+                tapes[rollout].build()
                 break
 
-    return np.array(sum_rewards)
+            if truncated:
+                break
+
+    return tapes
 
 
 def plot_state_history(
