@@ -18,7 +18,7 @@ from sim.utils import Tape, actiondim, model_indim, register_and_make_env
 
 
 def record(ep_id) -> bool:
-    return ep_id % 100 == 0
+    return ep_id % 10000 == 0
 
 
 if __name__ == "__main__":

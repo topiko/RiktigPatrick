@@ -22,8 +22,6 @@ class PIDPolicy:
             D = 0
         I = 0
 
-        print(P, D)
-
         a = self._kp * P + self._ki * I + self._kd * D
         v = obs["sens/left_wheel_vel"][0] + a * self._dt
         v = np.array([v])
