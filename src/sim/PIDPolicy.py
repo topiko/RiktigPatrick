@@ -9,11 +9,17 @@ class PIDPolicy:
         self._ki = ki
         self._kd = kd
         self._dt = dt
+        self._stable_pitch = -3.0
         self._lock_head = lock_head
 
-    def sample_action(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        P = obs["filter/rp_pitch"] + .85
-        D = obs["sens/gyro"][1]
+    def sample_action(
+        self, obs: dict[str, np.ndarray], target_pitch: float = 0
+    ) -> dict[str, np.ndarray]:
+        P = obs["filter/rp_pitch"] - self._stable_pitch - target_pitch
+        try:
+            D = obs["sens/gyro"][1]
+        except KeyError:
+            D = 0
         I = 0
 
         print(P, D)

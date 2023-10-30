@@ -10,7 +10,7 @@ from gymnasium import spaces
 from riktigpatric.patrick import State, StepAction, StepReturn
 
 BODY_D = 0.05
-BODY_H = 1  # 0.25
+BODY_H = 0.25  # 0.25
 BODY_W = 0.1
 BODY_M = 0.4  # 0.400
 
@@ -23,6 +23,7 @@ HEAD_M = 0.2  # 0.200
 
 FORCERANGE = 15
 MAXV = 20
+MAXA = MAXV / 0.5
 
 
 class MujocoRP:
@@ -311,12 +312,14 @@ class GymRP(gymnasium.Env):
         )
 
     def _get_obs(self) -> dict:
-        return self.state.get_state_dict()
+        d = self.state.get_state_dict(keys="all")
+        return d
 
-    def _get_reward(self, type: str = "time", obs: Optional[State] = None) -> float:
-        rew = 1 - abs(self.state.euler[1]) / 10
+    def _get_reward(self) -> float:
+        rew = 1
         dir_rew = (
             -((self.state.obs.left_wheel_vel - self.state.obs.right_wheel_vel)[0] ** 2)
+            / (2 * MAXV) ** 2
             / 100
         )
 
@@ -331,7 +334,8 @@ class GymRP(gymnasium.Env):
         self.dm_env.reset()
         self.state.reset()
 
-        return self._get_obs(), self._get_info()
+        d, i = self._get_obs(), self._get_info()
+        return d, i
 
     @property
     def terminated(self) -> bool:
@@ -396,6 +400,31 @@ class GymRP(gymnasium.Env):
         )
 
 
+def display_video(frames, framerate=30, fname: str = ""):
+    height, width, _ = frames[0].shape
+    dpi = 120
+    fig, ax = plt.subplots(1, 1, figsize=(width / dpi, height / dpi), dpi=dpi)
+    ax.set_axis_off()
+    ax.set_aspect("equal")
+    ax.set_position([0, 0, 1, 1])
+    im = ax.imshow(frames[0])
+
+    def update(frame):
+        im.set_data(frame)
+        return [im]
+
+    interval = 1000 / framerate
+    anim = animation.FuncAnimation(
+        fig=fig, func=update, frames=frames, interval=interval, blit=True, repeat=False
+    )
+
+    if fname:
+        anim.save(fname)
+        plt.close()
+    else:
+        plt.show()
+
+
 if __name__ == "__main__":
     # Make rp:
     rp = MujocoRP()
@@ -423,7 +452,5 @@ if __name__ == "__main__":
         dm_env.step()
         if dm_env.data.time > (1.0 / FRAMERATE) * len(frames):
             frames.append(dm_env.render(camera_id=0, height=480, width=640))
-
-    from sim.utils import display_video
 
     display_video(frames, FRAMERATE)

@@ -1,5 +1,5 @@
 import argparse
-from typing import Optional
+from dataclasses import dataclass
 
 import gymnasium as gym
 import matplotlib.pyplot as plt
@@ -12,15 +12,10 @@ from gymnasium.wrappers import (
     TransformObservation,
 )
 
+from sim.algos import REINFORCE
 from sim.PIDPolicy import PIDPolicy
-from sim.rl_parallel_test2 import (
-    ENV_CONFIG,
-    OBS_SPACE,
-    REINFORCE,
-    Policy_Network,
-    ValueNet,
-    dict2tensor,
-)
+from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
+from sim.utils import register_and_make_env
 
 parser = argparse.ArgumentParser()
 
@@ -29,16 +24,26 @@ parser.add_argument("--policy", type=str, default="REINFORCE")
 args = parser.parse_args()
 agent_type = args.policy
 
-PLOTGROUPS = {
-    "pitch": ("filter/rp_pitch", "simul/rp_pitch"),
-    "wheel_left": ("act/left_wheel", "sens/left_wheel_vel"),
-    "wheel_right": ("act/right_wheel", "sens/right_wheel_vel"),
-    "sens/head_pt": ("sens/head_pitch", "sens/head_turn"),
-}
+
+@dataclass
+class PlotGroups:
+    pitch: tuple[str, ...] = ("filter/rp_pitch", "simul/rp_pitch")
+    wheel_left: tuple[str, ...] = ("act/left_wheel", "sens/left_wheel_vel")
+    wheel_right: tuple[str, ...] = ("act/right_wheel", "sens/right_wheel_vel")
+    head_pt: tuple[str, ...] = ("sens/head_pitch", "sens/head_turn")
+
+    def __len__(self) -> int:
+        return len(self.__dict__)
+
+    def __getitem__(self, item: str) -> tuple[str, ...]:
+        return self.__dict__[item]
+
+    def groups(self) -> list[str]:
+        return list(self.__dict__.keys())
 
 
 def run_episode(
-    agent: REINFORCE,
+    agent: REINFORCE | PIDPolicy,
     rp_env: gym.Env,
     seed: int = 42,
     nrollouts: int = 1,
@@ -46,12 +51,12 @@ def run_episode(
     sum_rewards = [0.0] * nrollouts
     for rollout in range(nrollouts):
         agent.rollout_index = rollout
-        rp_env.reset(seed=seed)
+        obs_d, _ = rp_env.reset(seed=seed)
+
         while True:
             # TODO: Wrap the rpenv into something the flattens the observation.
             if isinstance(agent, REINFORCE):
-                obs = torch.Tensor(rp_env.state.get_state_arr())
-                action, _, _ = agent.sample_action(obs)
+                action, _, _ = agent.sample_action(obs_d, dt=ENV_CONFIG["step_time"])
             elif isinstance(agent, PIDPolicy):
                 obs = rp_env.state.get_state_dict()
                 action = agent.sample_action(obs)
@@ -72,26 +77,22 @@ def run_episode(
 def plot_state_history(
     history: np.ndarray,
     idx_dict: dict[str, np.ndarray],
-    keys: Optional[list[str]] = None,
-    show_actions: bool = True,
-    plot_groups: dict[str, tuple[str, ...] | str] = PLOTGROUPS,
+    plot_groups: PlotGroups | None = None,
 ):
-    if keys is None:
-        keys = list(idx_dict.keys())
-
-    if not show_actions:
-        keys = [k for k in keys if not k.startswith("act/")]
+    plot_groups = plot_groups or PlotGroups()
 
     time_idx = idx_dict.pop("time")
 
-    print(idx_dict)
+    print("Available:")
+    for k in idx_dict:
+        print(f"\t{k}")
 
     n_rows = len(plot_groups)
 
     _, axarr = plt.subplots(n_rows, 1, sharex=True, figsize=(8, n_rows * 2))
 
     times = history[:, time_idx]
-    for ax, k in zip(axarr, plot_groups):
+    for ax, k in zip(axarr, plot_groups.groups()):
         for g in plot_groups[k]:
             data = history[:, idx_dict[g]]
             ax.plot(times, data, "-|", markersize=5, lw=1, label=g)
@@ -104,39 +105,26 @@ def plot_state_history(
     plt.show()
 
 
-ENV_CONFIG.update({"record": True}),
-
 if __name__ == "__main__":
-    register(
-        id="RiktigPatrick-v0",
-        entry_point="sim.envs.rp_env:GymRP",
-        max_episode_steps=2000,
-        kwargs=ENV_CONFIG,
-    )
+    ENV_CONFIG["record"] = True
+    rpenv = register_and_make_env(ENV_CONFIG, OBS_SPACE)
 
-    rpenv = gym.make(
-        "RiktigPatrick-v0",
-        state_keys=OBS_SPACE,
-        render_mode="rgb_array",
-        disable_env_checker=True,
-    )
-
-    rpenv = TransformObservation(rpenv, dict2tensor)
-    make_vid = True
     rpenv = RecordVideo(
         rpenv,
         "./video",
-        episode_trigger=lambda _: make_vid,
+        episode_trigger=lambda _: True,
         name_prefix="try_policy_rp",
     )
 
     rpenv.reset()
 
-    indim = sum(v.shape[0] for v in rpenv.observation_space.values())
+    indim = sum(
+        v.shape[0] for k, v in rpenv.observation_space.items() if k in MODEL_INPUT
+    )
     actiondim = sum(v.shape[0] for v in rpenv.action_space.values())
 
     if agent_type == "REINFORCE":
-        agent = REINFORCE(indim, actiondim)  # StepAction().ndim)
+        agent = REINFORCE(indim, actiondim, MODEL_INPUT)  # StepAction().ndim)
     elif agent_type == "pid":
         agent = PIDPolicy(10, 0.0, 0, ENV_CONFIG["step_time"])
     else:

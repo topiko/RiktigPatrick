@@ -92,7 +92,13 @@ class StepAction:
             self.head_turn = d["act/head_turn"][0]
         return self
 
-    def from_array(self, action: np.ndarray) -> StepAction:
+    def from_array(
+        self,
+        action: np.ndarray,
+        dt: float,
+        obs: Optional[dict[str, np.ndarray]] = None,
+        lock_head: bool = True,
+    ) -> StepAction:
         if action.ndim == 1:
             # print("Ndim == 1")
             action = action.reshape(1, -1)
@@ -100,12 +106,15 @@ class StepAction:
         action = action.astype(np.float64)
 
         # TODO: implement control mapping here.
-        self.left_wheel = (action[:, 0] + action[:, 1]).reshape(-1, 1)
-        self.right_wheel = (action[:, 0] - action[:, 1]).reshape(-1, 1)
+        self.left_wheel = action[:, 0].reshape(-1, 1)
+        self.right_wheel = action[:, 1].reshape(-1, 1)
 
-        if not self.lock_head:
-            self.head_pitch = action[:, 2].reshape(-1, 1)
-            self.head_turn = action[:, 3].reshape(-1, 1)
+        if lock_head:
+            return self
+
+        self.lock_head = lock_head
+        self.head_pitch = action[:, 2].reshape(-1, 1)
+        self.head_turn = action[:, 3].reshape(-1, 1)
         return self
 
     def __str__(self) -> str:
