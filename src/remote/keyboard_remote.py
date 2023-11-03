@@ -2,7 +2,8 @@ import time
 import socket
 import struct
 
-HOST = socket.gethostbyname('topikone.local') #'192.168.0.45'
+HOSTNAME = socket.gethostname()
+HOST = socket.gethostbyname(f'{HOSTNAME}.local') #'192.168.0.45'
 PORT = 1024
 INCS = [0, 1, 5, 10]
 INC = INCS[0]

@@ -66,8 +66,8 @@ def service_connection(key, mask):
 
 sel = selectors.DefaultSelector()
 
-#HOST = socket.gethostname() # "192.168.0.13"
-HOST = socket.gethostbyname('topikone.local') #'192.168.0.45'
+HOSTNAME = socket.gethostname() # "192.168.0.13"
+HOST = socket.gethostbyname('{HOSTNAME}.local') #'192.168.0.45'
 PORT = 1024
 MAXBYTES = 128
 

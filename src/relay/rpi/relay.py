@@ -5,7 +5,8 @@ from smbus2 import SMBus, i2c_msg
 
 NBYTESI2C = 33
 I2C_SLAVE_ADDRESS = 11
-HOST = socket.gethostbyname('topikone.local') #'192.168.0.45'
+HOSTNAME = socket.gethostname()
+HOST = socket.gethostbyname('{HOSTNAME}.local') #'192.168.0.45'
 PORT = 1024
 
 def read_arduino(I2Cbus):

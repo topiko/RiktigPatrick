@@ -3,7 +3,8 @@ import socket
 
 from pyPS4Controller.controller import Controller
 
-HOST = socket.gethostbyname('topikone.local') #'192.168.0.45'
+HOSTNAME = socket.gethostname()
+HOST = socket.gethostbyname('{HOSTNAME}.local') #'192.168.0.45'
 PORT = 1024
 
 

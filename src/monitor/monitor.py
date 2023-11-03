@@ -15,8 +15,8 @@ logging.basicConfig(
 
 LOG = logging.getLogger('monitor_logger')
 
-#HOST = socket.gethostname()
-HOST = socket.gethostbyname('topikone.local') #'192.168.0.45'
+HOSTNAME = socket.gethostname()
+HOST = socket.gethostbyname('{HOSTNAME}.local') #'192.168.0.45'
 REPORTPORT = 1026
 
 
