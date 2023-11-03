@@ -67,7 +67,7 @@ def service_connection(key, mask):
 sel = selectors.DefaultSelector()
 
 HOSTNAME = socket.gethostname() # "192.168.0.13"
-HOST = socket.gethostbyname('{HOSTNAME}.local') #'192.168.0.45'
+HOST = socket.gethostbyname('f{HOSTNAME}.local') #'192.168.0.45'
 PORT = 1024
 MAXBYTES = 128
 

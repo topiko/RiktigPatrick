@@ -4,7 +4,7 @@ import socket
 from pyPS4Controller.controller import Controller
 
 HOSTNAME = socket.gethostname()
-HOST = socket.gethostbyname('{HOSTNAME}.local') #'192.168.0.45'
+HOST = socket.gethostbyname('f{HOSTNAME}.local') #'192.168.0.45'
 PORT = 1024
 
 

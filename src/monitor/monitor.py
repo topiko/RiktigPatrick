@@ -16,7 +16,7 @@ logging.basicConfig(
 LOG = logging.getLogger('monitor_logger')
 
 HOSTNAME = socket.gethostname()
-HOST = socket.gethostbyname('{HOSTNAME}.local') #'192.168.0.45'
+HOST = socket.gethostbyname('f{HOSTNAME}.local') #'192.168.0.45'
 REPORTPORT = 1026
 
 
