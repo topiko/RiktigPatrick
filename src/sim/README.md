@@ -1,4 +1,4 @@
-To get things runnig 
+# To get things runnig 
 
 ```
 cd src/
@@ -24,6 +24,6 @@ Run the server:
 `mlflow server`
 
 To see the server:
-https://127.0.0.1:5000
+127.0.0.1:5000
 
 
