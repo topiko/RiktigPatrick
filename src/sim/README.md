@@ -1,16 +1,29 @@
-## ALARM!!!:
+To get things runnig 
 
-***Currently there is doubt that the Mahony filter is somehow failing to provide accurate pitch estimates. PIDPolicy fails to keep the bot upright mainly since the pitch readings do not seem to correspond to the true values.***
+```
+cd src/
+conda-develop .
+```
+ 
+## Installing MuJoCo:
+(https://github.com/google-deepmind/mujoco)
+`pip install mujoco-py`
 
+## Conda env in:
+`conda env create -f env.yaml`
 
-`python rl_test_parallel2.py`
+## Then:
 
-`python try_policy.py`
+`python rl_rp.py`
+or
+`python parallel_rl_rp.py`
+
+`python try_policy.py --policy pid`
 
 Run the server:
 `mlflow server`
 
+To see the server:
+https://127.0.0.1:5000
 
-## Installing MuJoCo:
-(https://github.com/google-deepmind/mujoco)
-`pip install mujoco-py`
+
