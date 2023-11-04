@@ -54,7 +54,9 @@ class PolicyNetwork(nn.Module):
 
     NETF = "nets/rpnet_p.pth"
 
-    def __init__(self, obs_space_dims: int, action_space_dims: int):
+    def __init__(
+        self, obs_space_dims: int, action_space_dims: int, init2zerosi: bool = False
+    ):
         """Initializes a neural network that estimates the mean and standard deviation
          of a normal distribution from which an action is sampled from.
 
@@ -82,7 +84,6 @@ class PolicyNetwork(nn.Module):
         )
 
         initto0 = functools.partial(init_weights, w=0.01, b=0.01)
-        # self.shared_net.apply(initto0)
 
         # Policy Mean specific Linear Layer
         self.policy_mean_net = nn.Sequential(
@@ -90,14 +91,15 @@ class PolicyNetwork(nn.Module):
             nn.Sigmoid(),
         )
 
-        # self.policy_mean_net.apply(initto0)
-
         # Policy Std Dev specific Linear Layer
         self.policy_stddev_net = nn.Sequential(
             nn.Linear(hidden_space2, action_space_dims),
         )
 
-        # self.policy_stddev_net.apply(initto0)
+        if init2zeros:
+            self.shared_net.apply(initto0)
+            self.policy_mean_net.apply(initto0)
+            self.policy_stddev_net.apply(initto0)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Conditioned on the observation, returns the mean and standard deviation
