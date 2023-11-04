@@ -16,6 +16,8 @@ class REINFORCE:
         action_space_dims: int,
         model_input: list[str],
         use_baseline: bool = False,
+        init2zeros: bool = False,
+        load_net: bool = True,
     ):
         """Initializes an agent that learns a policy via REINFORCE algorithm [1]
         to solve the task at hand (Inverted Pendulum v4).
@@ -30,12 +32,18 @@ class REINFORCE:
         self.gamma = 0.99  # Discount factor
         self.eps = 1e-6  # small number for mathematical stability
 
-        self.net = PolicyNetwork(obs_space_dims, action_space_dims).load()
+        self.net = PolicyNetwork(
+            obs_space_dims, action_space_dims, init2zeros=init2zeros
+        )
+        if load_net:
+            self.net.load()
         self.polizy_optimizer = torch.optim.SGD(
             self.net.parameters(), lr=self.learning_rate, momentum=0.0
         )
 
         self.value_net = ValueNet(obs_space_dims).load()
+        if load_net:
+            self.value_net.load()
         self.value_optimizer = torch.optim.AdamW(self.value_net.parameters(), lr=1e-3)
         self.value_loss = torch.nn.MSELoss(reduction="sum")
 

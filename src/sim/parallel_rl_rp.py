@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     USE_BASELINE = False  # True
-    BATCH_SIZE = 16
+    BATCH_SIZE = 64
 
     rpenv_p = register_and_make_env(ENV_CONFIG, OBS_SPACE, True, BATCH_SIZE)
 
@@ -64,7 +64,14 @@ if __name__ == "__main__":
     )
     actiondim = sum(v.shape[0] for v in rpenv_p.single_action_space.values())
 
-    agent = REINFORCE(indim, actiondim, MODEL_INPUT, use_baseline=USE_BASELINE)
+    agent = REINFORCE(
+        indim,
+        actiondim,
+        MODEL_INPUT,
+        use_baseline=USE_BASELINE,
+        init2zeros=True,
+        load_net=False,
+    )
 
     RUN_NAME = "rp_test_parallel"
     client = MlflowClient()
