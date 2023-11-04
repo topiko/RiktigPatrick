@@ -55,7 +55,7 @@ class PolicyNetwork(nn.Module):
     NETF = "nets/rpnet_p.pth"
 
     def __init__(
-        self, obs_space_dims: int, action_space_dims: int, init2zerosi: bool = False
+        self, obs_space_dims: int, action_space_dims: int, init2zeros: bool = False
     ):
         """Initializes a neural network that estimates the mean and standard deviation
          of a normal distribution from which an action is sampled from.
