@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import functools
+import logging
 
 import torch
 import torch.nn as nn
 
 from sim.envs.rp_env import MAXA, MAXV
+
+log = logging.getLogger(__name__)
 
 
 def init_weights(m, w: float = 0.0, b: float = 0.01):

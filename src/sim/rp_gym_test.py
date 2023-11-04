@@ -1,6 +1,9 @@
 import gymnasium as gym
-import sim
+import matplotlib.pyplot as plt
 from gymnasium.envs.registration import register
+from riktigpatric.patrick import StepAction
+
+import sim
 
 register(
     id="RiktigPatrick-v0",
@@ -12,13 +15,10 @@ env = gym.make("RiktigPatrick-v0", render_mode="rgb_array")
 env.reset()
 
 
-import matplotlib.pyplot as plt
-
 pixels = env.render()
 plt.imshow(pixels)
 plt.show()
 
-from riktigpatric.patrick import StepAction
 
 act = StepAction()
 act.left_wheel = 0

@@ -71,11 +71,10 @@ def run_episode(
                 tapes[rollout].probs.append(probs)
                 tapes[rollout].values.append(values)
 
-            if terminated:
-                tapes[rollout].build()
-                break
+                if terminated:
+                    tapes[rollout].build()
 
-            if truncated:
+            if truncated | terminated:
                 break
 
     return tapes
