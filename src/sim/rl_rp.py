@@ -34,7 +34,7 @@ if __name__ == "__main__":
     indim = model_indim(rpenv, MODEL_INPUT)
     actdim = actiondim(rpenv)
     agent = REINFORCE(
-        indim, actdim, MODEL_INPUT, use_baseline=False, init2zeros=True, load_net=False
+        indim, actdim, MODEL_INPUT, use_baseline=False, init2zeros=True, load_net=True
     )
 
     RUN_NAME = "rp_test"
@@ -46,7 +46,7 @@ if __name__ == "__main__":
 
     MAX_RETURN = 0
     with mlflow.start_run(experiment_id=experiment_id, run_name=RUN_NAME):
-        for episode in range(10001):
+        for episode in range(20001):
             tapes = [Tape(i) for i in range(NROLLOUTS)]
             tapes = run_episode(agent, rpenv, nrollouts=NROLLOUTS, tapes=tapes)
 

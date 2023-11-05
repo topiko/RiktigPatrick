@@ -130,7 +130,14 @@ if __name__ == "__main__":
     actiondim = sum(v.shape[0] for v in rpenv.action_space.values())
 
     if agent_type == "REINFORCE":
-        agent = REINFORCE(indim, actiondim, MODEL_INPUT)  # StepAction().ndim)
+        agent = REINFORCE(
+            indim,
+            actiondim,
+            MODEL_INPUT,
+            use_baseline=False,
+            init2zeros=False,
+            load_net=True,
+        )
     elif agent_type == "pid":
         agent = PIDPolicy(10, 0.0, 0, ENV_CONFIG["step_time"])
     else:
