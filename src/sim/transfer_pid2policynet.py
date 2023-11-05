@@ -11,7 +11,7 @@ from sim.utils import actiondim, model_indim, register_and_make_env
 
 def train_on_episode(X_train, y_train, policy_net: PolicyNetwork):
     loss = torch.nn.MSELoss()
-    optim = torch.optim.Adam(policy_net.parameters(), lr=0.001)
+    optim = torch.optim.Adam(policy_net.parameters(), lr=0.00001)
 
     losses = 0
 
@@ -20,7 +20,7 @@ def train_on_episode(X_train, y_train, policy_net: PolicyNetwork):
     for X, y in ds:
         optim.zero_grad()
         ymean, ystd = policy_net(X)
-        loss_ = loss(ymean, y)
+        loss_ = loss(torch.hstack([ymean, ystd]), y)
 
         loss_.backward()
         optim.step()
@@ -39,7 +39,7 @@ class Ds(Dataset):
     def __getitem__(self, idx):
         slice_ = slice(idx * self._batch_size, (idx + 1) * self._batch_size)
         if idx * self._batch_size > len(self.X):
-            raise StopIteration
+            raise IndexError
 
         return self.X[slice_], self.y[slice_]
 
@@ -58,9 +58,11 @@ def Xyfromhistory(
         [history[:, idxs] for k, idxs in idx_d.items() if k in model_input]
     )
 
-    y = torch.hstack(
+    y_mean = torch.hstack(
         [history[:, idxs] for k, idxs in idx_d.items() if k in actions_space]
     )
+    y_std = torch.ones_like(y_mean) * 0.001
+    y = torch.hstack([y_mean, y_std])
 
     return X, y
 
@@ -88,3 +90,5 @@ if __name__ == "__main__":
         loss = train_on_episode(Xtrain, ytrain, policy_net)
         i += 1
         print(loss)
+        if loss < 0.1:
+            policy_net.store()
