@@ -43,10 +43,10 @@ class ValueNet(nn.Module):
 
     def load(self, fname: str = NETF) -> ValueNet:
         try:
-            self = torch.load(fname)
+            return torch.load(fname)
         except FileNotFoundError:
             log.warning("Failed to load value network.")
-        return self
+            return self
 
 
 class PolicyNetwork(nn.Module):
@@ -127,7 +127,7 @@ class PolicyNetwork(nn.Module):
 
     def load(self, fname: str = NETF) -> PolicyNetwork:
         try:
-            self = torch.load(fname)
+            return torch.load(fname)
         except FileNotFoundError:
             log.warning("Failed to load policy network.")
-        return self
+            return self
