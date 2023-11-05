@@ -22,7 +22,7 @@ def record(ep_id) -> bool:
 
 
 if __name__ == "__main__":
-    NROLLOUTS = 1
+    NROLLOUTS = 16
 
     rpenv = register_and_make_env(ENV_CONFIG, OBS_SPACE, vector_env=False)
 
@@ -33,7 +33,9 @@ if __name__ == "__main__":
 
     indim = model_indim(rpenv, MODEL_INPUT)
     actdim = actiondim(rpenv)
-    agent = REINFORCE(indim, actdim, MODEL_INPUT)
+    agent = REINFORCE(
+        indim, actdim, MODEL_INPUT, use_baseline=False, init2zeros=True, load_net=False
+    )
 
     RUN_NAME = "rp_test"
     client = MlflowClient()
