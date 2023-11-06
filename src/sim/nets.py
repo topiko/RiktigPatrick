@@ -74,9 +74,9 @@ class PolicyNetwork(nn.Module):
         # Shared Network
         self.shared_net = nn.Sequential(
             nn.Linear(obs_space_dims, hidden_space1),
-            nn.Tanh(),
+            nn.ReLU(),
             nn.Linear(hidden_space1, hidden_space2),
-            nn.Tanh(),
+            nn.ReLU(),
             # nn.Linear(hidden_space2, hidden_space3),
             # nn.LeakyReLU(),
             # nn.Linear(hidden_space3, hidden_space4),
