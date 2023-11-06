@@ -31,10 +31,15 @@ def train_on_episode(X_train, y_train, policy_net: PolicyNetwork):
 
 
 class Ds(Dataset):
-    def __init__(self, X, y, batch_size: int = 64):
+    def __init__(self, X, y, batch_size: int = 64, shuffle: bool = True):
         self.X = X
         self.y = y
         self._batch_size = batch_size
+
+        if shuffle:
+            idx = np.random.permutation(len(self.X))
+            self.X = self.X[idx]
+            self.y = self.y[idx]
 
     def __getitem__(self, idx):
         slice_ = slice(idx * self._batch_size, (idx + 1) * self._batch_size)
