@@ -95,8 +95,6 @@ class StepAction:
     def from_array(
         self,
         action: np.ndarray,
-        dt: float,
-        obs: Optional[dict[str, np.ndarray]] = None,
         lock_head: bool = True,
     ) -> StepAction:
         if action.ndim == 1:

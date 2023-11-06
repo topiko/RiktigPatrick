@@ -51,7 +51,8 @@ class REINFORCE:
         self.model_input = model_input
 
     def sample_action(
-        self, obs: torch.Tensor, dt: float
+        self,
+        obs: torch.Tensor,
     ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor]:
         """Returns an action, conditioned on the policy and observation.
 
@@ -78,7 +79,7 @@ class REINFORCE:
         value = self.value_net(obs_t)
 
         return (
-            StepAction().from_array(action, dt, obs, lock_head=True).to_dict(),
+            StepAction().from_array(action, lock_head=True).to_dict(),
             probs,
             value,
         )
