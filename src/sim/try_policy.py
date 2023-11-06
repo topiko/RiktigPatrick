@@ -55,9 +55,7 @@ def run_episode(
 
         while True:
             if isinstance(agent, REINFORCE):
-                action, probs, values = agent.sample_action(
-                    obs_d, dt=ENV_CONFIG["step_time"]
-                )
+                action, probs, values = agent.sample_action(obs_d)
             elif isinstance(agent, PIDPolicy):
                 obs = rp_env.state.get_state_dict()
                 action = agent.sample_action(obs)
