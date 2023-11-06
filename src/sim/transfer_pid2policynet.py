@@ -56,16 +56,13 @@ def Xyfromhistory(
     history: np.ndarray,
     idx_d: dict[str, np.ndarray],
     model_input: list[str],
-    actions_space: list[str],
+    action_space: list[str],
 ) -> tuple[torch.Tensor, torch.Tensor]:
     history = torch.Tensor(history)
-    X = torch.hstack(
-        [history[:, idxs] for k, idxs in idx_d.items() if k in model_input]
-    )
 
-    y_mean = torch.hstack(
-        [history[:, idxs] for k, idxs in idx_d.items() if k in actions_space]
-    )
+    X = torch.hstack([history[:, idx_d[k]] for k in MODEL_INPUT])
+
+    y_mean = torch.hstack([history[:, idx_d[k]] for k in action_space])
     y_std = torch.ones_like(y_mean) * 0.001
     y = torch.hstack([y_mean, y_std])
 
@@ -83,7 +80,7 @@ if __name__ == "__main__":
     indim = model_indim(rpenv, MODEL_INPUT)
     actiondim = actiondim(rpenv)
     action_space = list(rpenv.action_space.keys())
-    policy_net = PolicyNetwork(indim, actiondim)
+    policy_net = PolicyNetwork(indim, actiondim).load()
 
     i = 0
     while True:
@@ -95,5 +92,7 @@ if __name__ == "__main__":
         loss = train_on_episode(Xtrain, ytrain, policy_net)
         i += 1
         print(loss)
-        if loss < 0.1:
+        if loss < 1:
+            print("Net saved.")
             policy_net.store()
+            break

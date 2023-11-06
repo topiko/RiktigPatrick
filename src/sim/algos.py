@@ -62,7 +62,7 @@ class REINFORCE:
             action: Action to be performed
         """
 
-        obs_t = dict2tensor({k: v for k, v in obs.items() if k in self.model_input})
+        obs_t = dict2tensor({k: obs[k] for k in self.model_input})
 
         action_means, action_stddevs = self.net(obs_t)
 
