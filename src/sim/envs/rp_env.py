@@ -217,39 +217,16 @@ class GymRP(gymnasium.Env):
         lock_head: bool = True,
         ctrl_mode: str = "vel",
         step_time: float = 0.01,
+        randomize: bool = False,
     ):
-        # Make rp:
-        rp = MujocoRP()
-
-        # Make arena:
-        arena = make_arena()
-
-        # Spawn rp at arena:
-        xpos, ypos, zpos = 0.0, 0.0, WHEEL_D / 2
-        spawn_site = arena.worldbody.add(
-            "site", name="rp_site", pos=[xpos, ypos, zpos], group=3
-        )
-        spawn_site.attach(rp.model).add("freejoint")  # "freejoint"
-
-        # Make environment:
-        self.simul_timestep = 0.002  # MuJoCo default 0.002
-        self.dm_env = mjcf.Physics.from_mjcf_model(arena)
+        self._randomize = randomize
+        self._init_pitch_scale = 2.0  # deg
+        self.lock_head = lock_head
+        self.dm_env = self._reset_env()
         assert self.dm_env is not None
 
+        self.simul_timestep = 0.002  # MuJoCo default 0.002
         self.dm_env.model.opt.timestep = self.simul_timestep
-
-        # Actuators:
-        self.left_wheel_act = rp.model.find("actuator", "leftwheel_actuator")
-        self.right_wheel_act = rp.model.find("actuator", "rightwheel_actuator")
-
-        # Sensors:
-        self.gyro_sens = rp.model.find("sensor", "gyro")
-        self.acc_sens = rp.model.find("sensor", "accelerometer")
-        self.head_pitch_sens = rp.model.find("sensor", "headpitch_sensor")
-        self.head_turn_sens = rp.model.find("sensor", "headturn_sensor")
-        self.body_quat = rp.model.find("sensor", "framequat_sensor")
-        self.left_wheel_vel_sens = rp.model.find("sensor", "leftwheel_vel_sensor")
-        self.right_wheel_vel_sens = rp.model.find("sensor", "rightwheel_vel_sensor")
 
         self.state = State(keys=state_keys, record=record)
 
@@ -269,8 +246,6 @@ class GymRP(gymnasium.Env):
         }
 
         if not lock_head:
-            self.head_pitch_act = rp.model.find("actuator", "headpitch_actuator")
-            self.head_turn_act = rp.model.find("actuator", "headturn_actuator")
             action_space.update(
                 {
                     "act/head_pitch": spaces.Box(
@@ -282,7 +257,6 @@ class GymRP(gymnasium.Env):
                 }
             )
 
-        self.lock_head = lock_head
         self.action_space = spaces.Dict(action_space)
         self.render_mode = render_mode
         self.step_time = step_time  # s
@@ -328,10 +302,51 @@ class GymRP(gymnasium.Env):
     def _get_info(self) -> dict:
         return {}
 
+    def _reset_env(self, seed: int | None = 42) -> mjcf.Physics:
+        prng = np.random.default_rng(seed)
+
+        # Make rp:
+        rp = MujocoRP()
+
+        # Make arena:
+        arena = make_arena()
+
+        init_pitch = prng.normal(0, self._init_pitch_scale) if self._randomize else 0.0
+
+        # Spawn rp at arena:
+        xpos, ypos, zpos = 0.0, 0.0, WHEEL_D / 2
+        spawn_site = arena.worldbody.add(
+            "site",
+            name="rp_site",
+            pos=[xpos, ypos, zpos],
+            axisangle=[0, 1, 0, init_pitch],
+            group=3,
+        )
+        spawn_site.attach(rp.model).add("freejoint")
+
+        # Actuators:
+        self.left_wheel_act = rp.model.find("actuator", "leftwheel_actuator")
+        self.right_wheel_act = rp.model.find("actuator", "rightwheel_actuator")
+
+        # Sensors:
+        self.gyro_sens = rp.model.find("sensor", "gyro")
+        self.acc_sens = rp.model.find("sensor", "accelerometer")
+        self.head_pitch_sens = rp.model.find("sensor", "headpitch_sensor")
+        self.head_turn_sens = rp.model.find("sensor", "headturn_sensor")
+        self.body_quat = rp.model.find("sensor", "framequat_sensor")
+        self.left_wheel_vel_sens = rp.model.find("sensor", "leftwheel_vel_sensor")
+        self.right_wheel_vel_sens = rp.model.find("sensor", "rightwheel_vel_sensor")
+
+        if not self.lock_head:
+            self.head_pitch_act = rp.model.find("actuator", "headpitch_actuator")
+            self.head_turn_act = rp.model.find("actuator", "headturn_actuator")
+        # Make environment:
+        return mjcf.Physics.from_mjcf_model(arena)
+
     def reset(
-        self, options: Optional[Any] = None, seed: Optional[int] = None
+        self, options: Optional[Any] = None, seed: int | None = None
     ) -> tuple[dict, dict]:
-        self.dm_env.reset()
+        self.dm_env = self._reset_env(seed)
         self.state.reset()
 
         d, i = self._get_obs(), self._get_info()

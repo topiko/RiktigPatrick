@@ -15,4 +15,9 @@ MODEL_INPUT = [
 ]
 
 CTRL_MODE = "vel"
-ENV_CONFIG = {"ctrl_mode": CTRL_MODE, "lock_head": True, "step_time": 0.01}
+ENV_CONFIG = {
+    "ctrl_mode": CTRL_MODE,
+    "lock_head": True,
+    "step_time": 0.01,
+    "randomize": True,
+}
