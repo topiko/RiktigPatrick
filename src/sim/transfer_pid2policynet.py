@@ -86,11 +86,6 @@ def check_output(
     X, y = Xyfromhistory(history, idx_d, MODEL_INPUT, action_space)
     ymean = policy_net(X)[0].detach().numpy()
 
-    plt.plot(ymean[:, 0], label="left")
-    plt.plot(ymean[:, 1], label="right")
-    plt.legend()
-    plt.show()
-
     history = np.hstack([history, ymean])
     ncols = history.shape[1]
     idx_d["act/left_wheel_net"] = np.arange(ncols - 2, ncols - 1)
@@ -123,7 +118,7 @@ if __name__ == "__main__":
         loss = train_on_episode(Xtrain, ytrain, policy_net)
         i += 1
         print(f"{mean_loss:7.3f} | {loss:7.3f}")
-        if (mean_loss := alpha * loss + (1 - alpha) * mean_loss) < 10:
+        if (mean_loss := alpha * loss + (1 - alpha) * mean_loss) < 1:
             print("Net saved.")
             policy_net.store()
             break
