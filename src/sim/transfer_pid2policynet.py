@@ -1,3 +1,4 @@
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -5,7 +6,7 @@ from torch.utils.data import Dataset
 from sim.nets import PolicyNetwork
 from sim.PIDPolicy import PIDPolicy
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
-from sim.try_policy import run_episode
+from sim.try_policy import PlotGroups, plot_state_history, run_episode
 from sim.utils import actiondim, model_indim, register_and_make_env
 
 
@@ -69,6 +70,34 @@ def Xyfromhistory(
     return X, y
 
 
+def check_output(
+    history: np.ndarray,
+    idx_d: dict[str, np.ndarray],
+    action_space: list[str],
+    policy_net: PolicyNetwork,
+):
+    X, y = Xyfromhistory(history, idx_d, MODEL_INPUT, action_space)
+    ymean, ystd = policy_net(X)
+
+    plg = PlotGroups()
+    plg.wheel_left += ("act/left_wheel_net",)
+    plg.wheel_right += ("act/right_wheel_net",)
+
+    X, y = Xyfromhistory(history, idx_d, MODEL_INPUT, action_space)
+    ymean = policy_net(X)[0].detach().numpy()
+
+    plt.plot(ymean[:, 0], label="left")
+    plt.plot(ymean[:, 1], label="right")
+    plt.legend()
+    plt.show()
+
+    history = np.hstack([history, ymean])
+    ncols = history.shape[1]
+    idx_d["act/left_wheel_net"] = np.arange(ncols - 2, ncols - 1)
+    idx_d["act/right_wheel_net"] = np.arange(ncols - 1, ncols)
+    plot_state_history(history, idx_d, plg)
+
+
 if __name__ == "__main__":
     ENV_CONFIG["record"] = True
     rpenv = register_and_make_env(ENV_CONFIG, OBS_SPACE)
@@ -92,7 +121,9 @@ if __name__ == "__main__":
         loss = train_on_episode(Xtrain, ytrain, policy_net)
         i += 1
         print(loss)
-        if loss < 1:
+        if loss < 0.1:
             print("Net saved.")
             policy_net.store()
             break
+
+    check_output(history, idx_d, action_space, policy_net)
