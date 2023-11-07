@@ -13,7 +13,7 @@ from gymnasium.wrappers import (
 )
 
 from sim.algos import REINFORCE
-from sim.PIDPolicy import NetPolicy, PIDPolicy
+from sim.custom_policies import NetPolicy, PIDPolicy
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
 from sim.utils import Tape, actiondim, model_indim, register_and_make_env
 

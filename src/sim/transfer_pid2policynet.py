@@ -3,8 +3,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from sim.custom_policies import NetPolicy, PIDPolicy
 from sim.nets import PolicyNetwork
-from sim.PIDPolicy import NetPolicy, PIDPolicy
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
 from sim.try_policy import PlotGroups, plot_state_history, run_episode
 from sim.utils import actiondim, model_indim, register_and_make_env
@@ -76,7 +76,7 @@ def check_output(
     history: np.ndarray,
     idx_d: dict[str, np.ndarray],
     action_space: list[str],
-    policy_net: PolicyNetwork | PIDPolicy,
+    policy_net: PolicyNetwork,
 ):
     X, y = Xyfromhistory(history, idx_d, MODEL_INPUT, action_space)
     ymean, ystd = policy_net(X)
