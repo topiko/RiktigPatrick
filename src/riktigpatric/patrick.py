@@ -263,10 +263,23 @@ class State:
         if not self._history:
             raise KeyError("History is empty.")
 
-        return (
-            np.vstack(self._history),
-            self.get_state_arr(keys="all", ret_idxs=True)[1],
-        )
+        # We store the previous action in history, so we need to shift it.
+        history = np.vstack(self._history)
+
+        idx_d = self.get_state_arr(keys="all", ret_idxs=True)[1]
+
+        act_keys = list(self._action_dict.keys())
+
+        # Action mask:
+        mask = np.zeros(history.shape[1], dtype=bool)
+        for k in act_keys:
+            mask[idx_d[k]] = True
+
+        # Shift the action:
+        history[:-1, mask] = history[1:, mask]
+        history = history[:-1, :]
+
+        return history, idx_d
 
     @property
     def euler(self) -> np.ndarray:
