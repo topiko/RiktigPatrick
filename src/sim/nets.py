@@ -66,34 +66,34 @@ class PolicyNetwork(nn.Module):
         """
         super().__init__()
 
-        hidden_space1 = 16  # 32  # Nothing special with 16, feel free to change
-        hidden_space2 = 16  # 32  # Nothing special with 32, feel free to change
-        # hidden_space3 = 512  # 32  # Nothing special with 32, feel free to change
-        # hidden_space4 = 512  # 32  # Nothing special with 32, feel free to change
+        hidden_space1 = 32
+        hidden_space2 = 32
+        hidden_space3 = 16
+        hidden_space4 = 8
 
         # Shared Network
         self.shared_net = nn.Sequential(
             nn.Linear(obs_space_dims, hidden_space1),
-            nn.ReLU(),
+            nn.Tanh(),
             nn.Linear(hidden_space1, hidden_space2),
-            nn.ReLU(),
-            # nn.Linear(hidden_space2, hidden_space3),
-            # nn.LeakyReLU(),
-            # nn.Linear(hidden_space3, hidden_space4),
-            # nn.LeakyReLU(),
+            nn.Tanh(),
+            nn.Linear(hidden_space2, hidden_space3),
+            nn.Tanh(),
+            nn.Linear(hidden_space3, hidden_space4),
+            nn.Tanh(),
         )
 
         initto0 = functools.partial(init_weights, w=0.01, b=0.01)
 
         # Policy Mean specific Linear Layer
         self.policy_mean_net = nn.Sequential(
-            nn.Linear(hidden_space2, action_space_dims),
+            nn.Linear(hidden_space4, action_space_dims),
             nn.Sigmoid(),
         )
 
         # Policy Std Dev specific Linear Layer
         self.policy_stddev_net = nn.Sequential(
-            nn.Linear(hidden_space2, action_space_dims),
+            nn.Linear(hidden_space4, action_space_dims),
         )
 
         if init2zeros:
@@ -115,10 +115,12 @@ class PolicyNetwork(nn.Module):
 
         shared_features = self.shared_net(x)
 
-        action_means = (self.policy_mean_net(shared_features) - 0.5) * 2 * MAXA
+        action_means = (self.policy_mean_net(shared_features) - 0.5) * 2 * MAXV
         action_stddevs = torch.log(
             1 + torch.exp(self.policy_stddev_net(shared_features))
         )
+        if (abs(action_means) > MAXV).any():
+            raise ValueError("Invalid action mean value(s).")
 
         return action_means, action_stddevs
 
@@ -131,3 +133,7 @@ class PolicyNetwork(nn.Module):
         except FileNotFoundError:
             log.warning("Failed to load policy network.")
             return self
+
+    @classmethod
+    def from_file(cls, fname: str = NETF) -> PolicyNetwork:
+        return torch.load(fname)
