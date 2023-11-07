@@ -354,7 +354,7 @@ class GymRP(gymnasium.Env):
 
     @property
     def terminated(self) -> bool:
-        return abs(self.state.euler[1]) > 10
+        return abs(self.state.euler[1]) > 20
 
     @property
     def truncated(self) -> bool:
