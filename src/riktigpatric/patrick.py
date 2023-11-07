@@ -260,6 +260,9 @@ class State:
     def history(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
         if not self._record:
             raise KeyError("You have not recorded history.")
+        if not self._history:
+            raise KeyError("History is empty.")
+
         return (
             np.vstack(self._history),
             self.get_state_arr(keys="all", ret_idxs=True)[1],
@@ -275,6 +278,7 @@ class State:
         self._history = []
         self._action_dict = StepAction().to_dict()
         self._info_dict = {"reward": 0}
+        self.obs = Obs()
 
     def get_state_dict(
         self, keys: Optional[Union[str, list[str]]] = None
