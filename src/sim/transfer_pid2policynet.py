@@ -4,31 +4,33 @@ import torch
 from torch.utils.data import Dataset
 
 from sim.nets import PolicyNetwork
-from sim.PIDPolicy import PIDPolicy
+from sim.PIDPolicy import NetPolicy, PIDPolicy
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
 from sim.try_policy import PlotGroups, plot_state_history, run_episode
 from sim.utils import actiondim, model_indim, register_and_make_env
 
 
-def train_on_episode(X_train, y_train, policy_net: PolicyNetwork):
-    loss = torch.nn.MSELoss()
-    optim = torch.optim.Adam(policy_net.parameters(), lr=0.00001)
+def train_on_episode(X_train, y_train, policy_net: PolicyNetwork, nepochs: int = 2):
+    loss = torch.nn.MSELoss(reduction="sum")
+    optim = torch.optim.Adam(policy_net.parameters(), lr=0.001)
 
-    losses = 0
+    _nepochs = 0
+    while True:
+        ds = Ds(X_train, y_train)
+        losses = 0
+        for X, y in ds:
+            optim.zero_grad()
+            ymean, ystd = policy_net(X)
+            loss_ = loss(torch.hstack([ymean, ystd]), y)
 
-    ds = Ds(X_train, y_train)
+            loss_.backward()
+            optim.step()
 
-    for X, y in ds:
-        optim.zero_grad()
-        ymean, ystd = policy_net(X)
-        loss_ = loss(torch.hstack([ymean, ystd]), y)
+            losses += loss_.item()
 
-        loss_.backward()
-        optim.step()
-
-        losses += loss_.item()
-
-    return losses
+        if (losses < 10) | (_nepochs > nepochs):
+            return losses
+        _nepochs += 1
 
 
 class Ds(Dataset):
@@ -74,7 +76,7 @@ def check_output(
     history: np.ndarray,
     idx_d: dict[str, np.ndarray],
     action_space: list[str],
-    policy_net: PolicyNetwork,
+    policy_net: PolicyNetwork | PIDPolicy,
 ):
     X, y = Xyfromhistory(history, idx_d, MODEL_INPUT, action_space)
     ymean, ystd = policy_net(X)
@@ -85,6 +87,8 @@ def check_output(
 
     X, y = Xyfromhistory(history, idx_d, MODEL_INPUT, action_space)
     ymean = policy_net(X)[0].detach().numpy()
+    ymean[1:] = ymean[:-1]
+    ymean[0] = 0
 
     history = np.hstack([history, ymean])
     ncols = history.shape[1]
@@ -95,6 +99,7 @@ def check_output(
 
 if __name__ == "__main__":
     ENV_CONFIG["record"] = True
+    ENV_CONFIG["randomize"] = True
     rpenv = register_and_make_env(ENV_CONFIG, OBS_SPACE)
 
     rpenv.reset()
@@ -109,18 +114,32 @@ if __name__ == "__main__":
     i = 0
     mean_loss = 100
     alpha = 0.3
-    while True:
-        run_episode(pid_agent, rpenv, i, nrollouts=1)
+    minloss = 100
+    nrollouts = 10
+    while minloss > 0.1:
+        xtrains = []
+        ytrains = []
+        for _ in range(nrollouts):
+            run_episode(pid_agent, rpenv, np.random.randint(0, 1e6), nrollouts=1)
 
-        history, idx_d = rpenv.state.history
+            history, idx_d = rpenv.state.history
 
-        Xtrain, ytrain = Xyfromhistory(history, idx_d, MODEL_INPUT, action_space)
+            Xtrain, ytrain = Xyfromhistory(history, idx_d, MODEL_INPUT, action_space)
+            xtrains.append(Xtrain)
+            ytrains.append(ytrain)
+
+        Xtrain = torch.vstack(xtrains)
+        ytrain = torch.vstack(ytrains)
         loss = train_on_episode(Xtrain, ytrain, policy_net)
         i += 1
-        print(f"{mean_loss:7.3f} | {loss:7.3f}")
-        if (mean_loss := alpha * loss + (1 - alpha) * mean_loss) < 1:
+        if (mean_loss := alpha * loss + (1 - alpha) * mean_loss) < minloss:
+            minloss = mean_loss
             print("Net saved.")
             policy_net.store()
-            break
+        print(f"{mean_loss:7.3f} | {loss:7.3f}")
 
+    agent = pid_agent  # NetPolicy()  # pid_agent  # PolicyNetwork()
+    rpenv.reset()
+    run_episode(agent, rpenv, i, nrollouts=1)
+    history, idx_d = rpenv.state.history
     check_output(history, idx_d, action_space, policy_net)
