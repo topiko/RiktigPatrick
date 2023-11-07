@@ -13,9 +13,9 @@ from gymnasium.wrappers import (
 )
 
 from sim.algos import REINFORCE
-from sim.PIDPolicy import PIDPolicy
+from sim.PIDPolicy import NetPolicy, PIDPolicy
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
-from sim.utils import Tape, register_and_make_env
+from sim.utils import Tape, actiondim, model_indim, register_and_make_env
 
 parser = argparse.ArgumentParser()
 
@@ -43,7 +43,7 @@ class PlotGroups:
 
 
 def run_episode(
-    agent: REINFORCE | PIDPolicy,
+    agent: REINFORCE | PIDPolicy | NetPolicy,
     rp_env: gym.Env,
     seed: int = 42,
     nrollouts: int = 1,
@@ -56,7 +56,7 @@ def run_episode(
         while True:
             if isinstance(agent, REINFORCE):
                 action, probs, values = agent.sample_action(obs_d)
-            elif isinstance(agent, PIDPolicy):
+            elif isinstance(agent, PIDPolicy | NetPolicy):
                 obs = rp_env.state.get_state_dict()
                 action = agent.sample_action(obs)
 
@@ -111,6 +111,7 @@ def plot_state_history(
 
 if __name__ == "__main__":
     ENV_CONFIG["record"] = True
+    ENV_CONFIG["randomize"] = False
     rpenv = register_and_make_env(ENV_CONFIG, OBS_SPACE)
 
     rpenv = RecordVideo(
@@ -122,10 +123,8 @@ if __name__ == "__main__":
 
     rpenv.reset()
 
-    indim = sum(
-        v.shape[0] for k, v in rpenv.observation_space.items() if k in MODEL_INPUT
-    )
-    actiondim = sum(v.shape[0] for v in rpenv.action_space.values())
+    indim = model_indim(rpenv, MODEL_INPUT)
+    actiondim = actiondim(rpenv)
 
     if agent_type == "REINFORCE":
         agent = REINFORCE(
@@ -138,10 +137,12 @@ if __name__ == "__main__":
         )
     elif agent_type == "pid":
         agent = PIDPolicy(10, 0.0, 0, ENV_CONFIG["step_time"])
+    elif agent_type == "net":
+        agent = NetPolicy()
     else:
         raise KeyError("Invalid agent type")
 
-    run_episode(agent, rpenv)
+    run_episode(agent, rpenv, seed=0)
 
     history, idx_d = rpenv.state.history
 
