@@ -58,6 +58,7 @@ class PIDPolicy:
         a = self._kp * P + self._ki * I + self._kd * D
         v = obs["sens/left_wheel_vel"][0] + a * self._dt
         v = np.array([v])
+        np.clip(v, -MAXV, MAXV, out=v)
 
         d = {
             "act/left_wheel": v,
