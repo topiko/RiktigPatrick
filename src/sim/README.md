@@ -20,6 +20,9 @@ or
 
 `python try_policy.py --policy pid`
 
+## Or to kickstart training:
+`python transfer_pid2policynet.py`
+
 Run the server:
 `mlflow server`
 
