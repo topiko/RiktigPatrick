@@ -66,7 +66,7 @@ def Xyfromhistory(
     X = torch.hstack([history[:, idx_d[k]] for k in MODEL_INPUT])
 
     y_mean = torch.hstack([history[:, idx_d[k]] for k in action_space])
-    y_std = torch.ones_like(y_mean) * 0.0001
+    y_std = torch.ones_like(y_mean) * 0.01
     y = torch.hstack([y_mean, y_std])
 
     return X, y
