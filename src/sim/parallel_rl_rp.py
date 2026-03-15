@@ -142,7 +142,7 @@ if __name__ == "__main__":
             assert (
                 len(full_tapes) >= BATCH_SIZE
             ), f"len(full_tapes) = {len(full_tapes)}, {len(ready_)}"
-            rets, val_loss = agent.update(full_tapes)
+            rets, policy_loss, entropy_loss, value_loss = agent.update(full_tapes)
 
             # Record stats:
             mean_return = rets.mean()
@@ -153,7 +153,9 @@ if __name__ == "__main__":
                     "std_ret": std_return,
                     "max_ret": rets.max(),
                     "min_ret": rets.min(),
-                    "value_loss": val_loss,
+                    "policy_loss": policy_loss,
+                    "entropy_loss": entropy_loss,
+                    "value_loss": value_loss,
                 },
                 step=episode,
             )

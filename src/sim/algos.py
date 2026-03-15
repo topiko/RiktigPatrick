@@ -135,7 +135,7 @@ class REINFORCE:
         self.optimizer.step()
 
         returns_np = np.array([t.ep_return for t in tapes])
-        return returns_np, float(value_loss.detach())
+        return returns_np, float(policy_loss.detach()), float(entropy_loss.detach()), float(value_loss.detach())
 
     def _step_value(self, tapes: list[Tape], returns: np.ndarray) -> float:
         # No longer needed - value is updated in update() now
