@@ -16,7 +16,7 @@ from sim.algos import REINFORCE, compute_returns, compute_value_estimates
 from sim.custom_policies import NetPolicy, PIDPolicy
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE, RL_CONFIG
 from sim.utils import Tape, actiondim, model_indim, register_and_make_env
-from sim.nets import ValueNet
+from sim.nets import PolicyNetwork
 
 parser = argparse.ArgumentParser()
 
@@ -177,16 +177,16 @@ if __name__ == "__main__":
     history = np.column_stack([history, returns])
     idx_d["return"] = np.array([history.shape[1] - 1])
 
-    # Compute value estimates from critic
-    value_net = ValueNet(indim)
+    # Compute value estimates from policy network's value head
+    policy_net = PolicyNetwork(indim, actiondim)
     try:
-        value_net = value_net.load()
+        policy_net = policy_net.load()
     except:
-        print("Warning: Could not load value net, using zeros")
-        value_net = None
+        print("Warning: Could not load policy net, using zeros")
+        policy_net = None
     
-    if value_net is not None:
-        value_estimates = compute_value_estimates(value_net, history, idx_d, MODEL_INPUT)
+    if policy_net is not None:
+        value_estimates = compute_value_estimates(policy_net, history, idx_d, MODEL_INPUT)
     else:
         value_estimates = np.zeros(len(history))
     history = np.column_stack([history, value_estimates])

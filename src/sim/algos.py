@@ -3,7 +3,7 @@ import torch
 from riktigpatric.patrick import StepAction
 from torch.distributions.normal import Normal
 
-from sim.nets import PolicyNetwork, ValueNet
+from sim.nets import PolicyNetwork
 from sim.utils import Tape, dict2tensor
 
 
@@ -51,21 +51,16 @@ class REINFORCE:
         self.eps = 1e-6
         self.entropy_coef = 0.1
 
+        # Combined actor-critic network
         self.net = PolicyNetwork(
             obs_space_dims, action_space_dims, init2zeros=init2zeros
         )
         if load_net:
             self.net = self.net.load()
 
-        self.policy_optimizer = torch.optim.Adam(
-            self.net.parameters(), lr=self.learning_rate
-        )
-
-        self.value_net = ValueNet(obs_space_dims)
-        if load_net:
-            self.value_net = self.value_net.load()
-        self.value_optimizer = torch.optim.Adam(self.value_net.parameters(), lr=1e-3)
-        self.value_loss = torch.nn.MSELoss(reduction="sum")
+        # Single optimizer for both policy and value heads
+        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
+        self.value_loss = torch.nn.MSELoss(reduction="mean")
 
         self.use_baseline = use_baseline
         self.model_input = model_input
@@ -74,10 +69,10 @@ class REINFORCE:
     def sample_action(
         self,
         obs: dict,
-    ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor]:
+    ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor, torch.Tensor]:
         obs_t = dict2tensor({k: obs[k] for k in self.model_input})
 
-        action_means, action_stddevs = self.net(obs_t)
+        action_means, action_stddevs, value = self.net(obs_t)
 
         distrib = Normal(action_means, action_stddevs + self.eps)
 
@@ -87,8 +82,6 @@ class REINFORCE:
 
         action = action.numpy()
 
-        value = self.value_net(obs_t)
-
         return (
             StepAction().from_array(action, lock_head=True).to_dict(),
             probs,
@@ -96,22 +89,13 @@ class REINFORCE:
             entropy,
         )
 
-    def _step_value(self, tapes: list[Tape], returns: np.ndarray) -> float:
-        all_values = torch.cat([t.values for t in tapes])
-        
-        self.value_optimizer.zero_grad()
-        value_loss = self.value_loss(all_values, torch.Tensor(returns))
-        value_loss.backward()
-        self.value_optimizer.step()
-
-        return float(value_loss.detach())
-
     def update(self, tapes: list[Tape]) -> tuple[np.ndarray, float]:
         all_rewards = np.concatenate([t.rewards for t in tapes])
         self.reward_normalizer.update(all_rewards)
 
         policy_losses = []
         entropy_losses = []
+        value_losses = []
         returns_list = []
 
         for tape in tapes:
@@ -124,24 +108,30 @@ class REINFORCE:
 
             advantages = G - baseline
 
+            # Value loss
+            value_losses.append(self.value_loss(tape.values.squeeze(), torch.Tensor(G)))
+
             for log_prob, entropy, advantage in zip(tape.probs, tape.entropies, advantages):
                 policy_losses.append(-log_prob.sum() * advantage)
                 entropy_losses.append(-entropy.sum() * self.entropy_coef)
 
         policy_loss = torch.stack(policy_losses).mean()
         entropy_loss = torch.stack(entropy_losses).mean()
-        total_policy_loss = policy_loss + entropy_loss
+        value_loss = torch.stack(value_losses).mean()
+        
+        total_loss = policy_loss + entropy_loss + value_loss
 
-        self.policy_optimizer.zero_grad()
-        total_policy_loss.backward()
+        self.optimizer.zero_grad()
+        total_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
-        self.policy_optimizer.step()
-
-        all_returns = np.concatenate(returns_list)
-        val_loss = self._step_value(tapes, all_returns)
+        self.optimizer.step()
 
         returns_np = np.array([t.ep_return for t in tapes])
-        return returns_np, val_loss
+        return returns_np, float(value_loss.detach())
+
+    def _step_value(self, tapes: list[Tape], returns: np.ndarray) -> float:
+        # No longer needed - value is updated in update() now
+        return 0.0
 
 
 def compute_returns(rewards: np.ndarray, discount: float) -> np.ndarray:
@@ -154,15 +144,15 @@ def compute_returns(rewards: np.ndarray, discount: float) -> np.ndarray:
 
 
 def compute_value_estimates(
-    value_net: "ValueNet",
+    policy_net: "PolicyNetwork",
     history: np.ndarray,
     idx_dict: dict[str, np.ndarray],
     model_input: list[str],
 ) -> np.ndarray:
-    """Compute value estimates for each timestep using the critic.
+    """Compute value estimates for each timestep using the critic head.
     
     Args:
-        value_net: The value network (critic)
+        policy_net: The policy network with value head
         history: Full episode history array
         idx_dict: Dictionary mapping keys to column indices
         model_input: List of observation keys used as input
@@ -177,6 +167,7 @@ def compute_value_estimates(
         obs_dict = {k: history[i, idx_dict[k]] for k in model_input}
         obs_t = torch.concatenate([torch.Tensor(obs_dict[k]).reshape(1, -1) for k in model_input], dim=1)
         with torch.no_grad():
-            v = value_net(obs_t).item()
+            _, _, v = policy_net(obs_t)
+            v = v.item()
         value_estimates.append(v)
     return np.array(value_estimates)
