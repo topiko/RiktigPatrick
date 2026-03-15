@@ -27,7 +27,7 @@ from mlflow import MlflowClient
 
 from sim.algos import REINFORCE
 from sim.envs.rp_env import MAXA, MAXV
-from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
+from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE, RL_CONFIG, TRAIN_CONFIG
 from sim.utils import Tape, register_and_make_env
 
 load_dotenv()  # Loads .env from project root
@@ -62,8 +62,7 @@ log = logging.getLogger(__name__)
 
 
 if __name__ == "__main__":
-    USE_BASELINE = False  # True
-    BATCH_SIZE = 64
+    BATCH_SIZE = TRAIN_CONFIG["nrollouts"]
 
     rpenv_p = register_and_make_env(ENV_CONFIG, OBS_SPACE, True, BATCH_SIZE)
 
@@ -80,7 +79,7 @@ if __name__ == "__main__":
         indim,
         actiondim,
         MODEL_INPUT,
-        use_baseline=USE_BASELINE,
+        use_baseline=RL_CONFIG["use_baseline"],
         init2zeros=True,
         load_net=False,
     )
