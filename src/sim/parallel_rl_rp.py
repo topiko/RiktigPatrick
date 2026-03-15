@@ -14,7 +14,7 @@ from gymnasium.wrappers import (
     RecordVideo,
     TransformObservation,
 )
-from mlflow.client import MlflowClient
+from mlflow import MlflowClient
 
 from sim.algos import REINFORCE
 from sim.envs.rp_env import MAXA, MAXV
