@@ -232,9 +232,9 @@ class GymRP(gymnasium.Env):
         self.dm_env.model.opt.timestep = self.simul_timestep
 
         self.state = State(keys=state_keys, record=record)
-        self.state._info_dict["env/step"] = np.array([0.0])
 
         self.observation_space = self.state.to_obs_space()
+        self.observation_space.spaces["env/step"] = spaces.Box(0, 1, shape=(1,), dtype=float)
 
         # TODO: import these from somwehere
         max_w_wheel = np.pi * 2 * 5
