@@ -4,10 +4,15 @@ import logging
 import logging.config
 import os
 
+from datetime import datetime
 from dotenv import load_dotenv
-load_dotenv()  # Loads .env from project root
 
 import gymnasium as gym
+import mlflow
+import numpy as np
+import torch
+import yaml
+from gymnasium import ActionWrapper
 import mlflow
 import numpy as np
 import torch
@@ -24,6 +29,8 @@ from sim.algos import REINFORCE
 from sim.envs.rp_env import MAXA, MAXV
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
 from sim.utils import Tape, register_and_make_env
+
+load_dotenv()  # Loads .env from project root
 
 log_config = {
     "version": 1,
@@ -87,6 +94,18 @@ if __name__ == "__main__":
     seed = 42
     max_steps = 2000
     with mlflow.start_run(run_name=RUN_NAME):
+        # Load and log config parameters
+        with open("sim/config.yaml", "r") as f:
+            config = yaml.safe_load(f)
+
+        # Flatten config for mlflow params
+        flat_params = {}
+        for section, params in config.items():
+            if isinstance(params, dict):
+                for key, value in params.items():
+                    flat_params[f"{section}_{key}"] = value
+        mlflow.log_params(flat_params)
+
         for episode in range(200001):
             obs, _ = rpenv_p.reset(seed=seed)
 
