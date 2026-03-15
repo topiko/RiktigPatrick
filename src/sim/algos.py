@@ -164,7 +164,7 @@ def compute_value_estimates(
     Args:
         policy_net: The policy network with value head
         history: Full episode history array
-        idx_dict: Dictionary mapping keys to column indices
+        idx_dict: Dictionary mapping keys to column indices (may have _0, _1 suffixes)
         model_input: List of observation keys used as input
     
     Returns:
@@ -174,10 +174,22 @@ def compute_value_estimates(
     
     device = next(policy_net.parameters()).device
     
+    def get_obs_indices(key):
+        if key in idx_dict:
+            return idx_dict[key]
+        # Handle expanded keys like sens/gyro_0, sens/gyro_1
+        return np.array([idx_dict[f"{key}_{i}"] for i in range(3)])
+    
     value_estimates = []
     for i in range(len(history)):
-        obs_dict = {k: history[i, idx_dict[k]] for k in model_input}
-        obs_t = torch.concatenate([torch.Tensor(obs_dict[k]).reshape(1, -1) for k in model_input], dim=1).to(device)
+        obs_parts = []
+        for k in model_input:
+            indices = get_obs_indices(k)
+            if len(indices) == 1:
+                obs_parts.append(history[i, indices[0]:indices[0]+1])
+            else:
+                obs_parts.append(history[i, indices])
+        obs_t = torch.concatenate([torch.Tensor(p).reshape(1, -1) for p in obs_parts], dim=1).to(device)
         with torch.no_grad():
             _, _, v = policy_net(obs_t)
             v = v.item()
