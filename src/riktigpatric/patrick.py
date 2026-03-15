@@ -349,12 +349,16 @@ class State:
         """
         state_d = self.get_state_dict(keys=keys)
 
-        state_arr = np.concatenate([arr for arr in state_d.values()], axis=0)
+        state_arr = np.concatenate([arr.flatten() for arr in state_d.values()], axis=0)
         if ret_idxs:
             start_idx = 0
             idxs_d = {}
             for k, v in state_d.items():
-                idxs_d[k] = np.arange(len(v)) + start_idx
+                if len(v) == 1:
+                    idxs_d[k] = np.array([start_idx])
+                else:
+                    for i in range(len(v)):
+                        idxs_d[f"{k}_{i}"] = np.array([start_idx + i])
                 start_idx += len(v)
 
             return state_arr, idxs_d
