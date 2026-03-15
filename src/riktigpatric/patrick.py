@@ -362,12 +362,12 @@ class State:
         return state_arr
 
     def to_obs_space(self) -> spaces.Dict:
-        return spaces.Dict(
-            {
-                k: spaces.Box(-np.inf, np.inf, shape=(len(v),), dtype=float)
-                for k, v in self.get_state_dict().items()
-            }
-        )
+        d = {
+            k: spaces.Box(-np.inf, np.inf, shape=(len(v),), dtype=float)
+            for k, v in self.get_state_dict().items()
+        }
+        d["env/time"] = spaces.Box(0, np.inf, shape=(1,), dtype=float)
+        return spaces.Dict(d)
 
 
 class StepReturn:

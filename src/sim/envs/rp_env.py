@@ -233,7 +233,6 @@ class GymRP(gymnasium.Env):
         self.state = State(keys=state_keys, record=record)
 
         self.observation_space = self.state.to_obs_space()
-        self.observation_space.spaces["env/time"] = spaces.Box(0, np.inf, shape=(1,), dtype=float)
 
         # TODO: import these from somwehere
         max_w_wheel = np.pi * 2 * 5
