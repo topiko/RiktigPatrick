@@ -128,7 +128,7 @@ class REINFORCE:
         entropy_loss = torch.stack(entropy_losses).mean()
         value_loss = torch.stack(value_losses).mean()
         
-        entropy_scale = RL_CONFIG.get("entropy_scale", 0.01)
+        entropy_scale = RL_CONFIG["entropy_scale"]
         total_loss = policy_loss + entropy_scale * entropy_loss + value_loss
 
         self.optimizer.zero_grad()
