@@ -4,6 +4,7 @@ from riktigpatric.patrick import StepAction
 from torch.distributions.normal import Normal
 
 from sim.nets import PolicyNetwork
+from sim.sim_config import RL_CONFIG
 from sim.utils import Tape, dict2tensor
 
 
@@ -127,7 +128,8 @@ class REINFORCE:
         entropy_loss = torch.stack(entropy_losses).mean()
         value_loss = torch.stack(value_losses).mean()
         
-        total_loss = policy_loss + entropy_loss + value_loss
+        entropy_scale = RL_CONFIG.get("entropy_scale", 0.01)
+        total_loss = policy_loss + entropy_scale * entropy_loss + value_loss
 
         self.optimizer.zero_grad()
         total_loss.backward()
