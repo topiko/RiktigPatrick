@@ -222,6 +222,7 @@ class GymRP(gymnasium.Env):
     ):
         self._randomize = randomize
         self._init_pitch_scale = 2.0  # deg
+        self._init_wheel_vel_scale = 1.0  # rad/s
         self.lock_head = lock_head
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
@@ -357,7 +358,17 @@ class GymRP(gymnasium.Env):
             self.head_pitch_act = rp.model.find("actuator", "headpitch_actuator")
             self.head_turn_act = rp.model.find("actuator", "headturn_actuator")
         # Make environment:
-        return mjcf.Physics.from_mjcf_model(arena)
+        physics = mjcf.Physics.from_mjcf_model(arena)
+
+        # Set initial wheel velocity perturbation
+        if self._randomize:
+            init_wheel_vel = prng.normal(0, self._init_wheel_vel_scale)
+            left_joint_id = physics.model.joint_name2id("leftwheel_joint")
+            right_joint_id = physics.model.joint_name2id("rightwheel_joint")
+            physics.data.qvel[left_joint_id] = init_wheel_vel
+            physics.data.qvel[right_joint_id] = init_wheel_vel
+
+        return physics
 
     def reset(
         self, options: Optional[Any] = None, seed: int | None = None
