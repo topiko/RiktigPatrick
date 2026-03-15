@@ -223,7 +223,6 @@ class GymRP(gymnasium.Env):
         self._randomize = randomize
         self._init_pitch_scale = 2.0  # deg
         self._init_wheel_vel_scale = 1.0  # rad/s
-        self._step = 0
         self.lock_head = lock_head
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
@@ -297,7 +296,8 @@ class GymRP(gymnasium.Env):
 
     def _get_obs(self) -> dict:
         d = self.state.get_state_dict(keys="all")
-        d["env/step"] = np.array([self._step / (self._step + 10)])
+        current_time = self.dm_env.data.time
+        d["env/step"] = current_time / (current_time + 10)
         return d
 
     def reset(
@@ -305,7 +305,6 @@ class GymRP(gymnasium.Env):
     ) -> tuple[dict, dict]:
         self.dm_env = self._reset_env(seed)
         self.state.reset()
-        self._step = 0
 
         d, i = self._get_obs(), self._get_info()
         d["env/step"] = np.array([0.0])
@@ -446,7 +445,6 @@ class GymRP(gymnasium.Env):
             t = self.dm_env.data.time
 
         self._update_state()
-        self._step += 1
 
         reward, reward_info = self._get_reward()
         info = self._get_info()
