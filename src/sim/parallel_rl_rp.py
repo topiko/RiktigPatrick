@@ -93,7 +93,7 @@ if __name__ == "__main__":
             ready_ = np.zeros(BATCH_SIZE, dtype=bool)
             step_count = 0
             while True:
-                result = agent.sample_actions(obs)
+                result = agent.sample_action(obs)
                 if len(result) == 4:
                     actions, probs, values, entropies = result
                 else:
