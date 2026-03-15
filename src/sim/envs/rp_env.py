@@ -363,8 +363,8 @@ class GymRP(gymnasium.Env):
         # Set initial wheel velocity perturbation
         if self._randomize:
             init_wheel_vel = prng.normal(0, self._init_wheel_vel_scale)
-            left_joint_id = physics.model.joint_name2id("leftwheel_joint")
-            right_joint_id = physics.model.joint_name2id("rightwheel_joint")
+            left_joint_id = physics.model.name2id("frame/leftwheel_joint", "joint")
+            right_joint_id = physics.model.name2id("frame/rightwheel_joint", "joint")
             physics.data.qvel[left_joint_id] = init_wheel_vel
             physics.data.qvel[right_joint_id] = init_wheel_vel
 
