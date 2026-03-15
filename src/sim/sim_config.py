@@ -14,6 +14,7 @@ OBS_SPACE = [
     "sens/left_wheel_vel",
     "sens/right_wheel_vel",
     "simul/rp_pitch",
+    "env/time",
 ]
 
 MODEL_INPUT = _config["model"]["model_input"]
