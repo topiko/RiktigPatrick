@@ -68,6 +68,7 @@ class Tape:
         self.probs = []
         self.values = []
         self.rewards = []
+        self._is_ready = False
 
     @property
     def ep_return(self) -> float:
