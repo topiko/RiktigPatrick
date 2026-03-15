@@ -41,7 +41,7 @@ if __name__ == "__main__":
     )
     # Override learning rate and entropy from config
     agent.learning_rate = RL_CONFIG["learning_rate"]
-    agent.entropy_coef = RL_CONFIG["entropy_coef"]
+    agent.entropy_scale = RL_CONFIG["entropy_scale"]
     agent.gamma = RL_CONFIG["gamma"]
     print("Agent created", flush=True)
 
