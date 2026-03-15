@@ -32,3 +32,4 @@ model:
     - "sens/gyro"
     - "sens/left_wheel_vel"
     - "sens/right_wheel_vel"
+    - "env/step"
