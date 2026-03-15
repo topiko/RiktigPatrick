@@ -219,12 +219,10 @@ class GymRP(gymnasium.Env):
         ctrl_mode: str = "vel",
         step_time: float = 0.01,
         randomize: bool = False,
-        time_constant: float = 10.0,
     ):
         self._randomize = randomize
         self._init_pitch_scale = 2.0  # deg
         self._init_wheel_vel_scale = 1.0  # rad/s
-        self._time_constant = time_constant
         self.lock_head = lock_head
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
@@ -235,7 +233,7 @@ class GymRP(gymnasium.Env):
         self.state = State(keys=state_keys, record=record)
 
         self.observation_space = self.state.to_obs_space()
-        self.observation_space.spaces["env/step"] = spaces.Box(0, 1, shape=(1,), dtype=float)
+        self.observation_space.spaces["env/time"] = spaces.Box(0, np.inf, shape=(1,), dtype=float)
 
         # TODO: import these from somwehere
         max_w_wheel = np.pi * 2 * 5
@@ -298,8 +296,7 @@ class GymRP(gymnasium.Env):
 
     def _get_obs(self) -> dict:
         d = self.state.get_state_dict(keys="all")
-        current_time = self.dm_env.data.time
-        d["env/step"] = current_time / (current_time + self._time_constant)
+        d["env/time"] = np.array([self.dm_env.data.time])
         return d
 
     def reset(
@@ -309,7 +306,7 @@ class GymRP(gymnasium.Env):
         self.state.reset()
 
         d, i = self._get_obs(), self._get_info()
-        d["env/step"] = np.array([0.0])
+        d["env/time"] = np.array([0.0])
         return d, i
 
     def _get_reward(self) -> tuple[float, dict]:

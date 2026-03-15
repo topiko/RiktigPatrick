@@ -86,6 +86,12 @@ class PolicyNetwork(nn.Module):
             action_stddevs: predicted standard deviation
             value: state value estimate
         """
+        TIME_CONSTANT = 10.0
+
+        x = x.clone()
+        time_idx = 6
+        if x.shape[1] > time_idx:
+            x[:, time_idx] = x[:, time_idx] / (x[:, time_idx] + TIME_CONSTANT)
 
         shared_features = self.shared_net(x)
 
