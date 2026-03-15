@@ -2,7 +2,7 @@
 name = "riktigpatrick"
 version = "0.1.0"
 description = "Balancing robot with RL control"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "gymnasium",
     "mujoco",

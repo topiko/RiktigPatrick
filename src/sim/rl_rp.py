@@ -56,6 +56,5 @@ if __name__ == "__main__":
             if mean_ret > (MAX_RETURN + 5):
                 print(f"Best return {mean_ret:.02f} -> saving", flush=True)
                 agent.net.store()
-                agent.value_net.store()
                 MAX_RETURN = mean_ret
             print(f"Episode {episode:<6d} ({NROLLOUTS} rollouts) --> {mean_ret:.3f}", flush=True)
