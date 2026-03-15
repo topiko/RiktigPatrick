@@ -8,6 +8,7 @@ from dm_control import mjcf
 from filters.qutils import q2eul
 from gymnasium import spaces
 from riktigpatric.patrick import State, StepAction, StepReturn
+from sim.sim_config import REWARD_CONFIG
 
 BODY_D = 0.05
 BODY_H = 0.25  # 0.25
@@ -291,13 +292,12 @@ class GymRP(gymnasium.Env):
 
     def _get_reward(self) -> float:
         pitch = abs(self.state.euler[1])
-        step_reward = 1.0
-        pitch_penalty = -pitch * 0.05
-        action_penalty = -0.0001 * (
+        step_reward = REWARD_CONFIG["step"]
+        pitch_penalty = -pitch * REWARD_CONFIG["pitch_coef"]
+        action_penalty = -REWARD_CONFIG["action_coef"] * (
             float(self._prev_action.left_wheel**2 + self._prev_action.right_wheel**2)
         ) / MAXV**2
-        # Penalize rotation around z-axis (yaw) - difference between wheels
-        yaw_penalty = -0.01 * (
+        yaw_penalty = -REWARD_CONFIG["yaw_coef"] * (
             float(self._prev_action.left_wheel - self._prev_action.right_wheel) ** 2
         ) / MAXV**2
         return step_reward + pitch_penalty + action_penalty + yaw_penalty

@@ -14,7 +14,7 @@ from gymnasium.wrappers import (
 
 from sim.algos import REINFORCE, compute_returns, compute_value_estimates
 from sim.custom_policies import NetPolicy, PIDPolicy
-from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE
+from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE, RL_CONFIG
 from sim.utils import Tape, actiondim, model_indim, register_and_make_env
 from sim.nets import ValueNet
 
@@ -170,7 +170,7 @@ if __name__ == "__main__":
 
     # Compute return using same gamma as training (0.99)
     rewards = history[:, idx_d["reward"][0]]
-    returns = compute_returns(rewards, discount=0.99)
+    returns = compute_returns(rewards, discount=RL_CONFIG["gamma"])
     history = np.column_stack([history, returns])
     idx_d["return"] = np.array([history.shape[1] - 1])
 

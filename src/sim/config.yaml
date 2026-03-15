@@ -1,0 +1,34 @@
+# RL Training Configuration
+
+training:
+  nrollouts: 16
+  max_episodes: 20001
+  save_frequency: 10
+  seed: 42
+
+rl:
+  learning_rate: 0.001
+  gamma: 0.99
+  entropy_coef: 0.1
+  use_baseline: true
+  init2zeros: true
+  load_net: false
+
+env:
+  ctrl_mode: "vel"
+  lock_head: true
+  step_time: 0.01
+  randomize: true
+
+reward:
+  step: 1.0
+  pitch_coef: 0.05
+  action_coef: 0.0001
+  yaw_coef: 0.01
+
+model:
+  model_input:
+    - "filter/rp_pitch"
+    - "sens/gyro"
+    - "sens/left_wheel_vel"
+    - "sens/right_wheel_vel"

@@ -1,3 +1,11 @@
+import os
+import yaml
+
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
+
+with open(CONFIG_PATH, "r") as f:
+    _config = yaml.safe_load(f)
+
 OBS_SPACE = [
     "filter/rp_pitch",
     "sens/gyro",
@@ -7,17 +15,10 @@ OBS_SPACE = [
     "sens/right_wheel_vel",
     "simul/rp_pitch",
 ]
-MODEL_INPUT = [
-    "filter/rp_pitch",
-    "sens/gyro",
-    "sens/left_wheel_vel",
-    "sens/right_wheel_vel",
-]
 
-CTRL_MODE = "vel"
-ENV_CONFIG = {
-    "ctrl_mode": CTRL_MODE,
-    "lock_head": True,
-    "step_time": 0.01,
-    "randomize": True,
-}
+MODEL_INPUT = _config["model"]["model_input"]
+
+ENV_CONFIG = _config["env"]
+RL_CONFIG = _config["rl"]
+TRAIN_CONFIG = _config["training"]
+REWARD_CONFIG = _config["reward"]
