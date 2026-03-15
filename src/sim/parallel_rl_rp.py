@@ -139,7 +139,6 @@ if __name__ == "__main__":
                 if episode >= 0:
                     log.info(f"Best return {mean_return:.02f} -> saving")
                     agent.net.store()
-                    agent.value_net.store()
                 MAX_RETURN = mean_return
 
             log.info(
