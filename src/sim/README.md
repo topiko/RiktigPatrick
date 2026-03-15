@@ -1,32 +1,44 @@
-# To get things runnig 
+# To get things running
 
-```
+## Setup
+
+```bash
+# Create and activate virtual environment with uv
 cd src/
-conda-develop .
+uv venv --python 3.10 ../.venv
+source ../.venv/bin/activate
+uv pip install gymnasium mujoco dm-control torch numpy mlflow pandas
+
+# Or if you have conda:
+conda activate rl2
 ```
- 
-## Installing MuJoCo:
-(https://github.com/google-deepmind/mujoco)
-`pip install mujoco-py`
 
-## Conda env in:
-`conda env create -f env.yaml`
+## Run RL Training
 
-## Then:
+```bash
+cd src/
+export PYTHONPATH="$PWD:$PYTHONPATH"
 
-`python rl_rp.py`
-or
-`python parallel_rl_rp.py`
+# Sequential training (recommended for testing)
+python rl_rp.py
 
-`python try_policy.py --policy pid`
+# Parallel training (faster)
+python parallel_rl_rp.py
+```
 
-## Or to kickstart training:
-`python transfer_pid2policynet.py`
+## Test Policies
 
-Run the server:
-`mlflow server`
+```bash
+# Test with trained network
+python try_policy.py --policy REINFORCE
 
-To see the server:
-127.0.0.1:5000
+# Test with PID
+python try_policy.py --policy pid
+```
 
+## Run mlflow for tracking (optional)
 
+```bash
+mlflow server
+# Then view at 127.0.0.1:5000
+```

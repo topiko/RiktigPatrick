@@ -290,14 +290,17 @@ class GymRP(gymnasium.Env):
         return d
 
     def _get_reward(self) -> float:
-        rew = 1
-        dir_rew = (
-            -((self.state.obs.left_wheel_vel - self.state.obs.right_wheel_vel)[0] ** 2)
-            / (2 * MAXV) ** 2
-            / 100
-        )
-
-        return rew + dir_rew
+        pitch = abs(self.state.euler[1])
+        step_reward = 1.0
+        pitch_penalty = -pitch * 0.05
+        action_penalty = -0.0001 * (
+            float(self._prev_action.left_wheel**2 + self._prev_action.right_wheel**2)
+        ) / MAXV**2
+        # Penalize rotation around z-axis (yaw) - difference between wheels
+        yaw_penalty = -0.01 * (
+            float(self._prev_action.left_wheel - self._prev_action.right_wheel) ** 2
+        ) / MAXV**2
+        return step_reward + pitch_penalty + action_penalty + yaw_penalty
 
     def _get_info(self) -> dict:
         return {}

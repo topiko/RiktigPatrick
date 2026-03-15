@@ -68,6 +68,7 @@ class Tape:
         self.probs = []
         self.values = []
         self.rewards = []
+        self.entropies = []
         self._is_ready = False
 
     @property
@@ -79,6 +80,7 @@ class Tape:
         self.probs = torch.concat(self.probs, axis=0)
         self.rewards = np.array(self.rewards)
         self.values = torch.concat(self.values, axis=0)
+        self.entropies = torch.concat(self.entropies, axis=0)
         return self
 
     def __len__(self) -> int:

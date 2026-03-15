@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import logging.config
 
 import gymnasium as gym
 import mlflow
@@ -82,6 +83,7 @@ if __name__ == "__main__":
 
     MAX_RETURN = 0
     seed = 42
+    max_steps = 2000
     with mlflow.start_run(experiment_id=experiment_id, run_name=RUN_NAME):
         for episode in range(200001):
             obs, _ = rpenv_p.reset(seed=seed)
@@ -89,10 +91,14 @@ if __name__ == "__main__":
             tapes = [Tape(i) for i in range(BATCH_SIZE)]
             full_tapes = []
             ready_ = np.zeros(BATCH_SIZE, dtype=bool)
+            step_count = 0
             while True:
-                actions, probs, values = agent.sample_action(
-                    obs, dt=ENV_CONFIG["step_time"]
-                )
+                result = agent.sample_action(obs)
+                if len(result) == 4:
+                    actions, probs, values, entropies = result
+                else:
+                    actions, probs, values = result
+                    entropies = torch.zeros_like(probs)
 
                 obs, rewards, terminated, truncated, _ = rpenv_p.step(actions)
 
@@ -100,14 +106,15 @@ if __name__ == "__main__":
                     t.rewards.append(rewards[i])
                     t.probs.append(probs[i])
                     t.values.append(values[i])
-                    if terminated[i]:
+                    t.entropies.append(entropies[i])
+                    if terminated[i] or truncated[i]:
                         full_tapes.append(t.build())
                         ready_[i] = True
 
-                        # New tape to tapes list
                         tapes[i] = Tape(i)
 
-                if all(ready_):
+                step_count += 1
+                if all(ready_) or step_count >= max_steps:
                     break
 
             assert (

@@ -1,7 +1,6 @@
 import numpy as np
-import quaternion as qt
 import logging
-from filters.qutils import eul2q, q2eul
+from filters.qutils import Quaternion, eul2q, q2eul, as_rotation_matrix
 
 LOG = logging.getLogger()
 
@@ -9,7 +8,7 @@ LOG = logging.getLogger()
 class Mahony:
     def __init__(self):
         self._qhat = None
-        self.bhat = None  # set in reset
+        self.bhat = None
         self.g = np.array([0, 0, -1])
         self.kp = 1
         self.ki = 0.3
@@ -24,33 +23,27 @@ class Mahony:
             acc_ = acc
 
         v = acc_
-        R = qt.as_rotation_matrix(self.qhat)
+        R = as_rotation_matrix(self.qhat)
         vhat = -R.T @ self.g
 
         w_mes = np.cross(v, vhat)
 
-        # P quaternion:
-        p = qt.quaternion(0)
-        p.vec = gyro - self.bhat + self.kp * w_mes
+        p_vec = gyro - self.bhat + self.kp * w_mes
+        p = Quaternion(0, p_vec[0], p_vec[1], p_vec[2])
 
-        # Q dot:
-        qhatdot = 1 / 2.0 * self._qhat * p
+        qhatdot = self._qhat * p * 0.5
 
-        # bhat dot:
         bhatdot = -self.ki * w_mes
 
-        # Update:
-        self._qhat += dt * qhatdot
+        self._qhat = self._qhat + dt * qhatdot
 
-        # assert np.isclose(self.qhat.norm(), 1)
+        self._qhat = self._qhat.normalize()
 
-        self._qhat /= self.qhat.norm()
-
-        self.bhat += dt * bhatdot
-        self._euler = q2eul(self.qhat)
+        self.bhat = self.bhat + dt * bhatdot
+        self._euler = q2eul(self._qhat)
 
     @property
-    def qhat(self) -> qt.quaternion:
+    def qhat(self):
         return self._qhat
 
     @property

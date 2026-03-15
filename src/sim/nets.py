@@ -19,7 +19,7 @@ def init_weights(m, w: float = 0.0, b: float = 0.01):
 
 
 class ValueNet(nn.Module):
-    NETF = "nets/val_net.pth"
+    NETF = "src/sim/nets/val_net.pth"
 
     def __init__(self, obs_space_dim: int):
         super().__init__()
@@ -39,11 +39,13 @@ class ValueNet(nn.Module):
         return self.net(obs)
 
     def store(self, fname: str = NETF):
+        import os
+        os.makedirs(os.path.dirname(fname), exist_ok=True)
         torch.save(self, fname)
 
     def load(self, fname: str = NETF) -> ValueNet:
         try:
-            return torch.load(fname)
+            return torch.load(fname, weights_only=False)
         except FileNotFoundError:
             log.warning("Failed to load value network.")
             return self
@@ -52,7 +54,7 @@ class ValueNet(nn.Module):
 class PolicyNetwork(nn.Module):
     """Parametrized Policy Network."""
 
-    NETF = "nets/rpnet_p.pth"
+    NETF = "src/sim/nets/rpnet_p.pth"
 
     def __init__(
         self, obs_space_dims: int, action_space_dims: int, init2zeros: bool = False
@@ -125,15 +127,17 @@ class PolicyNetwork(nn.Module):
         return action_means, action_stddevs
 
     def store(self, fname: str = NETF):
+        import os
+        os.makedirs(os.path.dirname(fname), exist_ok=True)
         torch.save(self, fname)
 
     def load(self, fname: str = NETF) -> PolicyNetwork:
         try:
-            return torch.load(fname)
+            return torch.load(fname, weights_only=False)
         except FileNotFoundError:
             log.warning("Failed to load policy network.")
             return self
 
     @classmethod
     def from_file(cls, fname: str = NETF) -> PolicyNetwork:
-        return torch.load(fname)
+        return torch.load(fname, weights_only=False)
