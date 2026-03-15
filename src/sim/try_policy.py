@@ -200,6 +200,7 @@ if __name__ == "__main__":
     plot_groups = PlotGroups()
     plot_groups.__dict__['returns'] = ("return", "value_estimate", "advantage")
     plot_groups.__dict__['reward'] = ("reward/step", "reward/pitch", "reward/action", "reward/yaw")
+    plot_groups.__dict__['sensors'] = ("filter/rp_pitch", "sens/gyro_0", "sens/gyro_1", "sens/gyro_2")
 
     plot_state_history(history=history, idx_dict=idx_d, plot_groups=plot_groups)
     plt.savefig("plots/episode.png", dpi=100)
