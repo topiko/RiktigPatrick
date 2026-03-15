@@ -93,9 +93,10 @@ if __name__ == "__main__":
     MAX_RETURN = 0
     seed = 42
     max_steps = 2000
+
     with mlflow.start_run(run_name=RUN_NAME):
         # Load and log config parameters
-        with open("sim/config.yaml", "r") as f:
+        with open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "sim/config.yaml"), "r") as f:
             config = yaml.safe_load(f)
 
         # Flatten config for mlflow params
