@@ -51,12 +51,19 @@ class REINFORCE:
         self.eps = 1e-6
         self.entropy_coef = 0.1
 
+        # Detect device (CUDA if available)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}", flush=True)
+
         # Combined actor-critic network
         self.net = PolicyNetwork(
             obs_space_dims, action_space_dims, init2zeros=init2zeros
         )
+        self.net = self.net.to(self.device)
+        
         if load_net:
             self.net = self.net.load()
+            self.net = self.net.to(self.device)
 
         # Single optimizer for both policy and value heads
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
@@ -70,7 +77,7 @@ class REINFORCE:
         self,
         obs: dict,
     ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor, torch.Tensor]:
-        obs_t = dict2tensor({k: obs[k] for k in self.model_input})
+        obs_t = dict2tensor({k: obs[k] for k in self.model_input}).to(self.device)
 
         action_means, action_stddevs, value = self.net(obs_t)
 
@@ -80,7 +87,7 @@ class REINFORCE:
         probs = distrib.log_prob(action)
         entropy = distrib.entropy()
 
-        action = action.numpy()
+        action = action.cpu().numpy()
 
         return (
             StepAction().from_array(action, lock_head=True).to_dict(),
@@ -104,12 +111,13 @@ class REINFORCE:
 
             baseline = np.zeros_like(G)
             if self.use_baseline:
-                baseline = tape.values.detach().numpy()
+                baseline = tape.values.detach().cpu().numpy()
 
             advantages = G - baseline
 
-            # Value loss
-            value_losses.append(self.value_loss(tape.values.squeeze(), torch.Tensor(G)))
+            # Value loss - move tensors to device
+            tape_values = tape.values.squeeze().to(self.device)
+            value_losses.append(self.value_loss(tape_values, torch.tensor(G, device=self.device)))
 
             for log_prob, entropy, advantage in zip(tape.probs, tape.entropies, advantages):
                 policy_losses.append(-log_prob.sum() * advantage)
@@ -162,10 +170,12 @@ def compute_value_estimates(
     """
     import torch
     
+    device = next(policy_net.parameters()).device
+    
     value_estimates = []
     for i in range(len(history)):
         obs_dict = {k: history[i, idx_dict[k]] for k in model_input}
-        obs_t = torch.concatenate([torch.Tensor(obs_dict[k]).reshape(1, -1) for k in model_input], dim=1)
+        obs_t = torch.concatenate([torch.Tensor(obs_dict[k]).reshape(1, -1) for k in model_input], dim=1).to(device)
         with torch.no_grad():
             _, _, v = policy_net(obs_t)
             v = v.item()
