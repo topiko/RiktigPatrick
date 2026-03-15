@@ -232,6 +232,7 @@ class GymRP(gymnasium.Env):
         self.dm_env.model.opt.timestep = self.simul_timestep
 
         self.state = State(keys=state_keys, record=record)
+        self.state._info_dict["env/step"] = np.array([0.0])
 
         self.observation_space = self.state.to_obs_space()
 
@@ -295,10 +296,19 @@ class GymRP(gymnasium.Env):
         )
 
     def _get_obs(self) -> dict:
-        d = self.state.get_state_dict(keys="all")
         current_time = self.dm_env.data.time
-        d["env/step"] = current_time / (current_time + self._time_constant)
+        self.state._info_dict["env/step"] = np.array([current_time / (current_time + self._time_constant)])
+        d = self.state.get_state_dict(keys="all")
         return d
+
+    def reset(
+        self, options: Optional[Any] = None, seed: int | None = None
+    ) -> tuple[dict, dict]:
+        self.dm_env = self._reset_env(seed)
+        self.state.reset()
+
+        d, i = self._get_obs(), self._get_info()
+        return d, i
 
     def _get_reward(self) -> tuple[float, dict]:
         pitch = abs(self.state.euler[1])

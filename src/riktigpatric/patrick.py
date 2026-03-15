@@ -365,7 +365,7 @@ class State:
         return spaces.Dict(
             {
                 k: spaces.Box(-np.inf, np.inf, shape=(len(v),), dtype=float)
-                for k, v in self.get_state_dict().items()
+                for k, v in self.get_state_dict(keys="all").items()
             }
         )
 
