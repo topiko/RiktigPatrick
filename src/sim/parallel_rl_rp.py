@@ -5,7 +5,7 @@ import logging.config
 import os
 
 from dotenv import load_dotenv
-load_dotenv(os.path.expanduser("~/Playground/KIPL/projects/kipl-ml/.env"))
+load_dotenv()  # Loads .env from project root
 
 import gymnasium as gym
 import mlflow
