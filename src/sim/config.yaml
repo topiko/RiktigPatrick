@@ -19,6 +19,7 @@ env:
   lock_head: true
   step_time: 0.01
   randomize: true
+  time_constant: 10.0
 
 reward:
   step: 1.0

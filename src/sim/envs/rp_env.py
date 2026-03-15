@@ -8,7 +8,7 @@ from dm_control import mjcf
 from filters.qutils import q2eul
 from gymnasium import spaces
 from riktigpatric.patrick import State, StepAction, StepReturn
-from sim.sim_config import REWARD_CONFIG
+from sim.sim_config import REWARD_CONFIG, ENV_CONFIG
 
 BODY_D = 0.05
 BODY_H = 0.25  # 0.25
@@ -297,7 +297,7 @@ class GymRP(gymnasium.Env):
     def _get_obs(self) -> dict:
         d = self.state.get_state_dict(keys="all")
         current_time = self.dm_env.data.time
-        d["env/step"] = current_time / (current_time + 10)
+        d["env/step"] = current_time / (current_time + ENV_CONFIG["time_constant"])
         return d
 
     def reset(
