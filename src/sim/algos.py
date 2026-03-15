@@ -116,7 +116,6 @@ class REINFORCE:
 
         for tape in tapes:
             G = compute_returns(tape.rewards, self.gamma)
-            G = (G - self.reward_normalizer.mean) / self.reward_normalizer.std
             returns_list.append(G)
 
             baseline = np.zeros_like(G)

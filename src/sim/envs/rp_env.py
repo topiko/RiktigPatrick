@@ -269,6 +269,8 @@ class GymRP(gymnasium.Env):
         body_quat = self.dm_env.bind(self.body_quat).sensordata.copy()
         pitch = q2eul(body_quat)[1] / np.pi * 180
 
+        reward, reward_info = self._get_reward()
+        
         self.state.update(
             t=self.dm_env.data.time,
             acc=self.dm_env.bind(self.acc_sens).sensordata.copy(),
@@ -283,14 +285,18 @@ class GymRP(gymnasium.Env):
             ).sensordata.copy()[0],
             true_pitch=pitch,
             action=self._prev_action,
-            reward=self._get_reward(),
+            reward=reward,
+            reward_step=reward_info["reward/step"],
+            reward_pitch=reward_info["reward/pitch"],
+            reward_action=reward_info["reward/action"],
+            reward_yaw=reward_info["reward/yaw"],
         )
 
     def _get_obs(self) -> dict:
         d = self.state.get_state_dict(keys="all")
         return d
 
-    def _get_reward(self) -> float:
+    def _get_reward(self) -> tuple[float, dict]:
         pitch = abs(self.state.euler[1])
         step_reward = REWARD_CONFIG["step"]
         pitch_penalty = -pitch * REWARD_CONFIG["pitch_coef"]
@@ -300,7 +306,14 @@ class GymRP(gymnasium.Env):
         yaw_penalty = -REWARD_CONFIG["yaw_coef"] * (
             float(self._prev_action.left_wheel - self._prev_action.right_wheel) ** 2
         ) / MAXV**2
-        return step_reward + pitch_penalty + action_penalty + yaw_penalty
+        total = step_reward + pitch_penalty + action_penalty + yaw_penalty
+        info = {
+            "reward/step": step_reward,
+            "reward/pitch": pitch_penalty,
+            "reward/action": action_penalty,
+            "reward/yaw": yaw_penalty,
+        }
+        return total, info
 
     def _get_info(self) -> dict:
         return {}
@@ -409,12 +422,16 @@ class GymRP(gymnasium.Env):
 
         self._update_state()
 
+        reward, reward_info = self._get_reward()
+        info = self._get_info()
+        info.update(reward_info)
+
         return (
             self._get_obs(),
-            self._get_reward(),
+            reward,
             self.terminated,
             self.truncated,
-            self._get_info(),
+            info,
         )
 
 

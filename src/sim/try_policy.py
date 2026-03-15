@@ -26,13 +26,13 @@ args = parser.parse_args()
 agent_type = args.policy
 
 
-@dataclass
 class PlotGroups:
-    pitch: tuple[str, ...] = ("filter/rp_pitch", "simul/rp_pitch")
-    wheel_left: tuple[str, ...] = ("act/left_wheel", "sens/left_wheel_vel")
-    wheel_right: tuple[str, ...] = ("act/right_wheel", "sens/right_wheel_vel")
-    head_pt: tuple[str, ...] = ("sens/head_pitch", "sens/head_turn")
-    reward: tuple[str, ...] = ("reward",)
+    def __init__(self):
+        self.pitch = ("filter/rp_pitch", "simul/rp_pitch")
+        self.wheel_left = ("act/left_wheel", "sens/left_wheel_vel")
+        self.wheel_right = ("act/right_wheel", "sens/right_wheel_vel")
+        self.head_pt = ("sens/head_pitch", "sens/head_turn")
+        self.reward = ("reward",)
 
     def __len__(self) -> int:
         return len(self.__dict__)
@@ -42,6 +42,9 @@ class PlotGroups:
 
     def groups(self) -> list[str]:
         return list(self.__dict__.keys())
+
+    def __len__(self) -> int:
+        return len(self.__dict__)
 
 
 def run_episode(
@@ -195,7 +198,8 @@ if __name__ == "__main__":
     idx_d["advantage"] = np.array([history.shape[1] - 1])
 
     plot_groups = PlotGroups()
-    plot_groups.returns = ("return", "value_estimate", "advantage")
+    plot_groups.__dict__['returns'] = ("return", "value_estimate", "advantage")
+    plot_groups.__dict__['reward'] = ("reward/step", "reward/pitch", "reward/action", "reward/yaw")
 
     plot_state_history(history=history, idx_dict=idx_d, plot_groups=plot_groups)
     plt.savefig("plots/episode.png", dpi=100)

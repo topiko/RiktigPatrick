@@ -231,6 +231,10 @@ class State:
         true_pitch: float,
         action: Optional[StepAction] = None,
         reward: Optional[float] = None,
+        reward_step: Optional[float] = None,
+        reward_pitch: Optional[float] = None,
+        reward_action: Optional[float] = None,
+        reward_yaw: Optional[float] = None,
     ):
         self.obs.update_t = t
         self.obs.update_gyro = gyro
@@ -247,11 +251,18 @@ class State:
 
         if action is not None:
             self._action_dict = action.to_dict()
-            # TODO: infer the turning speed and put into state_d
 
         self._info_dict = {}
         if reward is not None:
             self._info_dict["reward"] = np.array([reward])
+        if reward_step is not None:
+            self._info_dict["reward/step"] = np.array([reward_step])
+        if reward_pitch is not None:
+            self._info_dict["reward/pitch"] = np.array([reward_pitch])
+        if reward_action is not None:
+            self._info_dict["reward/action"] = np.array([reward_action])
+        if reward_yaw is not None:
+            self._info_dict["reward/yaw"] = np.array([reward_yaw])
 
         if self._record:
             self._history.append(self.get_state_arr(keys="all"))
