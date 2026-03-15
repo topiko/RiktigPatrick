@@ -2,3 +2,5 @@
 *.log
 *.stl
 */data
+mlruns/
+mlflow-artifacts/
