@@ -8,7 +8,7 @@ from dm_control import mjcf
 from filters.qutils import q2eul
 from gymnasium import spaces
 from riktigpatric.patrick import State, StepAction, StepReturn
-from sim.sim_config import REWARD_CONFIG, ENV_CONFIG
+from sim.sim_config import REWARD_CONFIG
 
 BODY_D = 0.05
 BODY_H = 0.25  # 0.25
@@ -219,10 +219,12 @@ class GymRP(gymnasium.Env):
         ctrl_mode: str = "vel",
         step_time: float = 0.01,
         randomize: bool = False,
+        time_constant: float = 10.0,
     ):
         self._randomize = randomize
         self._init_pitch_scale = 2.0  # deg
         self._init_wheel_vel_scale = 1.0  # rad/s
+        self._time_constant = time_constant
         self.lock_head = lock_head
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
@@ -297,7 +299,7 @@ class GymRP(gymnasium.Env):
     def _get_obs(self) -> dict:
         d = self.state.get_state_dict(keys="all")
         current_time = self.dm_env.data.time
-        d["env/step"] = current_time / (current_time + ENV_CONFIG["time_constant"])
+        d["env/step"] = current_time / (current_time + self._time_constant)
         return d
 
     def reset(
