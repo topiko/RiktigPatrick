@@ -75,16 +75,14 @@ if __name__ == "__main__":
     )
 
     RUN_NAME = "rp_test_parallel"
+    mlflow.set_tracking_uri("https://ml.twohands.dev")
+    mlflow.set_experiment(RUN_NAME)
     client = MlflowClient()
-    try:
-        experiment_id = client.get_experiment_by_name(RUN_NAME).experiment_id
-    except:
-        experiment_id = client.create_experiment(RUN_NAME)
 
     MAX_RETURN = 0
     seed = 42
     max_steps = 2000
-    with mlflow.start_run(experiment_id=experiment_id, run_name=RUN_NAME):
+    with mlflow.start_run(run_name=RUN_NAME):
         for episode in range(200001):
             obs, _ = rpenv_p.reset(seed=seed)
 
