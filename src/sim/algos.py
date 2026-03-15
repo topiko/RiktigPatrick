@@ -50,7 +50,7 @@ class REINFORCE:
         self.learning_rate = 1e-3
         self.gamma = 0.99
         self.eps = 1e-6
-        self.entropy_coef = 0.1
+        self.entropy_scale = RL_CONFIG["entropy_scale"]
 
         # Detect device (CUDA if available)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -122,7 +122,7 @@ class REINFORCE:
 
             for log_prob, entropy, advantage in zip(tape.probs, tape.entropies, advantages):
                 policy_losses.append(-log_prob.sum() * advantage)
-                entropy_losses.append(-entropy.sum() * self.entropy_coef)
+                entropy_losses.append(-entropy.sum() * self.entropy_scale)
 
         policy_loss = torch.stack(policy_losses).mean()
         entropy_loss = torch.stack(entropy_losses).mean()

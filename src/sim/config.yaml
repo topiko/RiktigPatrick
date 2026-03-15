@@ -9,7 +9,6 @@ training:
 rl:
   learning_rate: 0.001
   gamma: 0.99
-  entropy_coef: 0.2
   entropy_scale: 0.01
   use_baseline: true
   init2zeros: false
