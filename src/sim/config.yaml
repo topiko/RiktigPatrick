@@ -7,7 +7,7 @@ training:
   seed: 42
 
 rl:
-  learning_rate: 0.001
+  learning_rate: 0.0002
   gamma: 0.99
   entropy_scale: 0.01
   use_baseline: true
@@ -18,7 +18,7 @@ env:
   ctrl_mode: "vel"
   lock_head: true
   step_time: 0.01
-  randomize: true
+  randomize: false
 
 reward:
   step: 1.0
