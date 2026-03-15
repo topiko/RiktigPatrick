@@ -1,7 +1,7 @@
 # RL Training Configuration
 
 training:
-  nrollouts: 16
+  nrollouts: 32
   max_episodes: 20001
   save_frequency: 10
   seed: 42

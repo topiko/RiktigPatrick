@@ -231,6 +231,7 @@ class GymRP(gymnasium.Env):
         self.dm_env.model.opt.timestep = self.simul_timestep
 
         self.state = State(keys=state_keys, record=record)
+        self.state._info_dict["env/time"] = np.array([0.0])
 
         self.observation_space = self.state.to_obs_space()
 
@@ -294,8 +295,8 @@ class GymRP(gymnasium.Env):
         )
 
     def _get_obs(self) -> dict:
+        self.state._info_dict["env/time"] = np.array([self.dm_env.data.time])
         d = self.state.get_state_dict(keys="all")
-        d["env/time"] = np.array([self.dm_env.data.time])
         return d
 
     def reset(
@@ -305,7 +306,6 @@ class GymRP(gymnasium.Env):
         self.state.reset()
 
         d, i = self._get_obs(), self._get_info()
-        d["env/time"] = np.array([0.0])
         return d, i
 
     def _get_reward(self) -> tuple[float, dict]:
