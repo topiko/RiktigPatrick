@@ -265,7 +265,8 @@ class State:
             self._info_dict["reward/yaw"] = np.array([reward_yaw])
 
         if self._record:
-            self._history.append(self.get_state_arr(keys="all"))
+            arr = self.get_state_arr(keys="all")
+            self._history.append(np.copy(arr))
 
     @property
     def history(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
