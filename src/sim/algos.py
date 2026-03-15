@@ -96,6 +96,37 @@ class REINFORCE:
             entropy,
         )
 
+    def sample_actions(
+        self,
+        obs_batch: dict,
+    ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Sample actions for a batch of observations (for parallel training)."""
+        obs_t = dict2tensor({k: obs_batch[k] for k in self.model_input}).to(self.device)
+        
+        batch_size = obs_t.shape[0]
+        
+        action_means, action_stddevs, value = self.net(obs_t)
+
+        distrib = Normal(action_means, action_stddevs + self.eps)
+
+        actions = distrib.sample()  # Different action per env
+        probs = distrib.log_prob(actions)
+        entropy = distrib.entropy()
+
+        actions = actions.cpu().numpy()
+
+        # Convert to dict with batched actions
+        action_dict = {}
+        action_dict["act/left_wheel"] = actions[:, 0:1]
+        action_dict["act/right_wheel"] = actions[:, 1:2]
+
+        return (
+            action_dict,
+            probs,
+            value,
+            entropy,
+        )
+
     def update(self, tapes: list[Tape]) -> tuple[np.ndarray, float]:
         all_rewards = np.concatenate([t.rewards for t in tapes])
         self.reward_normalizer.update(all_rewards)
