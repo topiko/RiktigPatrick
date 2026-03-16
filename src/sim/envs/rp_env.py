@@ -8,7 +8,7 @@ from dm_control import mjcf
 from filters.qutils import q2eul
 from gymnasium import spaces
 from riktigpatric.patrick import State, StepAction, StepReturn
-from sim.sim_config import REWARD_CONFIG
+from sim.sim_config import MAX_V, REWARD_CONFIG
 
 BODY_D = 0.05
 BODY_H = 0.25  # 0.25
@@ -23,7 +23,7 @@ HEAD_W = 0.1
 HEAD_M = 0.2  # 0.200
 
 FORCERANGE = 15
-MAXV = 20
+MAXV = MAX_V  # Alias for backward compatibility
 MAXA = MAXV / 0.5
 
 

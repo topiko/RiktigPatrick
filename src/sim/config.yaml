@@ -20,6 +20,9 @@ env:
   step_time: 0.01
   randomize: false
 
+action:
+  max_wheel_vel: 31.4159  # rad/s (5 Hz * 2π)
+
 reward:
   step: 1.0
   pitch_coef: 0.05
@@ -33,3 +36,10 @@ model:
     - "sens/left_wheel_vel"
     - "sens/right_wheel_vel"
     - "env/time"
+  # Fixed normalization scales (divide by these)
+  obs_scales:
+    filter/rp_pitch: 20.0  # deg (±20 deg range)
+    sens/gyro: 10.0  # rad/s (±10 rad/s range)
+    sens/left_wheel_vel: 31.4  # rad/s (max wheel vel)
+    sens/right_wheel_vel: 31.4  # rad/s (max wheel vel)
+    env/time: 10.0  # seconds (time constant for normalization)

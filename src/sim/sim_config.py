@@ -18,8 +18,12 @@ OBS_SPACE = [
 ]
 
 MODEL_INPUT = _config["model"]["model_input"]
+OBS_SCALES = _config["model"]["obs_scales"]
 
 ENV_CONFIG = _config["env"]
 RL_CONFIG = _config["rl"]
 TRAIN_CONFIG = _config["training"]
 REWARD_CONFIG = _config["reward"]
+ACTION_CONFIG = _config["action"]
+
+MAX_V = ACTION_CONFIG["max_wheel_vel"]

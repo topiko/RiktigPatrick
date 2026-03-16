@@ -6,7 +6,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from sim.envs.rp_env import MAXA, MAXV
+from sim.sim_config import MAX_V, OBS_SCALES
 
 log = logging.getLogger(__name__)
 
@@ -81,27 +81,29 @@ class PolicyNetwork(nn.Module):
         """Forward pass returns policy means, stds, and value estimate.
 
         Args:
-            x: Observation from the environment
+            x: Observation from the environment (normalized in this method)
 
         Returns:
             action_means: predicted mean of the normal distribution
             action_stddevs: predicted standard deviation
             value: state value estimate
         """
-        TIME_CONSTANT = 10.0
-
         x = x.clone()
-        time_idx = 6
-        if x.shape[1] > time_idx:
-            x[:, time_idx] = x[:, time_idx] / (x[:, time_idx] + TIME_CONSTANT)
+
+        # Normalize observations (input order: pitch, gyro(3), left_vel, right_vel, time)
+        x[:, 0] = x[:, 0] / OBS_SCALES["filter/rp_pitch"]
+        x[:, 1:4] = x[:, 1:4] / OBS_SCALES["sens/gyro"]
+        x[:, 4] = x[:, 4] / OBS_SCALES["sens/left_wheel_vel"]
+        x[:, 5] = x[:, 5] / OBS_SCALES["sens/right_wheel_vel"]
+        x[:, 6] = x[:, 6] / (x[:, 6] + OBS_SCALES["env/time"])
 
         shared_features = self.shared_net(x)
 
-        action_means = (self.policy_mean_net(shared_features) - 0.5) * 2 * MAXV
+        action_means = (self.policy_mean_net(shared_features) - 0.5) * 2 * MAX_V
         action_stddevs = torch.log(
             1 + torch.exp(self.policy_stddev_net(shared_features))
         )
-        if (abs(action_means) > MAXV).any():
+        if (abs(action_means) > MAX_V).any():
             raise ValueError("Invalid action mean value(s).")
 
         value = self.value_net(shared_features)
