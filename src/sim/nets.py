@@ -72,9 +72,10 @@ class PolicyNetwork(nn.Module):
             nn.Tanh(),
         )
 
-        # Value head
+        # Value head with time skip connection
+        # value_hidden3 + 1 (normalized time) = 17 inputs
         self.value_head = nn.Sequential(
-            nn.Linear(value_hidden3, 1),
+            nn.Linear(value_hidden3 + 1, 1),
         )
 
         if init2zeros:
@@ -138,6 +139,10 @@ class PolicyNetwork(nn.Module):
         policy_features = self.policy_encoder(x_norm)
         value_features = self.value_encoder(x_norm)
 
+        # Skip connection: pass normalized time directly to value head
+        time_feature = x_norm[:, 6:7]  # Normalized time
+        value_input = torch.cat([value_features, time_feature], dim=1)
+
         # Output actions in rad/s (SI units for environment)
         action_means = (self.policy_mean_net(policy_features) - 0.5) * 2 * MAX_V
         action_stddevs = torch.log(
@@ -146,7 +151,7 @@ class PolicyNetwork(nn.Module):
         if (abs(action_means) > MAX_V).any():
             raise ValueError("Invalid action mean value(s).")
 
-        value = self.value_head(value_features)
+        value = self.value_head(value_input)
 
         return action_means, action_stddevs, value
 
