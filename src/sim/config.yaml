@@ -12,15 +12,15 @@ training:
   seed: 42
 
 rl:
-  learning_rate: 0.0005
+  learning_rate: 0.0003
   value_learning_rate: 0.001
   gamma: 0.99
-  entropy_scale: 0.2
+  entropy_scale: 0.5
   value_loss_scale: 0.01
   grad_clip: 10.0
   normalize_returns: true
   use_baseline: true
-  init2zeros: false
+  init2zeros: true
   load_net: false
   trim_end_steps: 0
 
