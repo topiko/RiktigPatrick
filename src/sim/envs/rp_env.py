@@ -443,6 +443,15 @@ class GymRP(gymnasium.Env):
         self._update_state()
 
         reward, reward_info = self._get_reward()
+
+        # Add termination penalty if robot falls
+        if self.terminated:
+            termination_penalty = -REWARD_CONFIG.get("termination_penalty", 0.0)
+            reward += termination_penalty
+            reward_info["reward/termination"] = termination_penalty
+        else:
+            reward_info["reward/termination"] = 0.0
+
         info = self._get_info()
         info.update(reward_info)
 

@@ -34,10 +34,11 @@ action:
   max_wheel_vel: 5.0  # rev/s (5 Hz)
 
 reward:
-  step: 5.0
+  step: 1.0
   pitch_coef: 0.5
-  action_coef: 0.0
+  action_coef: 0.1
   yaw_coef: 0.1
+  termination_penalty: 100.0
 
 model:
   model_input:
