@@ -78,6 +78,11 @@ class PolicyNetwork(nn.Module):
             nn.Linear(value_hidden3 + 1, 1),
         )
 
+        # Initialize time feature weight to larger value
+        # This helps the value network differentiate based on time
+        with torch.no_grad():
+            self.value_head[0].weight[0, -1] = 1.0
+
         if init2zeros:
             self.policy_encoder.apply(initto0)
             self.policy_mean_net.apply(initto0)
