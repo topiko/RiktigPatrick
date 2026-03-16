@@ -141,4 +141,13 @@ This helps the policy generalize to different starting conditions.
 ## Known Issues
 
 - Training tends to plateau around ~50 return - may need hyperparameter tuning
-- High value loss indicates critic may need separate learning rate
+
+## Architecture
+
+The network uses **separate encoders** for policy and value (no shared weights):
+- **Policy encoder**: 7 → 32 → 16 (Tanh activations)
+- **Value encoder**: 7 → 64 → 32 → 16 (Tanh activations, larger capacity)
+- **Policy heads**: Mean (Sigmoid) and StdDev (Softplus)
+- **Value head**: 16 → 1 (linear)
+
+This separation prevents the value function from being constrained by the policy's representation needs, which was causing the value head to output constant values with the previous shared encoder architecture.

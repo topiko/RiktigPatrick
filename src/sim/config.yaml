@@ -1,5 +1,10 @@
 # RL Training Configuration
 
+# Architecture: Separate encoders for policy and value (no shared weights)
+# - Policy encoder: 7 → 32 → 16 (Tanh)
+# - Value encoder: 7 → 64 → 32 → 16 (Tanh, larger capacity)
+# This prevents value function from being constrained by policy representation
+
 training:
   nrollouts: 32
   max_episodes: 20001
@@ -8,9 +13,10 @@ training:
 
 rl:
   learning_rate: 0.0002
+  value_learning_rate: 0.01
   gamma: 0.99
   entropy_scale: 0.01
-  value_loss_scale: 0.1
+  value_loss_scale: 1.0
   use_baseline: true
   init2zeros: false
   load_net: false

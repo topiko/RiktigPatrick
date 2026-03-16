@@ -19,14 +19,14 @@ def init_weights(m, w: float = 0.0, b: float = 0.01):
 
 
 class PolicyNetwork(nn.Module):
-    """Parametrized Policy Network with shared encoder and separate policy/value heads."""
+    """Parametrized Policy Network with separate encoders for policy and value."""
 
     NETF = "src/sim/nets/rpnet_p.pth"
 
     def __init__(
         self, obs_space_dims: int, action_space_dims: int, init2zeros: bool = False
     ):
-        """Initializes a neural network with shared encoder and policy/value heads.
+        """Initializes a neural network with separate policy and value encoders.
 
         Args:
             obs_space_dims: Dimension of the observation space
@@ -34,46 +34,55 @@ class PolicyNetwork(nn.Module):
         """
         super().__init__()
 
-        hidden_space1 = 32
-        hidden_space2 = 32
-        hidden_space3 = 16
-        hidden_space4 = 8
+        policy_hidden1 = 32
+        policy_hidden2 = 16
 
-        # Shared Encoder
-        self.shared_net = nn.Sequential(
-            nn.Linear(obs_space_dims, hidden_space1),
-            nn.Tanh(),
-            nn.Linear(hidden_space1, hidden_space2),
-            nn.Tanh(),
-            nn.Linear(hidden_space2, hidden_space3),
-            nn.Tanh(),
-            nn.Linear(hidden_space3, hidden_space4),
-            nn.Tanh(),
-        )
+        value_hidden1 = 64
+        value_hidden2 = 32
+        value_hidden3 = 16
 
         initto0 = functools.partial(init_weights, w=0.01, b=0.01)
 
+        # Policy encoder (separate from value)
+        self.policy_encoder = nn.Sequential(
+            nn.Linear(obs_space_dims, policy_hidden1),
+            nn.Tanh(),
+            nn.Linear(policy_hidden1, policy_hidden2),
+            nn.Tanh(),
+        )
+
         # Policy Mean head
         self.policy_mean_net = nn.Sequential(
-            nn.Linear(hidden_space4, action_space_dims),
+            nn.Linear(policy_hidden2, action_space_dims),
             nn.Sigmoid(),
         )
 
         # Policy Std Dev head
         self.policy_stddev_net = nn.Sequential(
-            nn.Linear(hidden_space4, action_space_dims),
+            nn.Linear(policy_hidden2, action_space_dims),
         )
 
-        # Value head (critic)
-        self.value_net = nn.Sequential(
-            nn.Linear(hidden_space4, 1),
+        # Value encoder (separate from policy, larger capacity)
+        self.value_encoder = nn.Sequential(
+            nn.Linear(obs_space_dims, value_hidden1),
+            nn.Tanh(),
+            nn.Linear(value_hidden1, value_hidden2),
+            nn.Tanh(),
+            nn.Linear(value_hidden2, value_hidden3),
+            nn.Tanh(),
+        )
+
+        # Value head
+        self.value_head = nn.Sequential(
+            nn.Linear(value_hidden3, 1),
         )
 
         if init2zeros:
-            self.shared_net.apply(initto0)
+            self.policy_encoder.apply(initto0)
             self.policy_mean_net.apply(initto0)
             self.policy_stddev_net.apply(initto0)
-            self.value_net.apply(initto0)
+            self.value_encoder.apply(initto0)
+            self.value_head.apply(initto0)
 
     def forward(
         self, x: torch.Tensor
@@ -88,7 +97,7 @@ class PolicyNetwork(nn.Module):
             ↓
             Normalize:            ÷600   ÷5     ÷5     ÷20   t/(t+10)
             ↓
-            Network processing
+            Network processing (separate encoders for policy and value)
             ↓
             Output (to env):      rad/s (actions)
 
@@ -118,17 +127,19 @@ class PolicyNetwork(nn.Module):
             x[:, 6] + OBS_SCALES["env/time"]
         )  # time: s → normalized (asymptotic)
 
-        shared_features = self.shared_net(x)
+        # Separate encoders for policy and value
+        policy_features = self.policy_encoder(x)
+        value_features = self.value_encoder(x)
 
         # Output actions in rad/s (SI units for environment)
-        action_means = (self.policy_mean_net(shared_features) - 0.5) * 2 * MAX_V
+        action_means = (self.policy_mean_net(policy_features) - 0.5) * 2 * MAX_V
         action_stddevs = torch.log(
-            1 + torch.exp(self.policy_stddev_net(shared_features))
+            1 + torch.exp(self.policy_stddev_net(policy_features))
         )
         if (abs(action_means) > MAX_V).any():
             raise ValueError("Invalid action mean value(s).")
 
-        value = self.value_net(shared_features)
+        value = self.value_head(value_features)
 
         return action_means, action_stddevs, value
 

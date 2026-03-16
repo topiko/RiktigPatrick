@@ -80,8 +80,8 @@ if __name__ == "__main__":
         actiondim,
         MODEL_INPUT,
         use_baseline=RL_CONFIG["use_baseline"],
-        init2zeros=True,
-        load_net=False,
+        init2zeros=RL_CONFIG["init2zeros"],
+        load_net=RL_CONFIG["load_net"],
     )
 
     RUN_NAME = "rp_test_parallel"
@@ -95,7 +95,10 @@ if __name__ == "__main__":
 
     with mlflow.start_run():
         # Load and log config parameters
-        with open(os.path.join(os.path.dirname(os.path.dirname(__file__)), "sim/config.yaml"), "r") as f:
+        with open(
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "sim/config.yaml"),
+            "r",
+        ) as f:
             config = yaml.safe_load(f)
 
         # Flatten config for mlflow params
@@ -138,9 +141,9 @@ if __name__ == "__main__":
                 if all(ready_) or step_count >= max_steps:
                     break
 
-            assert (
-                len(full_tapes) >= BATCH_SIZE
-            ), f"len(full_tapes) = {len(full_tapes)}, {len(ready_)}"
+            assert len(full_tapes) >= BATCH_SIZE, (
+                f"len(full_tapes) = {len(full_tapes)}, {len(ready_)}"
+            )
             rets, policy_loss, entropy_loss, value_loss = agent.update(full_tapes)
 
             # Record stats:
@@ -165,5 +168,5 @@ if __name__ == "__main__":
                 MAX_RETURN = mean_return
 
             log.info(
-                f"Episode {episode:<6d} (bs={len(full_tapes):4d}) --> {mean_return:6.02f} \u00B1 {std_return:5.02f}, min={min(rets):6.02f} max={max(rets):6.02f}, V_loss={value_loss:.02f}"
+                f"Episode {episode:<6d} (bs={len(full_tapes):4d}) --> {mean_return:6.02f} \u00b1 {std_return:5.02f}, min={min(rets):6.02f} max={max(rets):6.02f}, V_loss={value_loss:.02f}"
             )

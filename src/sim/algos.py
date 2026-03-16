@@ -46,7 +46,10 @@ class REINFORCE:
         init2zeros: bool = False,
         load_net: bool = False,
     ):
-        self.learning_rate = 1e-3
+        self.learning_rate = RL_CONFIG["learning_rate"]
+        self.value_learning_rate = RL_CONFIG.get(
+            "value_learning_rate", self.learning_rate
+        )
         self.gamma = 0.99
         self.eps = 1e-6
         self.entropy_scale = RL_CONFIG["entropy_scale"]
@@ -65,8 +68,22 @@ class REINFORCE:
             self.net = self.net.load()
             self.net = self.net.to(self.device)
 
-        # Single optimizer for both policy and value heads
-        self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
+        # Separate learning rates: higher for value network
+        policy_params = (
+            list(self.net.policy_encoder.parameters())
+            + list(self.net.policy_mean_net.parameters())
+            + list(self.net.policy_stddev_net.parameters())
+        )
+        value_params = list(self.net.value_encoder.parameters()) + list(
+            self.net.value_head.parameters()
+        )
+
+        self.optimizer = torch.optim.Adam(
+            [
+                {"params": policy_params, "lr": self.learning_rate},
+                {"params": value_params, "lr": self.value_learning_rate},
+            ]
+        )
         self.value_loss = torch.nn.MSELoss(reduction="mean")
 
         self.use_baseline = use_baseline
@@ -96,7 +113,7 @@ class REINFORCE:
             entropy,
         )
 
-    def update(self, tapes: list[Tape]) -> tuple[np.ndarray, float]:
+    def update(self, tapes: list[Tape]) -> tuple[np.ndarray, float, float, float]:
         all_rewards = np.concatenate([t.rewards for t in tapes])
         self.reward_normalizer.update(all_rewards)
 
@@ -111,7 +128,7 @@ class REINFORCE:
 
             baseline = np.zeros_like(G)
             if self.use_baseline:
-                baseline = tape.values.detach().cpu().numpy()
+                baseline = tape.values.squeeze().detach().cpu().numpy()
 
             advantages = G - baseline
 
@@ -124,7 +141,7 @@ class REINFORCE:
             for log_prob, entropy, advantage in zip(
                 tape.probs, tape.entropies, advantages
             ):
-                policy_losses.append(-log_prob.sum() * advantage)
+                policy_losses.append(-log_prob.sum() * float(advantage))
                 entropy_losses.append(-entropy.sum() * self.entropy_scale)
 
         policy_loss = torch.stack(policy_losses).mean()
