@@ -84,6 +84,10 @@ class PolicyNetwork(nn.Module):
             self.value_encoder.apply(initto0)
             self.value_head.apply(initto0)
 
+        # Return normalization stats (set by agent during training)
+        self.return_mean = 0.0
+        self.return_std = 1.0
+
     def forward(
         self, x: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

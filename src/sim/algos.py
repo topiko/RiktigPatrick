@@ -243,5 +243,7 @@ def compute_value_estimates(
         with torch.no_grad():
             _, _, v = policy_net(obs_t)
             v = v.item()
+            # Denormalize if return normalization was used
+            v = v * policy_net.return_std + policy_net.return_mean
         value_estimates.append(v)
     return np.array(value_estimates)

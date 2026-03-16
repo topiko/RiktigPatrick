@@ -164,6 +164,10 @@ if __name__ == "__main__":
             if mean_return > (MAX_RETURN + 1):
                 if episode >= 0:
                     log.info(f"Best return {mean_return:.02f} -> saving")
+                    # Save return normalizer stats with network
+                    if agent.normalize_returns:
+                        agent.net.return_mean = agent.return_normalizer.mean
+                        agent.net.return_std = agent.return_normalizer.std
                     agent.net.store()
                 MAX_RETURN = mean_return
 
