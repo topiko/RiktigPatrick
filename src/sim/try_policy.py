@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import gymnasium as gym
 import matplotlib
 
-matplotlib.use("TkAgg")  # Interactive backend for plt.show()
+matplotlib.use("Agg")  # Non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -139,6 +139,7 @@ def plot_state_history(
         "return": "",
         "value_estimate": "",
         "advantage": "",
+        "entropy": "",
     }
 
     # Conversion factors: multiply to convert from SI (sim units) to display units
@@ -247,8 +248,38 @@ if __name__ == "__main__":
     history = np.column_stack([history, advantages])
     idx_d["advantage"] = np.array([history.shape[1] - 1])
 
+    # Compute entropy for each timestep
+    entropy_estimates = []
+    policy_net = policy_net or PolicyNetwork(indim, actiondim)
+    for i in range(len(history)):
+        obs_parts = []
+        for k in MODEL_INPUT:
+            if k in idx_d:
+                indices = idx_d[k]
+                if len(indices) == 1:
+                    obs_parts.append(history[i, indices[0] : indices[0] + 1])
+                else:
+                    obs_parts.append(history[i, indices])
+            else:
+                # Handle expanded keys like sens/gyro_0, sens/gyro_1
+                indices = np.array([idx_d[f"{k}_{j}"] for j in range(3)])
+                obs_parts.append(history[i, indices])
+        obs_t = torch.concatenate(
+            [torch.Tensor(p).reshape(1, -1) for p in obs_parts], dim=1
+        )
+        with torch.no_grad():
+            action_means, action_stddevs, _ = policy_net(obs_t)
+            # Entropy = sum of log(stddev * sqrt(2*pi*e)) for each action dim
+            entropy = (
+                (action_stddevs * (2 * 3.14159 * 2.71828) ** 0.5).log().sum().item()
+            )
+            entropy_estimates.append(entropy)
+    history = np.column_stack([history, entropy_estimates])
+    idx_d["entropy"] = np.array([history.shape[1] - 1])
+
     plot_groups = PlotGroups()
     plot_groups.__dict__["returns"] = ("return", "value_estimate", "advantage")
+    plot_groups.__dict__["entropy"] = ("entropy",)
     plot_groups.__dict__["reward"] = (
         "reward/step",
         "reward/pitch",
@@ -263,6 +294,12 @@ if __name__ == "__main__":
     )
 
     plot_state_history(history=history, idx_dict=idx_d, plot_groups=plot_groups)
-    plt.savefig("plots/episode.png", dpi=100)
+    import os
+
+    plot_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "plots"
+    )
+    os.makedirs(plot_dir, exist_ok=True)
+    plt.savefig(os.path.join(plot_dir, "episode.png"), dpi=100)
     print(f"Episode return: {returns[0]:.2f}")
-    print("Plot saved to plots/episode.png")
+    print(f"Plot saved to {plot_dir}/episode.png")

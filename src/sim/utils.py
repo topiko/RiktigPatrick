@@ -91,6 +91,7 @@ def dict2tensor(obs_d: dict[str, np.ndarray]) -> torch.Tensor:
     ndim = list(obs_d.values())[0].ndim
     if ndim == 1:
         obs_arr = np.concatenate(list(obs_d.values()), axis=0)
+        obs_arr = obs_arr[np.newaxis, :]  # Add batch dimension
     elif ndim == 2:
         obs_arr = np.concatenate(list(obs_d.values()), axis=1)
     else:
