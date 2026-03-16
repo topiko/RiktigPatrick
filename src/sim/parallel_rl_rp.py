@@ -149,6 +149,8 @@ if __name__ == "__main__":
             # Record stats:
             mean_return = rets.mean()
             std_return = rets.std()
+            steps_survived = np.array([len(t.rewards) for t in full_tapes])
+            mean_steps = steps_survived.mean()
             mlflow.log_metrics(
                 {
                     "mean_ret": mean_return,
@@ -158,6 +160,7 @@ if __name__ == "__main__":
                     "policy_loss": policy_loss,
                     "entropy_loss": entropy_loss,
                     "value_loss": value_loss,
+                    "mean_steps": mean_steps,
                 },
                 step=episode,
             )
@@ -172,5 +175,5 @@ if __name__ == "__main__":
                 MAX_RETURN = mean_return
 
             log.info(
-                f"Episode {episode:<6d} (bs={len(full_tapes):4d}) --> {mean_return:6.02f} \u00b1 {std_return:5.02f}, min={min(rets):6.02f} max={max(rets):6.02f}, V_loss={value_loss:.02f}"
+                f"Episode {episode:<6d} (bs={len(full_tapes):4d}) --> {mean_return:6.02f} \u00b1 {std_return:5.02f}, steps={mean_steps:.0f}, V_loss={value_loss:.02f}"
             )
