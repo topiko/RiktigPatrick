@@ -2,6 +2,9 @@ import argparse
 from dataclasses import dataclass
 
 import gymnasium as gym
+import matplotlib
+
+matplotlib.use("TkAgg")  # Interactive backend for plt.show()
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
