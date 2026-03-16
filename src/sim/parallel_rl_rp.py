@@ -124,7 +124,6 @@ if __name__ == "__main__":
 
             tapes = [Tape(i) for i in range(BATCH_SIZE)]
             full_tapes = []
-            ready_ = np.zeros(BATCH_SIZE, dtype=bool)
             step_count = 0
             while True:
                 result = agent.sample_action(obs)
@@ -143,12 +142,10 @@ if __name__ == "__main__":
                     t.entropies.append(entropies[i])
                     if terminated[i] or truncated[i]:
                         full_tapes.append(t.build())
-                        ready_[i] = True
-
                         tapes[i] = Tape(i)
 
                 step_count += 1
-                if all(ready_) or step_count >= max_steps:
+                if len(full_tapes) >= BATCH_SIZE or step_count >= max_steps:
                     break
 
             if len(full_tapes) < BATCH_SIZE:
