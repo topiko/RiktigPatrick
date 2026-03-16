@@ -210,7 +210,10 @@ if __name__ == "__main__":
     else:
         raise KeyError("Invalid agent type")
 
-    run_episode(agent, rpenv, seed=0)
+    # Run episode with tapes to capture entropy
+    tapes = [Tape(0)]
+    run_episode(agent, rpenv, seed=0, tapes=tapes)
+    tape = tapes[0]
 
     rpenv.close()  # Close video recorder
 
@@ -226,7 +229,7 @@ if __name__ == "__main__":
     history = np.column_stack([history, returns])
     idx_d["return"] = np.array([history.shape[1] - 1])
 
-    # Compute value estimates from policy network's value head
+    # Get value estimates from policy network's value head
     policy_net = PolicyNetwork(indim, actiondim)
     try:
         policy_net = policy_net.load()
@@ -248,32 +251,16 @@ if __name__ == "__main__":
     history = np.column_stack([history, advantages])
     idx_d["advantage"] = np.array([history.shape[1] - 1])
 
-    # Compute entropy for each timestep
-    entropy_estimates = []
-    policy_net = policy_net or PolicyNetwork(indim, actiondim)
-    for i in range(len(history)):
-        obs_parts = []
-        for k in MODEL_INPUT:
-            if k in idx_d:
-                indices = idx_d[k]
-                if len(indices) == 1:
-                    obs_parts.append(history[i, indices[0] : indices[0] + 1])
-                else:
-                    obs_parts.append(history[i, indices])
-            else:
-                # Handle expanded keys like sens/gyro_0, sens/gyro_1
-                indices = np.array([idx_d[f"{k}_{j}"] for j in range(3)])
-                obs_parts.append(history[i, indices])
-        obs_t = torch.concatenate(
-            [torch.Tensor(p).reshape(1, -1) for p in obs_parts], dim=1
+    # Get entropy from tape (already computed during episode)
+    # Entropy shape is (n_steps, n_actions), sum over actions
+    entropy_estimates = tape.entropies.sum(dim=1).detach().cpu().numpy()
+    # Match history length (may differ by 1 due to timing)
+    if len(entropy_estimates) > len(history):
+        entropy_estimates = entropy_estimates[: len(history)]
+    elif len(entropy_estimates) < len(history):
+        entropy_estimates = np.pad(
+            entropy_estimates, (0, len(history) - len(entropy_estimates))
         )
-        with torch.no_grad():
-            action_means, action_stddevs, _ = policy_net(obs_t)
-            # Entropy = sum of log(stddev * sqrt(2*pi*e)) for each action dim
-            entropy = (
-                (action_stddevs * (2 * 3.14159 * 2.71828) ** 0.5).log().sum().item()
-            )
-            entropy_estimates.append(entropy)
     history = np.column_stack([history, entropy_estimates])
     idx_d["entropy"] = np.array([history.shape[1] - 1])
 
