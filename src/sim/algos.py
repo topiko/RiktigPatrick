@@ -89,6 +89,7 @@ class REINFORCE:
 
         self.use_baseline = use_baseline
         self.normalize_returns = RL_CONFIG.get("normalize_returns", False)
+        self.trim_end_steps = RL_CONFIG.get("trim_end_steps", 0)
         self.model_input = model_input
         self.reward_normalizer = RunningNormalizer(momentum=0.99)
         if self.normalize_returns:
@@ -127,7 +128,16 @@ class REINFORCE:
         returns_list = []
 
         for tape in tapes:
-            G = compute_returns(tape.rewards, self.gamma)
+            # Trim last N steps to avoid biased returns near termination
+            n = len(tape.rewards)
+            trim = min(self.trim_end_steps, n - 1) if self.trim_end_steps > 0 else 0
+
+            rewards = tape.rewards[:-trim] if trim > 0 else tape.rewards
+            probs = tape.probs[:-trim] if trim > 0 else tape.probs
+            values = tape.values[:-trim] if trim > 0 else tape.values
+            entropies = tape.entropies[:-trim] if trim > 0 else tape.entropies
+
+            G = compute_returns(rewards, self.gamma)
             returns_list.append(G)
 
             # Update return normalizer if enabled
@@ -136,7 +146,7 @@ class REINFORCE:
 
             baseline = np.zeros_like(G)
             if self.use_baseline:
-                baseline = tape.values.squeeze().detach().cpu().numpy()
+                baseline = values.squeeze().detach().cpu().numpy()
                 if self.normalize_returns:
                     # Denormalize value predictions for baseline
                     baseline = (
@@ -147,7 +157,7 @@ class REINFORCE:
             advantages = G - baseline
 
             # Value loss
-            tape_values = tape.values.squeeze().to(self.device)
+            tape_values = values.squeeze().to(self.device)
             if self.normalize_returns:
                 G_target = (
                     G - self.return_normalizer.mean
@@ -158,9 +168,7 @@ class REINFORCE:
                 self.value_loss(tape_values, torch.tensor(G_target, device=self.device))
             )
 
-            for log_prob, entropy, advantage in zip(
-                tape.probs, tape.entropies, advantages
-            ):
+            for log_prob, entropy, advantage in zip(probs, entropies, advantages):
                 policy_losses.append(-log_prob.sum() * float(advantage))
                 entropy_losses.append(-entropy.sum() * self.entropy_scale)
 

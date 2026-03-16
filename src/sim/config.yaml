@@ -22,6 +22,7 @@ rl:
   use_baseline: true
   init2zeros: false
   load_net: false
+  trim_end_steps: 10
 
 env:
   ctrl_mode: "vel"
