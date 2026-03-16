@@ -12,13 +12,13 @@ training:
   seed: 42
 
 rl:
-  learning_rate: 0.001
-  value_learning_rate: 0.001
+  learning_rate: 0.01
+  value_learning_rate: 0.01
   gamma: 0.99
-  entropy_scale: 0.1
-  value_loss_scale: 1.0
+  entropy_scale: 0.5
+  value_loss_scale: 0.01
   grad_clip: 10.0
-  normalize_returns: true
+  normalize_returns: false
   use_baseline: true
   init2zeros: false
   load_net: false
@@ -27,7 +27,7 @@ env:
   ctrl_mode: "vel"
   lock_head: true
   step_time: 0.01
-  randomize: false
+  randomize: true
 
 action:
   max_wheel_vel: 5.0  # rev/s (5 Hz)
