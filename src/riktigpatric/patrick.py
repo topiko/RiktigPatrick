@@ -222,7 +222,7 @@ class State:
         self.obs = Obs()
         self.keys = keys
         self.mahony = Mahony()
-        self.prev_t = 0
+        self.prev_t = 0.0
         self._action_dict = StepAction().to_dict()
         self._reward_dict = {}
         self._record = record
@@ -287,8 +287,6 @@ class State:
         history = np.vstack(self._history)
         idx_d = self.get_state_arr(keys="all", ret_idxs=True)[1]
 
-        # history = history[:-1, :]
-
         return history, idx_d
 
     @property
@@ -297,7 +295,7 @@ class State:
 
     def reset(self):
         self.mahony.reset()
-        self.prev_t = 0
+        self.prev_t = 0.0
         self._history = []
         self._action_dict = StepAction().to_dict()
         self._reward_dict = {}
@@ -372,13 +370,6 @@ class State:
             for k, v in self.get_state_dict(keys="all").items()
         }
         return spaces.Dict(d)
-
-
-class StepReturn:
-    obs: Obs
-    reward: float
-    terminated: bool
-    truncated: bool
 
 
 class RPHead:

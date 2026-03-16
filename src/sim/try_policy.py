@@ -191,7 +191,6 @@ def plot_state_history(
         trim_time = action_times[-(trim_end_steps + 1)]
 
     for ax, k in zip(axarr, plot_groups.groups()):
-        print(k)
         for g in plot_groups[k]:
             idx = idx_dict[g]
             if isinstance(idx, np.ndarray):
@@ -301,26 +300,7 @@ if __name__ == "__main__":
 
     # Get entropy from tape (already computed during episode)
     # Entropy shape is (n_steps,) or (n_steps, n_actions)
-    if tape.entropies.dim() == 1:
-        entropy_estimates = tape.entropies.detach().cpu().numpy()
-    else:
-        entropy_estimates = tape.entropies.sum(dim=1).detach().cpu().numpy()
-
-    # Match history length (may differ by 1 due to timing)
-    # History is recorded by env, entropy by tape - they can differ by 1
-    n_history = len(history)
-    n_entropy = len(entropy_estimates)
-
-    if n_entropy > n_history:
-        # Truncate entropy to match history
-        entropy_estimates = entropy_estimates[:n_history]
-    elif n_entropy < n_history:
-        # Pad entropy with last value (not zeros)
-        entropy_estimates = np.pad(
-            entropy_estimates,
-            (0, n_history - n_entropy),
-            constant_values=entropy_estimates[-1] if n_entropy > 0 else 0,
-        )
+    entropy_estimates = tape.entropies.detach().cpu().numpy()
 
     history = np.column_stack([history, entropy_estimates])
     idx_d["entropy"] = np.array([history.shape[1] - 1])
