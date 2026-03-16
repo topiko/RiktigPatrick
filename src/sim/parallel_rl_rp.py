@@ -89,7 +89,7 @@ if __name__ == "__main__":
     mlflow.set_experiment(RUN_NAME)
     client = MlflowClient()
 
-    MAX_RETURN = 0
+    MAX_RETURN = float("-inf")
     seed = 42
     max_steps = 2000
 
