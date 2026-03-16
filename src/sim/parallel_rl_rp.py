@@ -100,8 +100,8 @@ if __name__ == "__main__":
     client = MlflowClient()
 
     MAX_RETURN = float("-inf")
-    seed = 42
-    max_steps = 5000  # Increased to allow longer episodes when robot balances well
+    seed = 123  # Different seed to avoid bad local minima
+    max_steps = 10000  # Allow enough time for good policies to complete episodes
 
     with mlflow.start_run():
         # Load and log config parameters
@@ -153,6 +153,10 @@ if __name__ == "__main__":
                     f"Only {len(full_tapes)} episodes completed in {step_count} steps, "
                     f"expected {BATCH_SIZE}. Continuing with partial batch."
                 )
+
+            if len(full_tapes) == 0:
+                log.warning("No episodes completed, skipping update")
+                continue
 
             rets, policy_loss, entropy_loss, value_loss = agent.update(full_tapes)
 
