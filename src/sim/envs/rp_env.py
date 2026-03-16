@@ -396,7 +396,7 @@ class GymRP(gymnasium.Env):
 
     @property
     def truncated(self) -> bool:
-        return False
+        return self.state.obs.action_time[0] >= 20.0  # 20 second time limit
 
     def render(self):
         if self.render_mode == "rgb_array":

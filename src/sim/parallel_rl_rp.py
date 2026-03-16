@@ -101,7 +101,7 @@ if __name__ == "__main__":
 
     MAX_RETURN = float("-inf")
     seed = 123  # Different seed to avoid bad local minima
-    max_steps = 10000  # Allow enough time for good policies to complete episodes
+    max_steps = 2500  # With 20s truncation, episodes complete within 2000 steps
 
     with mlflow.start_run():
         # Load and log config parameters
