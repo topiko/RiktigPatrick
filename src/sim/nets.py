@@ -75,7 +75,9 @@ class PolicyNetwork(nn.Module):
             self.policy_stddev_net.apply(initto0)
             self.value_net.apply(initto0)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass returns policy means, stds, and value estimate.
 
         Args:
@@ -88,10 +90,12 @@ class PolicyNetwork(nn.Module):
         """
         TIME_CONSTANT = 10.0
 
-        x = x.clone()
         time_idx = 6
         if x.shape[1] > time_idx:
-            x[:, time_idx] = x[:, time_idx] / (x[:, time_idx] + TIME_CONSTANT)
+            time_val = x[:, time_idx] / (x[:, time_idx] + TIME_CONSTANT)
+            x = torch.cat(
+                [x[:, :time_idx], time_val.unsqueeze(1), x[:, time_idx + 1 :]], dim=1
+            )
 
         shared_features = self.shared_net(x)
 
@@ -108,6 +112,7 @@ class PolicyNetwork(nn.Module):
 
     def store(self, fname: str = NETF):
         import os
+
         os.makedirs(os.path.dirname(fname), exist_ok=True)
         torch.save(self, fname)
 

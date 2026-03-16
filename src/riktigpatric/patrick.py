@@ -1,6 +1,7 @@
 """
 This is the module that contains RiktigPatrick!
 """
+
 from __future__ import annotations
 
 import logging
@@ -252,7 +253,10 @@ class State:
         if action is not None:
             self._action_dict = action.to_dict()
 
-        self._info_dict = {}
+        # Preserve env/time, clear rest
+        env_time = self._info_dict.get("env/time", np.array([0.0]))
+        env_time[0] = t
+        self._info_dict = {"env/time": env_time}
         if reward is not None:
             self._info_dict["reward"] = np.array([reward])
         if reward_step is not None:
@@ -302,7 +306,7 @@ class State:
         self.prev_t = 0
         self._history = []
         self._action_dict = StepAction().to_dict()
-        self._info_dict = {"reward": 0}
+        self._info_dict = {"reward": 0, "env/time": np.array([0.0])}
         self.obs = Obs()
 
     def get_state_dict(
@@ -471,9 +475,9 @@ class RPHead:
         add = "  "
         repr_ = "Head:\n"
         repr_ += f"Phiservo\n"
-        repr_ += self.phiservo.__repr__().replace("\n", f"\n{add*2}")
+        repr_ += self.phiservo.__repr__().replace("\n", f"\n{add * 2}")
         repr_ += f"\nThetaservo\n"
-        repr_ += self.thetaservo.__repr__().replace("\n", f"\n{add*2}")
+        repr_ += self.thetaservo.__repr__().replace("\n", f"\n{add * 2}")
         repr_ += "\n"
 
         return repr_
@@ -596,7 +600,7 @@ class RPatrick:
             rptime /= 1e6
 
             if (rptime - self.rptime) > 0.1:
-                LOG.warning(f"Long break {(rptime - self.rptime)*1000:.0f} ms")
+                LOG.warning(f"Long break {(rptime - self.rptime) * 1000:.0f} ms")
             else:
                 self.dt = rptime - self.rptime
                 # Update average on the fly

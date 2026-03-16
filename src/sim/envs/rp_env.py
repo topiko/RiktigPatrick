@@ -231,7 +231,6 @@ class GymRP(gymnasium.Env):
         self.dm_env.model.opt.timestep = self.simul_timestep
 
         self.state = State(keys=state_keys, record=record)
-        self.state._info_dict["env/time"] = np.array([0.0])
 
         self.observation_space = self.state.to_obs_space()
 
@@ -272,7 +271,7 @@ class GymRP(gymnasium.Env):
         pitch = q2eul(body_quat)[1] / np.pi * 180
 
         reward, reward_info = self._get_reward()
-        
+
         self.state.update(
             t=self.dm_env.data.time,
             acc=self.dm_env.bind(self.acc_sens).sensordata.copy(),
@@ -295,7 +294,6 @@ class GymRP(gymnasium.Env):
         )
 
     def _get_obs(self) -> dict:
-        self.state._info_dict["env/time"] = np.array([self.dm_env.data.time])
         d = self.state.get_state_dict(keys="all")
         return d
 
@@ -312,12 +310,20 @@ class GymRP(gymnasium.Env):
         pitch = abs(self.state.euler[1])
         step_reward = REWARD_CONFIG["step"]
         pitch_penalty = -pitch * REWARD_CONFIG["pitch_coef"]
-        action_penalty = -REWARD_CONFIG["action_coef"] * (
-            float(self._prev_action.left_wheel**2 + self._prev_action.right_wheel**2)
-        ) / MAXV**2
-        yaw_penalty = -REWARD_CONFIG["yaw_coef"] * (
-            float(self._prev_action.left_wheel - self._prev_action.right_wheel) ** 2
-        ) / MAXV**2
+        action_penalty = (
+            -REWARD_CONFIG["action_coef"]
+            * (
+                float(
+                    self._prev_action.left_wheel**2 + self._prev_action.right_wheel**2
+                )
+            )
+            / MAXV**2
+        )
+        yaw_penalty = (
+            -REWARD_CONFIG["yaw_coef"]
+            * (float(self._prev_action.left_wheel - self._prev_action.right_wheel) ** 2)
+            / MAXV**2
+        )
         total = step_reward + pitch_penalty + action_penalty + yaw_penalty
         info = {
             "reward/step": step_reward,
