@@ -1,4 +1,5 @@
 import argparse
+import os
 
 import gymnasium as gym
 import matplotlib
@@ -31,7 +32,21 @@ class PlotGroups:
         self.wheel_left = ("act/left_wheel", "sens/left_wheel_vel")
         self.wheel_right = ("act/right_wheel", "sens/right_wheel_vel")
         self.head_pt = ("sens/head_pitch", "sens/head_turn")
-        self.reward = ("reward",)
+        self.reward = (
+            "reward/step",
+            "reward/pitch",
+            "reward/action",
+            "reward/yaw",
+            "reward/termination",
+        )
+        self.sensors = (
+            "filter/rp_pitch",
+            "sens/gyro_0",
+            "sens/gyro_1",
+            "sens/gyro_2",
+        )
+        self.returns = ("return", "value_estimate", "advantage")
+        self.entropy = ("entropy",)
 
     def __len__(self) -> int:
         return len(self.__dict__)
@@ -104,7 +119,8 @@ def plot_state_history(
 ):
     plot_groups = plot_groups or PlotGroups()
 
-    time_idx = idx_dict["env/time"]
+    action_time_idx = idx_dict["env/action_time"]
+    obs_time_idx = idx_dict["env/obs_time"]
 
     print("Available:")
     for k in idx_dict:
@@ -127,12 +143,14 @@ def plot_state_history(
         "simul/rp_pitch": "deg",
         "act/left_wheel": "rev/s",
         "act/right_wheel": "rev/s",
-        "env/time": "s",
+        "env/action_time": "s",
+        "env/obs_time": "s",
         "reward": "",
         "reward/step": "",
         "reward/pitch": "",
         "reward/action": "",
         "reward/yaw": "",
+        "reward/termination": "",
         "return": "",
         "value_estimate": "",
         "advantage": "",
@@ -151,17 +169,29 @@ def plot_state_history(
         "act/right_wheel": 1.0 / (2 * 3.14159),
     }
 
+    # Keys that use action_time (decisions: actions, expectations, achievements)
+    action_time_keys = {
+        "act/left_wheel",
+        "act/right_wheel",
+        "entropy",
+        "return",
+        "value_estimate",
+        "advantage",
+    }
+
     n_rows = len(plot_groups)
 
     _, axarr = plt.subplots(n_rows, 1, sharex=True, figsize=(8, n_rows * 2))
 
-    times = history[:, time_idx]
+    action_times = history[:, action_time_idx]
+    obs_times = history[:, obs_time_idx]
 
     # Add vertical red line at trim cutoff
-    if trim_end_steps > 0 and len(times) > trim_end_steps:
-        trim_time = times[-(trim_end_steps + 1)]
+    if trim_end_steps > 0 and len(action_times) > trim_end_steps:
+        trim_time = action_times[-(trim_end_steps + 1)]
 
     for ax, k in zip(axarr, plot_groups.groups()):
+        print(k)
         for g in plot_groups[k]:
             idx = idx_dict[g]
             if isinstance(idx, np.ndarray):
@@ -172,13 +202,15 @@ def plot_state_history(
                 data = data * conversions[g]
             unit = units.get(g, "")
             label = f"{g} [{unit}]" if unit else g
+            # Use action_time for actions/rewards, obs_time for observations
+            times = action_times if g in action_time_keys else obs_times
             ax.plot(times, data, "-|", markersize=5, lw=1, label=label)
         ax.set_title(f"{k}")
         ax.spines[["right", "top"]].set_visible(False)
         ax.legend(frameon=False)
 
         # Add vertical red line at trim cutoff
-        if trim_end_steps > 0 and len(times) > trim_end_steps:
+        if trim_end_steps > 0 and len(action_times) > trim_end_steps:
             ax.axvline(
                 x=trim_time,
                 color="red",
@@ -237,11 +269,11 @@ if __name__ == "__main__":
     while hasattr(env, "env"):
         env = env.env
     history, idx_d = env.state.history
-    breakpoint()
 
     # Compute return using same gamma as training (0.99)
     rewards = history[:, idx_d["reward"][0]]
     returns = compute_returns(rewards, discount=RL_CONFIG["gamma"])
+
     history = np.column_stack([history, returns])
     idx_d["return"] = np.array([history.shape[1] - 1])
 
@@ -294,28 +326,12 @@ if __name__ == "__main__":
     idx_d["entropy"] = np.array([history.shape[1] - 1])
 
     plot_groups = PlotGroups()
-    plot_groups.__dict__["returns"] = ("return", "value_estimate", "advantage")
-    plot_groups.__dict__["entropy"] = ("entropy",)
-    plot_groups.__dict__["reward"] = (
-        "reward/step",
-        "reward/pitch",
-        "reward/action",
-        "reward/yaw",
-    )
-    plot_groups.__dict__["sensors"] = (
-        "filter/rp_pitch",
-        "sens/gyro_0",
-        "sens/gyro_1",
-        "sens/gyro_2",
-    )
-
     plot_state_history(
         history=history,
         idx_dict=idx_d,
         plot_groups=plot_groups,
         trim_end_steps=RL_CONFIG.get("trim_end_steps", 0),
     )
-    import os
 
     plot_dir = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "plots"

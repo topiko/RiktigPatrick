@@ -266,18 +266,13 @@ class GymRP(gymnasium.Env):
         self.ctrl_mode = ctrl_mode
         self._prev_action = StepAction()
 
-    def _update_state(self):
+    def _update_obs(self, action_time: float, obs_time: float):
         body_quat = self.dm_env.bind(self.body_quat).sensordata.copy()
         pitch = q2eul(body_quat)[1] / np.pi * 180
 
-        reward, reward_info = self._get_reward()
-
-        # Prepare full reward info including total reward
-        full_reward_info = {"reward": reward}
-        full_reward_info.update(reward_info)
-
-        self.state.update(
-            t=self.dm_env.data.time,
+        self.state.update_obs(
+            action_time=action_time,
+            obs_time=obs_time,
             acc=self.dm_env.bind(self.acc_sens).sensordata.copy(),
             gyro=self.dm_env.bind(self.gyro_sens).sensordata.copy(),
             head_pitch=self.dm_env.bind(self.head_pitch_sens).sensordata.copy()[0],
@@ -290,8 +285,6 @@ class GymRP(gymnasium.Env):
             ).sensordata.copy()[0],
             true_pitch=pitch,
             action=self._prev_action,
-            reward_info=full_reward_info,
-            termination=self.terminated,
         )
 
     def _get_obs(self) -> dict:
@@ -321,7 +314,6 @@ class GymRP(gymnasium.Env):
             termination_penalty = -REWARD_CONFIG.get("termination_penalty", 0.0)
             info["reward/termination"] = termination_penalty
             total += termination_penalty
-            print("TEMINATION")
         else:
             info["reward/termination"] = 0.0
 
@@ -405,6 +397,7 @@ class GymRP(gymnasium.Env):
     def step(
         self, action: Optional[Union[dict[str, np.ndarray], StepAction]] = None
     ) -> tuple[dict, float, bool, bool, dict]:
+        # Action at time t
         if action is not None:
             if isinstance(action, dict):
                 action = StepAction().from_dict(action)
@@ -430,21 +423,25 @@ class GymRP(gymnasium.Env):
                 self.dm_env.bind(self.head_pitch_act).ctrl = action.head_pitch  # rad/s
                 self.dm_env.bind(self.head_turn_act).ctrl = action.head_turn  # rad/s
 
-        if self.step_time is None:
-            step_time = self.dm_env.timestep()
-        else:
-            step_time = self.step_time
-
+        # MuJoCo simul loop:
         t0 = self.dm_env.data.time
         t = t0
-        while t < t0 + step_time:
+        while t < t0 + self.step_time:
             self.dm_env.step()
-
             t = self.dm_env.data.time
 
-        self._update_state()
+        # Obs at time t + dt
+        self._update_obs(action_time=t0, obs_time=t)
+
+        # Rewards at t + dt
+        reward, reward_info = self._get_reward()
+
+        full_reward_info = {"reward": reward}
+        full_reward_info.update(reward_info)
+        self.state.update_rewards(t, full_reward_info)
 
         info = self._get_info()
+        info.update(reward_info)
 
         return (
             self._get_obs(),

@@ -11,10 +11,10 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 import torch
-from filters.mahony import Mahony
 from gymnasium import spaces
-from relay.conversions import make_ctrl
 
+from filters.mahony import Mahony
+from relay.conversions import make_ctrl
 from riktigpatric.servo import Servo
 
 LOG = logging.getLogger("rp_logger")
@@ -129,11 +129,12 @@ class Obs:
         self._left_wheel_vel: np.ndarray = np.zeros(1)
         self._right_wheel_vel: np.ndarray = np.zeros(1)
         self._true_pitch: np.ndarray = np.zeros(1)
-        self._t: float = 0
+        self._action_time: np.ndarray = np.zeros(1)
+        self._obs_time: np.ndarray = np.zeros(1)
 
     @property
     def ndim(self) -> int:
-        return 8
+        return 9
 
     @property
     def acc(self) -> np.ndarray:
@@ -196,12 +197,20 @@ class Obs:
         self._true_pitch = np.array([pitch])
 
     @property
-    def t(self) -> float:
-        return self._t
+    def action_time(self) -> np.ndarray:
+        return self._action_time
 
-    @t.setter
-    def update_t(self, t: float):
-        self._t = t
+    @action_time.setter
+    def update_action_time(self, t: float):
+        self._action_time = np.array([t])
+
+    @property
+    def obs_time(self) -> np.ndarray:
+        return self._obs_time
+
+    @obs_time.setter
+    def update_obs_time(self, t: float):
+        self._obs_time = np.array([t])
 
 
 class State:
@@ -218,11 +227,13 @@ class State:
         self._reward_dict = {}
         self._record = record
         self._history = []
+        self._last_obs_t: Optional[float] = None
 
-    def update(
+    def update_obs(
         self,
-        *,  # Force names
-        t: float,
+        *,
+        action_time: float,
+        obs_time: float,
         acc: np.ndarray,
         gyro: np.ndarray,
         head_pitch: float,
@@ -231,9 +242,9 @@ class State:
         right_wheel_vel: float,
         true_pitch: float,
         action: Optional[StepAction] = None,
-        reward_info: Optional[dict[str, float]] = None,
     ):
-        self.obs.update_t = t
+        self.obs.update_action_time = action_time
+        self.obs.update_obs_time = obs_time
         self.obs.update_gyro = gyro
         self.obs.update_acc = acc
         self.obs.update_head_pitch = head_pitch
@@ -242,18 +253,25 @@ class State:
         self.obs.update_right_wheel_vel = right_wheel_vel
         self.obs.update_true_pitch = true_pitch
 
-        # Sens fusion:
-        self.mahony.update(acc, gyro, t - self.prev_t)
-        self.prev_t = t
+        self.mahony.update(acc, gyro, obs_time - self.prev_t)
+        self.prev_t = obs_time
 
         if action is not None:
             self._action_dict = action.to_dict()
 
-        # Clear and update reward dict
+        self._last_obs_t = obs_time
+
+    def update_rewards(self, t: float, reward_info: dict[str, float]):
+        if self._last_obs_t is None:
+            raise RuntimeError("update_rewards() called without prior update_obs()")
+        if self._last_obs_t != t:
+            raise RuntimeError(
+                f"update_rewards(t={t}) called but last update_obs was at t={self._last_obs_t}"
+            )
         self._reward_dict = {}
-        if reward_info is not None:
-            for key, value in reward_info.items():
-                self._reward_dict[key] = np.array([value])
+        for key, value in reward_info.items():
+            self._reward_dict[key] = np.array([value])
+        self._last_obs_t = None
 
         if self._record:
             arr = self.get_state_arr(keys="all")
@@ -266,23 +284,10 @@ class State:
         if not self._history:
             raise KeyError("History is empty.")
 
-        # We store the previous action in history, so we need to shift it.
         history = np.vstack(self._history)
-
         idx_d = self.get_state_arr(keys="all", ret_idxs=True)[1]
 
-        act_keys = list(self._action_dict.keys())
-
-        # Action mask:
-        mask = np.zeros(history.shape[1], dtype=bool)
-        for k in act_keys:
-            mask[idx_d[k]] = True
-
-
-        breakpoint()
-        # Shift the action:
-        history[:-1, mask] = history[1:, mask]
-        history = history[:-1, :]
+        # history = history[:-1, :]
 
         return history, idx_d
 
@@ -296,6 +301,7 @@ class State:
         self._history = []
         self._action_dict = StepAction().to_dict()
         self._reward_dict = {}
+        self._last_obs_t = None
         self.obs = Obs()
 
     def get_state_dict(
@@ -310,7 +316,8 @@ class State:
             "sens/right_wheel_vel": self.obs.right_wheel_vel,
             "filter/rp_pitch": np.array([self.euler[1]]),
             "simul/rp_pitch": self.obs.true_pitch,
-            "env/time": np.array([self.obs.t]),
+            "env/action_time": self.obs.action_time,
+            "env/obs_time": self.obs.obs_time,
         }
         d.update(self._action_dict)
         d.update(self._reward_dict)
@@ -462,9 +469,9 @@ class RPHead:
     def __repr__(self):
         add = "  "
         repr_ = "Head:\n"
-        repr_ += f"Phiservo\n"
+        repr_ += "Phiservo\n"
         repr_ += self.phiservo.__repr__().replace("\n", f"\n{add * 2}")
-        repr_ += f"\nThetaservo\n"
+        repr_ += "\nThetaservo\n"
         repr_ += self.thetaservo.__repr__().replace("\n", f"\n{add * 2}")
         repr_ += "\n"
 

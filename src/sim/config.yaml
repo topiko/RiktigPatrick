@@ -22,7 +22,7 @@ rl:
   use_baseline: true
   init2zeros: false
   load_net: false
-  trim_end_steps: 30
+  trim_end_steps: 0
 
 env:
   ctrl_mode: "vel"
@@ -38,7 +38,7 @@ reward:
   pitch_coef: 0.5
   action_coef: 0.1
   yaw_coef: 0.1
-  termination_penalty: 100.0
+  termination_penalty: 10.0
 
 model:
   model_input:
@@ -46,11 +46,11 @@ model:
     - "sens/gyro"
     - "sens/left_wheel_vel"
     - "sens/right_wheel_vel"
-    - "env/time"
+    - "env/action_time"
   # Fixed normalization scales (divide by these)
   obs_scales:
     filter/rp_pitch: 20.0  # deg (±20 deg range)
     sens/gyro: 600.0  # deg/s (±600 deg/s range)
     sens/left_wheel_vel: 5.0  # rev/s (max wheel vel)
     sens/right_wheel_vel: 5.0  # rev/s (max wheel vel)
-    env/time: 10.0  # seconds (time constant for normalization)
+    env/action_time: 10.0  # seconds (time constant for normalization)

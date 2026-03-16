@@ -137,8 +137,8 @@ class PolicyNetwork(nn.Module):
             x[:, 5] * RAD2REV / OBS_SCALES["sens/right_wheel_vel"]
         )  # wheel: rad/s → rev/s → normalized
         x_norm[:, 6] = x[:, 6] / (
-            x[:, 6] + OBS_SCALES["env/time"]
-        )  # time: s → normalized (asymptotic)
+            x[:, 6] + OBS_SCALES["env/action_time"]
+        )  # action_time: s → normalized (asymptotic)
 
         # Separate encoders for policy and value
         policy_features = self.policy_encoder(x_norm)
