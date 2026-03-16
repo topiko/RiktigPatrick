@@ -22,13 +22,13 @@ rl:
   use_baseline: true
   init2zeros: false
   load_net: false
-  trim_end_steps: 10
+  trim_end_steps: 30
 
 env:
   ctrl_mode: "vel"
   lock_head: true
   step_time: 0.01
-  randomize: true
+  randomize: false
 
 action:
   max_wheel_vel: 5.0  # rev/s (5 Hz)
@@ -36,7 +36,7 @@ action:
 reward:
   step: 5.0
   pitch_coef: 0.5
-  action_coef: 0.001
+  action_coef: 0.0
   yaw_coef: 0.1
 
 model:
