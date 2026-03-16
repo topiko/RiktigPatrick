@@ -27,15 +27,15 @@ rl:
 env:
   lock_head: true
   step_time: 0.01
-  randomize: false
+  randomize: true
 
 policy:
   type: "acceleration"  # "velocity" or "acceleration"
-  
+
   # Velocity mode: continuous Gaussian policy
   velocity:
     max_wheel_vel: 5.0  # rev/s (5 Hz)
-  
+
   # Acceleration mode: discrete Categorical policy
   acceleration:
     n_actions: 5  # discrete actions per wheel: {-MAX, ..., 0, ..., +MAX}
@@ -43,7 +43,7 @@ policy:
 
 reward:
   step: 1.0
-  pitch_coef: 0.1
+  pitch_coef: 0.5
   action_coef: 0.02
   yaw_coef: 0.03
   termination_penalty: 5.0
