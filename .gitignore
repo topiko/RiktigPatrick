@@ -5,3 +5,5 @@
 mlruns/
 mlflow-artifacts/
 .env
+video/
+plots/
