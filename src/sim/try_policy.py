@@ -268,8 +268,11 @@ if __name__ == "__main__":
     idx_d["advantage"] = np.array([history.shape[1] - 1])
 
     # Get entropy from tape (already computed during episode)
-    # Entropy shape is (n_steps, n_actions), sum over actions
-    entropy_estimates = tape.entropies.sum(dim=1).detach().cpu().numpy()
+    # Entropy shape is (n_steps,) or (n_steps, n_actions)
+    if tape.entropies.dim() == 1:
+        entropy_estimates = tape.entropies.detach().cpu().numpy()
+    else:
+        entropy_estimates = tape.entropies.sum(dim=1).detach().cpu().numpy()
     # Match history length (may differ by 1 due to timing)
     if len(entropy_estimates) > len(history):
         entropy_estimates = entropy_estimates[: len(history)]
