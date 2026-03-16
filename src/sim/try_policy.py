@@ -14,7 +14,6 @@ from gymnasium.wrappers import (
 
 from sim.algos import REINFORCE, compute_returns, compute_value_estimates
 from sim.custom_policies import NetPolicy, PIDPolicy
-from sim.nets import PolicyNetwork
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE, RL_CONFIG
 from sim.utils import Tape, actiondim, model_indim, register_and_make_env
 
@@ -277,14 +276,8 @@ if __name__ == "__main__":
     idx_d["return"] = np.array([history.shape[1] - 1])
 
     # Get value estimates from policy network's value head
-    policy_net = PolicyNetwork(indim, actiondim)
-    try:
-        policy_net = policy_net.load()
-    except:
-        print("Warning: Could not load policy net, using zeros")
-        policy_net = None
-
-    if policy_net is not None:
+    if agent_type == "REINFORCE":
+        policy_net = agent.net
         value_estimates = compute_value_estimates(
             policy_net, history, idx_d, MODEL_INPUT
         )

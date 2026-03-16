@@ -54,6 +54,7 @@ def register_and_make_env(
                     state_keys=obs_space,
                     render_mode="rgb_array",
                     disable_env_checker=True,
+                    **env_config,
                 )
                 for _ in range(batch_size)
             ]
@@ -64,6 +65,7 @@ def register_and_make_env(
         state_keys=obs_space,
         render_mode="rgb_array",
         disable_env_checker=True,
+        **env_config,
     )
 
 
@@ -82,10 +84,10 @@ class Tape:
 
     def build(self) -> Tape:
         self._is_ready = True
-        self.probs = torch.stack(self.probs, axis=0)
+        self.probs = torch.stack(self.probs, dim=0)
         self.rewards = np.array(self.rewards)
-        self.values = torch.concat(self.values, axis=0)
-        self.entropies = torch.stack(self.entropies, axis=0)
+        self.values = torch.cat(self.values, dim=0)
+        self.entropies = torch.stack(self.entropies, dim=0)
         return self
 
     def __len__(self) -> int:
