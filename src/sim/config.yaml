@@ -12,13 +12,13 @@ training:
   seed: 42
 
 rl:
-  learning_rate: 0.01
-  value_learning_rate: 0.01
+  learning_rate: 0.001
+  value_learning_rate: 0.001
   gamma: 0.99
-  entropy_scale: 0.5
+  entropy_scale: 0.1
   value_loss_scale: 0.01
   grad_clip: 10.0
-  normalize_returns: false
+  normalize_returns: true
   use_baseline: true
   init2zeros: false
   load_net: false
@@ -33,7 +33,7 @@ action:
   max_wheel_vel: 5.0  # rev/s (5 Hz)
 
 reward:
-  step: 10.0
+  step: 5.0
   pitch_coef: 0.5
   action_coef: 0.001
   yaw_coef: 0.1
