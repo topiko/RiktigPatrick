@@ -167,7 +167,10 @@ def plot_state_history(
 
     for ax, k in zip(axarr, plot_groups.groups()):
         for g in plot_groups[k]:
-            data = history[:, idx_dict[g]]
+            idx = idx_dict[g]
+            if isinstance(idx, np.ndarray):
+                idx = idx[0] if len(idx) == 1 else idx
+            data = history[:, idx]
             # Apply unit conversion if needed
             if g in conversions:
                 data = data * conversions[g]
