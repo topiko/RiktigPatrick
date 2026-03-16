@@ -175,5 +175,5 @@ if __name__ == "__main__":
                 MAX_RETURN = mean_return
 
             log.info(
-                f"Episode {episode:<6d} (bs={len(full_tapes):4d}) --> {mean_return:6.02f} \u00b1 {std_return:5.02f}, steps={mean_steps:.0f}, V_loss={value_loss:.02f}"
+                f"Episode {episode:<6d} (bs={len(full_tapes):4d}) --> {mean_return:6.02f} \u00b1 {std_return:5.02f}, mean_steps={mean_steps:.0f}, V_loss={value_loss:.02f}"
             )
