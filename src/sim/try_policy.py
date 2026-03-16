@@ -56,9 +56,9 @@ def run_episode(
 ) -> list[Tape] | None:
     # Unwrap to get actual env
     env = rp_env
-    while hasattr(env, 'env'):
+    while hasattr(env, "env"):
         env = env.env
-    
+
     for rollout in range(nrollouts):
         agent.rollout_index = rollout
         obs_d, _ = rp_env.reset(seed=seed)
@@ -110,6 +110,33 @@ def plot_state_history(
     for k in idx_dict:
         print(f"\t{k}")
 
+    # Units mapping
+    units = {
+        "filter/rp_pitch": "deg",
+        "sens/gyro_0": "rad/s",
+        "sens/gyro_1": "rad/s",
+        "sens/gyro_2": "rad/s",
+        "sens/acc_0": "m/s²",
+        "sens/acc_1": "m/s²",
+        "sens/acc_2": "m/s²",
+        "sens/left_wheel_vel": "rad/s",
+        "sens/right_wheel_vel": "rad/s",
+        "sens/head_pitch": "rad",
+        "sens/head_turn": "rad",
+        "simul/rp_pitch": "deg",
+        "act/left_wheel": "rad/s",
+        "act/right_wheel": "rad/s",
+        "env/time": "s",
+        "reward": "",
+        "reward/step": "",
+        "reward/pitch": "",
+        "reward/action": "",
+        "reward/yaw": "",
+        "return": "",
+        "value_estimate": "",
+        "advantage": "",
+    }
+
     n_rows = len(plot_groups)
 
     _, axarr = plt.subplots(n_rows, 1, sharex=True, figsize=(8, n_rows * 2))
@@ -118,7 +145,9 @@ def plot_state_history(
     for ax, k in zip(axarr, plot_groups.groups()):
         for g in plot_groups[k]:
             data = history[:, idx_dict[g]]
-            ax.plot(times, data, "-|", markersize=5, lw=1, label=g)
+            unit = units.get(g, "")
+            label = f"{g} [{unit}]" if unit else g
+            ax.plot(times, data, "-|", markersize=5, lw=1, label=label)
         ax.set_title(f"{k}")
         ax.spines[["right", "top"]].set_visible(False)
         ax.legend(frameon=False)
@@ -167,7 +196,7 @@ if __name__ == "__main__":
 
     # Access the underlying env (unwrap RecordVideo if present)
     env = rpenv
-    while hasattr(env, 'env'):
+    while hasattr(env, "env"):
         env = env.env
     history, idx_d = env.state.history
 
@@ -184,9 +213,11 @@ if __name__ == "__main__":
     except:
         print("Warning: Could not load policy net, using zeros")
         policy_net = None
-    
+
     if policy_net is not None:
-        value_estimates = compute_value_estimates(policy_net, history, idx_d, MODEL_INPUT)
+        value_estimates = compute_value_estimates(
+            policy_net, history, idx_d, MODEL_INPUT
+        )
     else:
         value_estimates = np.zeros(len(history))
     history = np.column_stack([history, value_estimates])
@@ -198,9 +229,19 @@ if __name__ == "__main__":
     idx_d["advantage"] = np.array([history.shape[1] - 1])
 
     plot_groups = PlotGroups()
-    plot_groups.__dict__['returns'] = ("return", "value_estimate", "advantage")
-    plot_groups.__dict__['reward'] = ("reward/step", "reward/pitch", "reward/action", "reward/yaw")
-    plot_groups.__dict__['sensors'] = ("filter/rp_pitch", "sens/gyro_0", "sens/gyro_1", "sens/gyro_2")
+    plot_groups.__dict__["returns"] = ("return", "value_estimate", "advantage")
+    plot_groups.__dict__["reward"] = (
+        "reward/step",
+        "reward/pitch",
+        "reward/action",
+        "reward/yaw",
+    )
+    plot_groups.__dict__["sensors"] = (
+        "filter/rp_pitch",
+        "sens/gyro_0",
+        "sens/gyro_1",
+        "sens/gyro_2",
+    )
 
     plot_state_history(history=history, idx_dict=idx_d, plot_groups=plot_groups)
     plt.savefig("plots/episode.png", dpi=100)
