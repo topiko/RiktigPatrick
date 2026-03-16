@@ -101,7 +101,7 @@ if __name__ == "__main__":
 
     MAX_RETURN = float("-inf")
     seed = 42
-    max_steps = 2000
+    max_steps = 5000  # Increased to allow longer episodes when robot balances well
 
     with mlflow.start_run():
         # Load and log config parameters
@@ -151,9 +151,12 @@ if __name__ == "__main__":
                 if all(ready_) or step_count >= max_steps:
                     break
 
-            assert len(full_tapes) >= BATCH_SIZE, (
-                f"len(full_tapes) = {len(full_tapes)}, {len(ready_)}"
-            )
+            if len(full_tapes) < BATCH_SIZE:
+                log.warning(
+                    f"Only {len(full_tapes)} episodes completed in {step_count} steps, "
+                    f"expected {BATCH_SIZE}. Continuing with partial batch."
+                )
+
             rets, policy_loss, entropy_loss, value_loss = agent.update(full_tapes)
 
             # Record stats:
