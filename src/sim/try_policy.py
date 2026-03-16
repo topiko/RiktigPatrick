@@ -207,6 +207,22 @@ def plot_state_history(
         ax.spines[["right", "top"]].set_visible(False)
         ax.legend(frameon=False)
 
+        # Add total return and value loss text to the returns plot
+        if k == "returns":
+            total_return = history[:, idx_dict["return"][0]][0]
+            value_estimates = history[:, idx_dict["value_estimate"][0]]
+            returns_arr = history[:, idx_dict["return"][0]]
+            value_loss = np.mean((value_estimates - returns_arr) ** 2)
+            ax.text(
+                0.02,
+                0.95,
+                f"Total Return: {total_return:.2f}\nValue Loss: {value_loss:.2f}",
+                transform=ax.transAxes,
+                fontsize=10,
+                verticalalignment="top",
+                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
+            )
+
         # Add vertical red line at trim cutoff
         if trim_end_steps > 0 and len(action_times) > trim_end_steps:
             ax.axvline(
