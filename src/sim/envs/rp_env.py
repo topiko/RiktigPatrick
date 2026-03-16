@@ -310,14 +310,8 @@ class GymRP(gymnasium.Env):
         pitch = abs(self.state.euler[1])
         step_reward = REWARD_CONFIG["step"]
         pitch_penalty = -pitch * REWARD_CONFIG["pitch_coef"]
-        action_penalty = (
-            -REWARD_CONFIG["action_coef"]
-            * (
-                float(
-                    self._prev_action.left_wheel**2 + self._prev_action.right_wheel**2
-                )
-            )
-            / MAXV**2
+        action_penalty = -REWARD_CONFIG["action_coef"] * float(
+            self._prev_action.left_wheel**2 + self._prev_action.right_wheel**2
         )
         yaw_penalty = -REWARD_CONFIG["yaw_coef"] * (
             float(self._prev_action.left_wheel - self._prev_action.right_wheel) ** 2
