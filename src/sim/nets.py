@@ -6,7 +6,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from sim.sim_config import MAX_V, OBS_SCALES
+from sim.sim_config import MAX_V, OBS_SCALES, RAD2DEG, RAD2REV
 
 log = logging.getLogger(__name__)
 
@@ -81,20 +81,25 @@ class PolicyNetwork(nn.Module):
         """Forward pass returns policy means, stds, and value estimate.
 
         Args:
-            x: Observation from the environment (normalized in this method)
+            x: Observation from the environment (in simulation units: rad/s, deg, s)
 
         Returns:
-            action_means: predicted mean of the normal distribution
-            action_stddevs: predicted standard deviation
+            action_means: predicted mean of the normal distribution (rad/s)
+            action_stddevs: predicted standard deviation (rad/s)
             value: state value estimate
         """
         x = x.clone()
 
-        # Normalize observations (input order: pitch, gyro(3), left_vel, right_vel, time)
-        x[:, 0] = x[:, 0] / OBS_SCALES["filter/rp_pitch"]
-        x[:, 1:4] = x[:, 1:4] / OBS_SCALES["sens/gyro"]
-        x[:, 4] = x[:, 4] / OBS_SCALES["sens/left_wheel_vel"]
-        x[:, 5] = x[:, 5] / OBS_SCALES["sens/right_wheel_vel"]
+        # Convert to display units and normalize
+        # Input order: pitch[deg], gyro[rad/s](3), left_vel[rad/s], right_vel[rad/s], time[s]
+        x[:, 0] = x[:, 0] / OBS_SCALES["filter/rp_pitch"]  # pitch already in deg
+        x[:, 1:4] = x[:, 1:4] * RAD2DEG / OBS_SCALES["sens/gyro"]  # rad/s -> deg/s
+        x[:, 4] = (
+            x[:, 4] * RAD2REV / OBS_SCALES["sens/left_wheel_vel"]
+        )  # rad/s -> rev/s
+        x[:, 5] = (
+            x[:, 5] * RAD2REV / OBS_SCALES["sens/right_wheel_vel"]
+        )  # rad/s -> rev/s
         x[:, 6] = x[:, 6] / (x[:, 6] + OBS_SCALES["env/time"])
 
         shared_features = self.shared_net(x)

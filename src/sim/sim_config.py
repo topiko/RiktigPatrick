@@ -1,6 +1,8 @@
 import os
 import yaml
 
+import numpy as np
+
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
 
 with open(CONFIG_PATH, "r") as f:
@@ -26,4 +28,9 @@ TRAIN_CONFIG = _config["training"]
 REWARD_CONFIG = _config["reward"]
 ACTION_CONFIG = _config["action"]
 
-MAX_V = ACTION_CONFIG["max_wheel_vel"]
+# MAX_V in rev/s, convert to rad/s for internal use
+MAX_V = ACTION_CONFIG["max_wheel_vel"] * 2 * np.pi  # rad/s
+
+# Unit conversion factors
+RAD2REV = 1.0 / (2 * np.pi)  # rad to rev
+RAD2DEG = 180.0 / np.pi  # rad to deg

@@ -110,22 +110,22 @@ def plot_state_history(
     for k in idx_dict:
         print(f"\t{k}")
 
-    # Units mapping
+    # Units mapping (display units)
     units = {
         "filter/rp_pitch": "deg",
-        "sens/gyro_0": "rad/s",
-        "sens/gyro_1": "rad/s",
-        "sens/gyro_2": "rad/s",
+        "sens/gyro_0": "deg/s",
+        "sens/gyro_1": "deg/s",
+        "sens/gyro_2": "deg/s",
         "sens/acc_0": "m/s²",
         "sens/acc_1": "m/s²",
         "sens/acc_2": "m/s²",
-        "sens/left_wheel_vel": "rad/s",
-        "sens/right_wheel_vel": "rad/s",
+        "sens/left_wheel_vel": "rev/s",
+        "sens/right_wheel_vel": "rev/s",
         "sens/head_pitch": "rad",
         "sens/head_turn": "rad",
         "simul/rp_pitch": "deg",
-        "act/left_wheel": "rad/s",
-        "act/right_wheel": "rad/s",
+        "act/left_wheel": "rev/s",
+        "act/right_wheel": "rev/s",
         "env/time": "s",
         "reward": "",
         "reward/step": "",
@@ -137,6 +137,17 @@ def plot_state_history(
         "advantage": "",
     }
 
+    # Conversion factors (multiply to convert from sim units to display units)
+    conversions = {
+        "sens/gyro_0": 180.0 / 3.14159,  # rad/s -> deg/s
+        "sens/gyro_1": 180.0 / 3.14159,
+        "sens/gyro_2": 180.0 / 3.14159,
+        "sens/left_wheel_vel": 1.0 / (2 * 3.14159),  # rad/s -> rev/s
+        "sens/right_wheel_vel": 1.0 / (2 * 3.14159),
+        "act/left_wheel": 1.0 / (2 * 3.14159),  # rad/s -> rev/s
+        "act/right_wheel": 1.0 / (2 * 3.14159),
+    }
+
     n_rows = len(plot_groups)
 
     _, axarr = plt.subplots(n_rows, 1, sharex=True, figsize=(8, n_rows * 2))
@@ -145,6 +156,9 @@ def plot_state_history(
     for ax, k in zip(axarr, plot_groups.groups()):
         for g in plot_groups[k]:
             data = history[:, idx_dict[g]]
+            # Apply unit conversion if needed
+            if g in conversions:
+                data = data * conversions[g]
             unit = units.get(g, "")
             label = f"{g} [{unit}]" if unit else g
             ax.plot(times, data, "-|", markersize=5, lw=1, label=label)
