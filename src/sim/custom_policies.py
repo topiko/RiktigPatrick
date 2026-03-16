@@ -1,14 +1,17 @@
 import numpy as np
 import torch
 
-from sim.envs.rp_env import MAXV
-from sim.nets import PolicyNetwork
-from sim.sim_config import MODEL_INPUT
+from sim.envs.rp_env import MAXV, GymRP
+from sim.nets import AccelPolicyNetwork, VelocityPolicyNetwork
+from sim.sim_config import MODEL_INPUT, N_ACTIONS, POLICY_TYPE
 
 
 class NetPolicy:
     def __init__(self):
-        self._net = PolicyNetwork.from_file()
+        if POLICY_TYPE == "velocity":
+            self._net = VelocityPolicyNetwork.from_file()
+        elif POLICY_TYPE == "acceleration":
+            self._net = AccelPolicyNetwork.from_file()
         self._lock_head = True
 
     def sample_action(self, obs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
@@ -16,22 +19,25 @@ class NetPolicy:
             1, -1
         )
 
-        act = self._net(obs_t)[0].detach().numpy().astype(float)
-        act = act[0]
-        if any(act > MAXV):
-            raise ValueError()
+        if POLICY_TYPE == "velocity":
+            action_means, _, _ = self._net(obs_t)
+            action = action_means.detach().numpy().astype(float)
+            action = action[0]
+            if any(abs(action) > MAXV):
+                raise ValueError()
+            return {
+                "act/velocity_left_wheel": action[0:1].reshape(1, 1),
+                "act/velocity_right_wheel": action[1:2].reshape(1, 1),
+            }
 
-        d = {
-            "act/left_wheel": act[0].reshape(1, 1),
-            "act/right_wheel": act[1].reshape(1, 1),
-        }
-        if self._lock_head:
-            return d
-
-        d["act/head_pitch"] = np.array([0])
-        d["act/head_turn"] = np.array([0])
-
-        return d
+        elif POLICY_TYPE == "acceleration":
+            left_logits, right_logits, _ = self._net(obs_t)
+            left_idx = torch.argmax(left_logits, dim=-1).cpu().numpy()
+            right_idx = torch.argmax(right_logits, dim=-1).cpu().numpy()
+            return {
+                "act/acceleration_left_wheel": left_idx,
+                "act/acceleration_right_wheel": right_idx,
+            }
 
 
 class PIDPolicy:
@@ -56,18 +62,20 @@ class PIDPolicy:
         I = 0
 
         a = self._kp * P + self._ki * I + self._kd * D
-        v = obs["sens/left_wheel_vel"][0] + a * self._dt
-        v = np.array([v])
-        np.clip(v, -MAXV, MAXV, out=v)
 
-        d = {
-            "act/left_wheel": v,
-            "act/right_wheel": v,
-        }
-        if self._lock_head:
-            return d
+        if POLICY_TYPE == "velocity":
+            v = obs["sens/left_wheel_vel"][0] + a * self._dt
+            v = np.array([v])
+            np.clip(v, -MAXV, MAXV, out=v)
+            return {
+                "act/velocity_left_wheel": v.reshape(1, 1),
+                "act/velocity_right_wheel": v.reshape(1, 1),
+            }
 
-        d["act/head_pitch"] = np.array([0])
-        d["act/head_turn"] = np.array([0])
-
-        return d
+        elif POLICY_TYPE == "acceleration":
+            idx = int((a / MAXV + 1) * (N_ACTIONS - 1) / 2)
+            idx = max(0, min(N_ACTIONS - 1, idx))
+            return {
+                "act/acceleration_left_wheel": np.array([idx]),
+                "act/acceleration_right_wheel": np.array([idx]),
+            }

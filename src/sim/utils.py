@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from gymnasium.envs.registration import register
+from gymnasium import spaces
+
+from sim.sim_config import POLICY_TYPE
 
 
 def model_indim(
@@ -20,12 +23,14 @@ def model_indim(
 
 
 def actiondim(rpenv: gym.Env | gym.vector.AsyncVectorEnv) -> int:
-    if isinstance(rpenv, gym.vector.AsyncVectorEnv):
-        act_space = rpenv.single_action_space
-    else:
-        act_space = rpenv.action_space
-
-    return sum(v.shape[0] for v in act_space.values())
+    if POLICY_TYPE == "velocity":
+        if isinstance(rpenv, gym.vector.AsyncVectorEnv):
+            act_space = rpenv.single_action_space
+        else:
+            act_space = rpenv.action_space
+        return sum(v.shape[0] for v in act_space.values())
+    elif POLICY_TYPE == "acceleration":
+        return 2  # Two wheels
 
 
 def register_and_make_env(
@@ -77,10 +82,10 @@ class Tape:
 
     def build(self) -> Tape:
         self._is_ready = True
-        self.probs = torch.concat(self.probs, axis=0)
+        self.probs = torch.stack(self.probs, axis=0)
         self.rewards = np.array(self.rewards)
         self.values = torch.concat(self.values, axis=0)
-        self.entropies = torch.concat(self.entropies, axis=0)
+        self.entropies = torch.stack(self.entropies, axis=0)
         return self
 
     def __len__(self) -> int:

@@ -25,13 +25,21 @@ rl:
   trim_end_steps: 0
 
 env:
-  ctrl_mode: "vel"
   lock_head: true
   step_time: 0.01
   randomize: false
 
-action:
-  max_wheel_vel: 5.0  # rev/s (5 Hz)
+policy:
+  type: "acceleration"  # "velocity" or "acceleration"
+  
+  # Velocity mode: continuous Gaussian policy
+  velocity:
+    max_wheel_vel: 5.0  # rev/s (5 Hz)
+  
+  # Acceleration mode: discrete Categorical policy
+  acceleration:
+    n_actions: 5  # discrete actions per wheel: {-MAX, ..., 0, ..., +MAX}
+    max_wheel_acc: 10.0  # rev/s²
 
 reward:
   step: 1.0

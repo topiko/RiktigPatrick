@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+
 print("Starting...", flush=True)
 
 import gymnasium as gym
@@ -10,6 +11,7 @@ from gymnasium.envs.registration import register
 from gymnasium.wrappers import RecordEpisodeStatistics
 
 from sim.algos import REINFORCE
+
 print("Imported algos", flush=True)
 
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE, RL_CONFIG, TRAIN_CONFIG
@@ -32,12 +34,14 @@ if __name__ == "__main__":
     indim = model_indim(rpenv, MODEL_INPUT)
     actdim = actiondim(rpenv)
     print(f"indim={indim}, actdim={actdim}", flush=True)
-    
+
     agent = REINFORCE(
-        indim, actdim, MODEL_INPUT,
+        indim,
+        actdim,
+        MODEL_INPUT,
         use_baseline=RL_CONFIG["use_baseline"],
         init2zeros=RL_CONFIG["init2zeros"],
-        load_net=RL_CONFIG["load_net"]
+        load_net=RL_CONFIG["load_net"],
     )
     # Override learning rate and entropy from config
     agent.learning_rate = RL_CONFIG["learning_rate"]
@@ -50,11 +54,14 @@ if __name__ == "__main__":
         tapes = [Tape(i) for i in range(NROLLOUTS)]
         tapes = run_episode(agent, rpenv, nrollouts=NROLLOUTS, tapes=tapes)
 
-        rets, val_loss = agent.update(tapes)
+        rets, policy_loss, entropy_loss, val_loss = agent.update(tapes)
         if episode % TRAIN_CONFIG["save_frequency"] == 0:
             mean_ret = float(np.mean(rets))
             if mean_ret > (MAX_RETURN + 5):
                 print(f"Best return {mean_ret:.02f} -> saving", flush=True)
                 agent.net.store()
                 MAX_RETURN = mean_ret
-            print(f"Episode {episode:<6d} ({NROLLOUTS} rollouts) --> {mean_ret:.3f}", flush=True)
+            print(
+                f"Episode {episode:<6d} ({NROLLOUTS} rollouts) --> {mean_ret:.3f}",
+                flush=True,
+            )

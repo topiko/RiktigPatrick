@@ -8,23 +8,30 @@ from gymnasium import spaces
 
 from filters.qutils import q2eul
 from riktigpatric.patrick import State, StepAction
-from sim.sim_config import MAX_V, REWARD_CONFIG
+from sim.sim_config import (
+    MAX_V,
+    MAX_WHEEL_ACC,
+    MAX_WHEEL_VEL,
+    N_ACTIONS,
+    POLICY_TYPE,
+    REWARD_CONFIG,
+)
 
 BODY_D = 0.05
-BODY_H = 0.25  # 0.25
+BODY_H = 0.25
 BODY_W = 0.1
-BODY_M = 0.4  # 0.400
+BODY_M = 0.4
 
 WHEEL_D = BODY_D * 2
 
 HEAD_D = 0.03
 HEAD_H = 0.1
 HEAD_W = 0.1
-HEAD_M = 0.2  # 0.200
+HEAD_M = 0.2
 
 FORCERANGE = 15
-MAXV = MAX_V  # Alias for backward compatibility
-MAXA = MAXV / 0.5
+MAXV = MAX_V
+MAXA = MAX_WHEEL_ACC
 
 
 class MujocoRP:
@@ -216,55 +223,56 @@ class GymRP(gymnasium.Env):
         render_mode="rgb_array",
         record: bool = False,
         lock_head: bool = True,
-        ctrl_mode: str = "vel",
         step_time: float = 0.01,
         randomize: bool = False,
     ):
         self._randomize = randomize
-        self._init_pitch_scale = 2.0  # deg
-        self._init_wheel_vel_scale = 1.0  # rad/s
+        self._init_pitch_scale = 2.0
+        self._init_wheel_vel_scale = 1.0
         self.lock_head = lock_head
+        self.policy_type = POLICY_TYPE
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
 
-        self.simul_timestep = 0.002  # MuJoCo default 0.002
+        self.simul_timestep = 0.002
         self.dm_env.model.opt.timestep = self.simul_timestep
 
         self.state = State(keys=state_keys, record=record)
 
         self.observation_space = self.state.to_obs_space()
 
-        # TODO: import these from somwehere
-        max_w_wheel = np.pi * 2 * 5
-        max_w_head = np.pi * 2
-
-        action_space = {
-            "act/left_wheel": spaces.Box(
-                -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
-            ),
-            "act/right_wheel": spaces.Box(
-                -max_w_wheel, max_w_wheel, shape=(1,), dtype=float
-            ),
-        }
-
-        if not lock_head:
-            action_space.update(
-                {
-                    "act/head_pitch": spaces.Box(
-                        -max_w_head, max_w_head, shape=(1,), dtype=float
-                    ),
-                    "act/head_turn": spaces.Box(
-                        -max_w_head, max_w_head, shape=(1,), dtype=float
-                    ),
-                }
-            )
-
+        action_space = self._build_action_space()
         self.action_space = spaces.Dict(action_space)
         self.render_mode = render_mode
-        self.step_time = step_time  # s
+        self.step_time = step_time
         self.metadata["render_fps"] = int(1 / self.step_time)
-        self.ctrl_mode = ctrl_mode
         self._prev_action = StepAction()
+
+    def _build_action_space(self) -> dict:
+        if self.policy_type == "velocity":
+            return {
+                "act/velocity_left_wheel": spaces.Box(
+                    -MAX_WHEEL_VEL, MAX_WHEEL_VEL, shape=(1,), dtype=float
+                ),
+                "act/velocity_right_wheel": spaces.Box(
+                    -MAX_WHEEL_VEL, MAX_WHEEL_VEL, shape=(1,), dtype=float
+                ),
+            }
+        elif self.policy_type == "acceleration":
+            return {
+                "act/acceleration_left_wheel": spaces.Discrete(N_ACTIONS),
+                "act/acceleration_right_wheel": spaces.Discrete(N_ACTIONS),
+            }
+        else:
+            raise ValueError(f"Invalid policy type: {self.policy_type}")
+
+    @staticmethod
+    def _idx_to_acc(idx: int) -> float:
+        """Map discrete index to acceleration value.
+
+        N=5 example: idx {0,1,2,3,4} → {-MAX, -MAX/2, 0, +MAX/2, +MAX}
+        """
+        return (2 * idx / (N_ACTIONS - 1) - 1) * MAX_WHEEL_ACC
 
     def _update_obs(self, action_time: float, obs_time: float):
         body_quat = self.dm_env.bind(self.body_quat).sensordata.copy()
@@ -395,45 +403,65 @@ class GymRP(gymnasium.Env):
             return self.dm_env.render(camera_id=0, height=480, width=640)
 
     def step(
-        self, action: Optional[Union[dict[str, np.ndarray], StepAction]] = None
+        self, action: Optional[dict[str, np.ndarray]] = None
     ) -> tuple[dict, float, bool, bool, dict]:
-        # Action at time t
-        if action is not None:
-            if isinstance(action, dict):
-                action = StepAction().from_dict(action)
-
-            self._prev_action = action
-
-            if self.ctrl_mode == "acc":
-                mul_ = self.step_time
-                vl = self.state.obs.left_wheel_vel
-                vr = self.state.obs.right_wheel_vel
-            elif self.ctrl_mode == "vel":
-                mul_ = 1
-                vl = 0
-                vr = 0
-            else:
-                raise KeyError(f"Invalid ctrl_mode {self.ctrl_mode}")
-
-            self.dm_env.bind(self.left_wheel_act).ctrl = action.left_wheel * mul_ + vl
-            self.dm_env.bind(self.right_wheel_act).ctrl = (
-                action.right_wheel * mul_ + vr
-            )  # rad/s
-            if not self.lock_head:
-                self.dm_env.bind(self.head_pitch_act).ctrl = action.head_pitch  # rad/s
-                self.dm_env.bind(self.head_turn_act).ctrl = action.head_turn  # rad/s
-
-        # MuJoCo simul loop:
         t0 = self.dm_env.data.time
+
+        if action is not None:
+            if self.policy_type == "velocity":
+                left_vel = action["act/velocity_left_wheel"][0]
+                right_vel = action["act/velocity_right_wheel"][0]
+                self._prev_action = StepAction().from_dict(
+                    {
+                        "act/left_wheel": np.array([left_vel]),
+                        "act/right_wheel": np.array([right_vel]),
+                    }
+                )
+
+            elif self.policy_type == "acceleration":
+                left_idx_arr = action["act/acceleration_left_wheel"]
+                right_idx_arr = action["act/acceleration_right_wheel"]
+                left_idx = int(
+                    left_idx_arr.item()
+                    if hasattr(left_idx_arr, "item")
+                    else left_idx_arr
+                )
+                right_idx = int(
+                    right_idx_arr.item()
+                    if hasattr(right_idx_arr, "item")
+                    else right_idx_arr
+                )
+
+                left_acc = self._idx_to_acc(left_idx)
+                right_acc = self._idx_to_acc(right_idx)
+
+                current_left_vel = self.state.obs.left_wheel_vel[0]
+                current_right_vel = self.state.obs.right_wheel_vel[0]
+
+                dt = self.step_time
+                left_vel = current_left_vel + left_acc * dt
+                right_vel = current_right_vel + right_acc * dt
+
+                left_vel = np.clip(left_vel, -MAX_WHEEL_VEL, MAX_WHEEL_VEL)
+                right_vel = np.clip(right_vel, -MAX_WHEEL_VEL, MAX_WHEEL_VEL)
+
+                self._prev_action = StepAction().from_dict(
+                    {
+                        "act/left_wheel": np.array([left_vel]),
+                        "act/right_wheel": np.array([right_vel]),
+                    }
+                )
+
+            self.dm_env.bind(self.left_wheel_act).ctrl = self._prev_action.left_wheel
+            self.dm_env.bind(self.right_wheel_act).ctrl = self._prev_action.right_wheel
+
         t = t0
         while t < t0 + self.step_time:
             self.dm_env.step()
             t = self.dm_env.data.time
 
-        # Obs at time t + dt
         self._update_obs(action_time=t0, obs_time=t)
 
-        # Rewards at t + dt
         reward, reward_info = self._get_reward()
 
         full_reward_info = {"reward": reward}

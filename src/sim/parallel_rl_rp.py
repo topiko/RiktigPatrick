@@ -27,7 +27,14 @@ from mlflow import MlflowClient
 
 from sim.algos import REINFORCE
 from sim.envs.rp_env import MAXA, MAXV
-from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE, RL_CONFIG, TRAIN_CONFIG
+from sim.sim_config import (
+    ENV_CONFIG,
+    MODEL_INPUT,
+    OBS_SPACE,
+    POLICY_TYPE,
+    RL_CONFIG,
+    TRAIN_CONFIG,
+)
 from sim.utils import Tape, register_and_make_env
 
 load_dotenv()  # Loads .env from project root
@@ -73,7 +80,10 @@ if __name__ == "__main__":
         for k, v in rpenv_p.single_observation_space.items()
         if k in MODEL_INPUT
     )
-    actiondim = sum(v.shape[0] for v in rpenv_p.single_action_space.values())
+    if POLICY_TYPE == "velocity":
+        actiondim = sum(v.shape[0] for v in rpenv_p.single_action_space.values())
+    elif POLICY_TYPE == "acceleration":
+        actiondim = 2  # Two wheels, each with discrete actions
 
     agent = REINFORCE(
         indim,

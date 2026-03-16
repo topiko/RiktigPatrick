@@ -40,11 +40,33 @@ ENV_CONFIG = _config["env"]
 RL_CONFIG = _config["rl"]
 TRAIN_CONFIG = _config["training"]
 REWARD_CONFIG = _config["reward"]
-ACTION_CONFIG = _config["action"]
+POLICY_CONFIG = _config["policy"]
 
-# MAX_V: max wheel velocity in rev/s (from config), converted to rad/s for internal use
-# The network outputs actions in rad/s, but config specifies limits in human-friendly rev/s
-MAX_V = ACTION_CONFIG["max_wheel_vel"] * 2 * np.pi  # rev/s → rad/s
+# Policy type: "velocity" or "acceleration"
+POLICY_TYPE = POLICY_CONFIG["type"]
+
+# Velocity mode limits
+if POLICY_TYPE == "velocity":
+    MAX_WHEEL_VEL = (
+        POLICY_CONFIG["velocity"]["max_wheel_vel"] * 2 * np.pi
+    )  # rev/s → rad/s
+    N_ACTIONS = None
+    MAX_WHEEL_ACC = None
+
+# Acceleration mode limits
+elif POLICY_TYPE == "acceleration":
+    N_ACTIONS = POLICY_CONFIG["acceleration"]["n_actions"]
+    MAX_WHEEL_ACC = (
+        POLICY_CONFIG["acceleration"]["max_wheel_acc"] * 2 * np.pi
+    )  # rev/s² → rad/s²
+    MAX_WHEEL_VEL = (
+        POLICY_CONFIG["velocity"]["max_wheel_vel"] * 2 * np.pi
+    )  # rev/s → rad/s (for clipping)
+else:
+    raise ValueError(f"Invalid policy type: {POLICY_TYPE}")
+
+# Backward compatibility aliases
+MAX_V = MAX_WHEEL_VEL
 
 # Unit conversion factors (multiply to convert from SI to display units)
 RAD2REV = 1.0 / (2 * np.pi)  # rad/s → rev/s

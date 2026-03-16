@@ -1,10 +1,14 @@
 import numpy as np
 import torch
-from riktigpatric.patrick import StepAction
+from torch.distributions.categorical import Categorical
 from torch.distributions.normal import Normal
 
-from sim.nets import PolicyNetwork
-from sim.sim_config import RL_CONFIG
+from sim.nets import AccelPolicyNetwork, VelocityPolicyNetwork
+from sim.sim_config import (
+    N_ACTIONS,
+    POLICY_TYPE,
+    RL_CONFIG,
+)
 from sim.utils import Tape, dict2tensor
 
 
@@ -54,27 +58,38 @@ class REINFORCE:
         self.gamma = 0.99
         self.eps = 1e-6
         self.entropy_scale = RL_CONFIG["entropy_scale"]
+        self.policy_type = POLICY_TYPE
 
-        # Detect device (CUDA if available)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}", flush=True)
 
-        # Combined actor-critic network
-        self.net = PolicyNetwork(
-            obs_space_dims, action_space_dims, init2zeros=init2zeros
-        )
+        if self.policy_type == "velocity":
+            self.net = VelocityPolicyNetwork(
+                obs_space_dims, action_space_dims, init2zeros=init2zeros
+            )
+        elif self.policy_type == "acceleration":
+            self.net = AccelPolicyNetwork(
+                obs_space_dims, N_ACTIONS, init2zeros=init2zeros
+            )
         self.net = self.net.to(self.device)
 
         if load_net:
             self.net = self.net.load()
             self.net = self.net.to(self.device)
 
-        # Separate learning rates: higher for value network
-        policy_params = (
-            list(self.net.policy_encoder.parameters())
-            + list(self.net.policy_mean_net.parameters())
-            + list(self.net.policy_stddev_net.parameters())
-        )
+        if self.policy_type == "velocity":
+            policy_params = (
+                list(self.net.policy_encoder.parameters())
+                + list(self.net.policy_mean_net.parameters())
+                + list(self.net.policy_stddev_net.parameters())
+            )
+        elif self.policy_type == "acceleration":
+            policy_params = (
+                list(self.net.policy_encoder.parameters())
+                + list(self.net.left_wheel_logits.parameters())
+                + list(self.net.right_wheel_logits.parameters())
+            )
+
         value_params = list(self.net.value_encoder.parameters()) + list(
             self.net.value_head.parameters()
         )
@@ -101,22 +116,49 @@ class REINFORCE:
     ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor, torch.Tensor]:
         obs_t = dict2tensor({k: obs[k] for k in self.model_input}).to(self.device)
 
-        action_means, action_stddevs, value = self.net(obs_t)
+        if self.policy_type == "velocity":
+            action_means, action_stddevs, value = self.net(obs_t)
+            distrib = Normal(action_means, action_stddevs + self.eps)
+            action = distrib.sample()
+            probs = distrib.log_prob(action)
+            entropy = distrib.entropy()
+            action = action.cpu().numpy()
+            return (
+                {
+                    "act/velocity_left_wheel": action[0, 0:1],
+                    "act/velocity_right_wheel": action[0, 1:2],
+                },
+                probs,
+                value,
+                entropy,
+            )
 
-        distrib = Normal(action_means, action_stddevs + self.eps)
+        elif self.policy_type == "acceleration":
+            left_logits, right_logits, value = self.net(obs_t)
 
-        action = distrib.sample()
-        probs = distrib.log_prob(action)
-        entropy = distrib.entropy()
+            left_dist = Categorical(logits=left_logits)
+            right_dist = Categorical(logits=right_logits)
 
-        action = action.cpu().numpy()
+            left_idx = left_dist.sample()
+            right_idx = right_dist.sample()
 
-        return (
-            StepAction().from_array(action, lock_head=True).to_dict(),
-            probs,
-            value,
-            entropy,
-        )
+            left_log_prob = left_dist.log_prob(left_idx)
+            right_log_prob = right_dist.log_prob(right_idx)
+            probs = left_log_prob + right_log_prob
+
+            left_entropy = left_dist.entropy()
+            right_entropy = right_dist.entropy()
+            entropy = left_entropy + right_entropy
+
+            return (
+                {
+                    "act/acceleration_left_wheel": left_idx.cpu().numpy(),
+                    "act/acceleration_right_wheel": right_idx.cpu().numpy(),
+                },
+                probs,
+                value,
+                entropy,
+            )
 
     def update(self, tapes: list[Tape]) -> tuple[np.ndarray, float, float, float]:
         all_rewards = np.concatenate([t.rewards for t in tapes])
