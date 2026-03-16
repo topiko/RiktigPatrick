@@ -319,10 +319,8 @@ class GymRP(gymnasium.Env):
             )
             / MAXV**2
         )
-        yaw_penalty = (
-            -REWARD_CONFIG["yaw_coef"]
-            * (float(self._prev_action.left_wheel - self._prev_action.right_wheel) ** 2)
-            / MAXV**2
+        yaw_penalty = -REWARD_CONFIG["yaw_coef"] * (
+            float(self._prev_action.left_wheel - self._prev_action.right_wheel) ** 2
         )
         total = step_reward + pitch_penalty + action_penalty + yaw_penalty
         info = {
