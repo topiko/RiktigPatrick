@@ -273,13 +273,23 @@ if __name__ == "__main__":
         entropy_estimates = tape.entropies.detach().cpu().numpy()
     else:
         entropy_estimates = tape.entropies.sum(dim=1).detach().cpu().numpy()
+
     # Match history length (may differ by 1 due to timing)
-    if len(entropy_estimates) > len(history):
-        entropy_estimates = entropy_estimates[: len(history)]
-    elif len(entropy_estimates) < len(history):
+    # History is recorded by env, entropy by tape - they can differ by 1
+    n_history = len(history)
+    n_entropy = len(entropy_estimates)
+
+    if n_entropy > n_history:
+        # Truncate entropy to match history
+        entropy_estimates = entropy_estimates[:n_history]
+    elif n_entropy < n_history:
+        # Pad entropy with last value (not zeros)
         entropy_estimates = np.pad(
-            entropy_estimates, (0, len(history) - len(entropy_estimates))
+            entropy_estimates,
+            (0, n_history - n_entropy),
+            constant_values=entropy_estimates[-1] if n_entropy > 0 else 0,
         )
+
     history = np.column_stack([history, entropy_estimates])
     idx_d["entropy"] = np.array([history.shape[1] - 1])
 
