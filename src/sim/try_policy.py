@@ -115,6 +115,7 @@ def plot_state_history(
     idx_dict: dict[str, np.ndarray],
     plot_groups: PlotGroups | None = None,
     trim_end_steps: int = 0,
+    agent: REINFORCE | PIDPolicy | NetPolicy | None = None,
 ):
     plot_groups = plot_groups or PlotGroups()
 
@@ -214,8 +215,12 @@ def plot_state_history(
             returns_arr = history[:, idx_dict["return"][0]]
 
             # Get normalization stats from the trained network
-            return_mean = agent.net.return_mean if hasattr(agent, "net") else 0.0
-            return_std = agent.net.return_std if hasattr(agent, "net") else 1.0
+            if agent is not None and hasattr(agent, "net"):
+                return_mean = agent.net.return_mean
+                return_std = agent.net.return_std
+            else:
+                return_mean = 0.0
+                return_std = 1.0
 
             # Denormalized loss (actual MSE between predictions and returns)
             value_loss_denorm = np.mean((value_estimates - returns_arr) ** 2)
@@ -343,6 +348,7 @@ if __name__ == "__main__":
         idx_dict=idx_d,
         plot_groups=plot_groups,
         trim_end_steps=RL_CONFIG.get("trim_end_steps", 0),
+        agent=agent if agent_type == "REINFORCE" else None,
     )
 
     plot_dir = os.path.join(
