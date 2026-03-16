@@ -214,37 +214,30 @@ def plot_state_history(
             value_estimates = history[:, idx_dict["value_estimate"][0]]
             returns_arr = history[:, idx_dict["return"][0]]
 
-            # Get normalization stats from the trained network
-            if agent is not None and hasattr(agent, "net"):
-                return_mean = agent.net.return_mean
-                return_std = agent.net.return_std
-            else:
-                return_mean = 0.0
-                return_std = 1.0
-
             # Denormalized loss (actual MSE between predictions and returns)
-            value_loss_denorm = np.mean((value_estimates - returns_arr) ** 2)
+            value_loss = np.mean((value_estimates - returns_arr) ** 2)
 
-            # Normalized loss (same scale as training loss)
-            # Training uses: loss = mean((v_norm - G_norm)^2)
-            # Since v_norm = (v - mean)/std and G_norm = (G - mean)/std
-            # The normalized loss = denorm_loss / std^2
-            value_loss_normalized = value_loss_denorm / (return_std**2)
+            # Check if return normalization was used
+            if agent is not None and hasattr(agent, "net"):
+                return_std = agent.net.return_std
+                using_normalization = return_std != 1.0
+            else:
+                using_normalization = False
+
+            if using_normalization:
+                # Show both normalized and denormalized loss
+                value_loss_normalized = value_loss / (return_std**2)
+                loss_text = f"Total Return: {total_return:.2f}\nV Loss (norm): {value_loss_normalized:.2f}\nV Loss (denorm): {value_loss:.2f}"
+            else:
+                # Only show one value when not using normalization
+                loss_text = (
+                    f"Total Return: {total_return:.2f}\nV Loss: {value_loss:.2f}"
+                )
 
             ax.text(
                 0.02,
                 0.95,
-                f"Total Return: {total_return:.2f}\nV Loss (norm): {value_loss_normalized:.2f}\nV Loss (denorm): {value_loss_denorm:.2f}",
-                transform=ax.transAxes,
-                fontsize=10,
-                verticalalignment="top",
-                bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.5),
-            )
-
-            ax.text(
-                0.02,
-                0.95,
-                f"Total Return: {total_return:.2f}\nV Loss (norm): {value_loss_normalized:.2f}\nV Loss (denorm): {value_loss_denorm:.2f}",
+                loss_text,
                 transform=ax.transAxes,
                 fontsize=10,
                 verticalalignment="top",
