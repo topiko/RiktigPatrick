@@ -6,14 +6,14 @@
 # This prevents value function from being constrained by policy representation
 
 training:
-  nrollouts: 32
+  nrollouts: 16
   max_episodes: 20001
   save_frequency: 10
   seed: 42
 
 rl:
   learning_rate: 0.0003
-  value_learning_rate: 0.001
+  value_learning_rate: 0.0003
   gamma: 0.99
   entropy_scale: 0.5
   value_loss_scale: 0.01
@@ -22,12 +22,12 @@ rl:
   use_baseline: true
   init2zeros: true
   load_net: false
-  trim_end_steps: 0
+  trim_end_steps: 10
 
 env:
   lock_head: true
   step_time: 0.01
-  randomize: true
+  randomize: false
 
 policy:
   type: "acceleration"  # "velocity" or "acceleration"
@@ -46,7 +46,7 @@ reward:
   pitch_coef: 0.1
   action_coef: 0.02
   yaw_coef: 0.03
-  termination_penalty: 5.0
+  termination_penalty: 0.0
 
 model:
   model_input:

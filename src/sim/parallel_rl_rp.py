@@ -4,29 +4,14 @@ import logging
 import logging.config
 import os
 
-from datetime import datetime
-from dotenv import load_dotenv
-
-import gymnasium as gym
 import mlflow
 import numpy as np
 import torch
 import yaml
-from gymnasium import ActionWrapper
-import mlflow
-import numpy as np
-import torch
-from gymnasium import ActionWrapper
-from gymnasium.envs.registration import register
-from gymnasium.wrappers import (
-    RecordEpisodeStatistics,
-    RecordVideo,
-    TransformObservation,
-)
+from dotenv import load_dotenv
 from mlflow import MlflowClient
 
 from sim.algos import REINFORCE
-from sim.envs.rp_env import MAXA, MAXV
 from sim.sim_config import (
     ENV_CONFIG,
     MODEL_INPUT,
@@ -124,6 +109,7 @@ if __name__ == "__main__":
 
             tapes = [Tape(i) for i in range(BATCH_SIZE)]
             full_tapes = []
+            ready_ = np.zeros(BATCH_SIZE, dtype=bool)
             step_count = 0
             while True:
                 result = agent.sample_action(obs)
@@ -142,21 +128,13 @@ if __name__ == "__main__":
                     t.entropies.append(entropies[i])
                     if terminated[i] or truncated[i]:
                         full_tapes.append(t.build())
+                        ready_[i] = True
                         tapes[i] = Tape(i)
 
                 step_count += 1
-                if len(full_tapes) >= BATCH_SIZE or step_count >= max_steps:
+
+                if all(ready_):
                     break
-
-            if len(full_tapes) < BATCH_SIZE:
-                log.warning(
-                    f"Only {len(full_tapes)} episodes completed in {step_count} steps, "
-                    f"expected {BATCH_SIZE}. Continuing with partial batch."
-                )
-
-            if len(full_tapes) == 0:
-                log.warning("No episodes completed, skipping update")
-                continue
 
             rets, policy_loss, entropy_loss, value_loss = agent.update(full_tapes)
 
