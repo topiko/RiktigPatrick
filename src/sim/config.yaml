@@ -34,9 +34,9 @@ action:
 
 reward:
   step: 1.0
-  pitch_coef: 0.05
+  pitch_coef: 0.5
   action_coef: 0.0001
-  yaw_coef: 0.01
+  yaw_coef: 1.0
 
 model:
   model_input:
