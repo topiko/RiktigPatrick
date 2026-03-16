@@ -237,6 +237,7 @@ if __name__ == "__main__":
     while hasattr(env, "env"):
         env = env.env
     history, idx_d = env.state.history
+    breakpoint()
 
     # Compute return using same gamma as training (0.99)
     rewards = history[:, idx_d["reward"][0]]

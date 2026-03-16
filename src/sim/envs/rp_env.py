@@ -291,6 +291,7 @@ class GymRP(gymnasium.Env):
             true_pitch=pitch,
             action=self._prev_action,
             reward_info=full_reward_info,
+            termination=self.terminated,
         )
 
     def _get_obs(self) -> dict:
@@ -320,6 +321,7 @@ class GymRP(gymnasium.Env):
             termination_penalty = -REWARD_CONFIG.get("termination_penalty", 0.0)
             info["reward/termination"] = termination_penalty
             total += termination_penalty
+            print("TEMINATION")
         else:
             info["reward/termination"] = 0.0
 
@@ -442,10 +444,7 @@ class GymRP(gymnasium.Env):
 
         self._update_state()
 
-        reward, reward_info = self._get_reward()
-
         info = self._get_info()
-        info.update(reward_info)
 
         return (
             self._get_obs(),

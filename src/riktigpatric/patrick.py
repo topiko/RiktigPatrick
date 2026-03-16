@@ -278,6 +278,8 @@ class State:
         for k in act_keys:
             mask[idx_d[k]] = True
 
+
+        breakpoint()
         # Shift the action:
         history[:-1, mask] = history[1:, mask]
         history = history[:-1, :]
