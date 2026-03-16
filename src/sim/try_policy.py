@@ -104,6 +104,7 @@ def plot_state_history(
     history: np.ndarray,
     idx_dict: dict[str, np.ndarray],
     plot_groups: PlotGroups | None = None,
+    trim_end_steps: int = 0,
 ):
     plot_groups = plot_groups or PlotGroups()
 
@@ -159,6 +160,11 @@ def plot_state_history(
     _, axarr = plt.subplots(n_rows, 1, sharex=True, figsize=(8, n_rows * 2))
 
     times = history[:, time_idx]
+
+    # Add vertical red line at trim cutoff
+    if trim_end_steps > 0 and len(times) > trim_end_steps:
+        trim_time = times[-(trim_end_steps + 1)]
+
     for ax, k in zip(axarr, plot_groups.groups()):
         for g in plot_groups[k]:
             data = history[:, idx_dict[g]]
@@ -171,6 +177,16 @@ def plot_state_history(
         ax.set_title(f"{k}")
         ax.spines[["right", "top"]].set_visible(False)
         ax.legend(frameon=False)
+
+        # Add vertical red line at trim cutoff
+        if trim_end_steps > 0 and len(times) > trim_end_steps:
+            ax.axvline(
+                x=trim_time,
+                color="red",
+                linestyle="--",
+                linewidth=2,
+                label=f"trim cutoff (last {trim_end_steps} steps)",
+            )
 
     ax.set_xlabel("Time [s]")
     plt.tight_layout()
@@ -280,7 +296,12 @@ if __name__ == "__main__":
         "sens/gyro_2",
     )
 
-    plot_state_history(history=history, idx_dict=idx_d, plot_groups=plot_groups)
+    plot_state_history(
+        history=history,
+        idx_dict=idx_d,
+        plot_groups=plot_groups,
+        trim_end_steps=RL_CONFIG.get("trim_end_steps", 0),
+    )
     import os
 
     plot_dir = os.path.join(
