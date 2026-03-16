@@ -62,7 +62,7 @@ class PolicyNetwork(nn.Module):
             nn.Linear(policy_hidden2, action_space_dims),
         )
 
-        # Value encoder (separate from policy, larger capacity)
+        # Value encoder (separate from policy)
         self.value_encoder = nn.Sequential(
             nn.Linear(obs_space_dims, value_hidden1),
             nn.Tanh(),
@@ -113,23 +113,26 @@ class PolicyNetwork(nn.Module):
 
         # Convert SI units to human-friendly units before normalizing
         # Input order: pitch[deg], gyro[rad/s](3), left_vel[rad/s], right_vel[rad/s], time[s]
-        x[:, 0] = x[:, 0] / OBS_SCALES["filter/rp_pitch"]  # pitch: deg → normalized
-        x[:, 1:4] = (
+        x_norm = torch.zeros_like(x)
+        x_norm[:, 0] = (
+            x[:, 0] / OBS_SCALES["filter/rp_pitch"]
+        )  # pitch: deg → normalized
+        x_norm[:, 1:4] = (
             x[:, 1:4] * RAD2DEG / OBS_SCALES["sens/gyro"]
         )  # gyro: rad/s → deg/s → normalized
-        x[:, 4] = (
+        x_norm[:, 4] = (
             x[:, 4] * RAD2REV / OBS_SCALES["sens/left_wheel_vel"]
         )  # wheel: rad/s → rev/s → normalized
-        x[:, 5] = (
+        x_norm[:, 5] = (
             x[:, 5] * RAD2REV / OBS_SCALES["sens/right_wheel_vel"]
         )  # wheel: rad/s → rev/s → normalized
-        x[:, 6] = x[:, 6] / (
+        x_norm[:, 6] = x[:, 6] / (
             x[:, 6] + OBS_SCALES["env/time"]
         )  # time: s → normalized (asymptotic)
 
         # Separate encoders for policy and value
-        policy_features = self.policy_encoder(x)
-        value_features = self.value_encoder(x)
+        policy_features = self.policy_encoder(x_norm)
+        value_features = self.value_encoder(x_norm)
 
         # Output actions in rad/s (SI units for environment)
         action_means = (self.policy_mean_net(policy_features) - 0.5) * 2 * MAX_V
