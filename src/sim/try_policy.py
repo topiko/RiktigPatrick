@@ -110,7 +110,8 @@ def plot_state_history(
     for k in idx_dict:
         print(f"\t{k}")
 
-    # Units mapping (display units)
+    # Units mapping (display units for plot labels)
+    # These are the human-readable units shown in plots
     units = {
         "filter/rp_pitch": "deg",
         "sens/gyro_0": "deg/s",
@@ -137,14 +138,15 @@ def plot_state_history(
         "advantage": "",
     }
 
-    # Conversion factors (multiply to convert from sim units to display units)
+    # Conversion factors: multiply to convert from SI (sim units) to display units
+    # History data is stored in SI units (rad/s), convert for human-readable plots
     conversions = {
-        "sens/gyro_0": 180.0 / 3.14159,  # rad/s -> deg/s
+        "sens/gyro_0": 180.0 / 3.14159,  # rad/s → deg/s
         "sens/gyro_1": 180.0 / 3.14159,
         "sens/gyro_2": 180.0 / 3.14159,
-        "sens/left_wheel_vel": 1.0 / (2 * 3.14159),  # rad/s -> rev/s
+        "sens/left_wheel_vel": 1.0 / (2 * 3.14159),  # rad/s → rev/s
         "sens/right_wheel_vel": 1.0 / (2 * 3.14159),
-        "act/left_wheel": 1.0 / (2 * 3.14159),  # rad/s -> rev/s
+        "act/left_wheel": 1.0 / (2 * 3.14159),  # rad/s → rev/s
         "act/right_wheel": 1.0 / (2 * 3.14159),
     }
 

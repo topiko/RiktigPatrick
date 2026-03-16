@@ -93,11 +93,42 @@ The episode terminates when |pitch| > 20 degrees.
 
 ## State Space
 
-Model input (6 dims):
-- Filtered roll/pitch (from AHRS)
+Model input (7 dims):
+- Filtered pitch (from AHRS)
 - Gyroscope (3-axis)
 - Left wheel velocity
 - Right wheel velocity
+- Time (normalized)
+
+## Units and Conversions
+
+The system uses a layered unit approach:
+
+**Simulation Layer (MuJoCo)** - SI units internally:
+- Angular velocity: rad/s
+- Angles: rad
+- Time: s
+
+**Network Layer** - Human-friendly units for normalization:
+- Gyro: deg/s (converted from rad/s)
+- Wheel velocity: rev/s (converted from rad/s)
+- Pitch: deg (already in deg from filter)
+- Time: normalized via `t / (t + 10)`
+
+**Display Layer (Plots)** - Human-readable:
+- Gyro: deg/s
+- Wheel velocity: rev/s
+- Pitch: deg
+
+Conversion factors defined in `sim_config.py`:
+- `RAD2DEG = 180/π` - rad/s → deg/s
+- `RAD2REV = 1/(2π)` - rad/s → rev/s
+
+Normalization scales in `config.yaml`:
+- `filter/rp_pitch: 20.0` - ±20 deg range
+- `sens/gyro: 600.0` - ±600 deg/s range
+- `sens/left_wheel_vel: 5.0` - max 5 rev/s
+- `sens/right_wheel_vel: 5.0` - max 5 rev/s
 
 ## Randomization
 

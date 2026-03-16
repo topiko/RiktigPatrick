@@ -80,30 +80,47 @@ class PolicyNetwork(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Forward pass returns policy means, stds, and value estimate.
 
+        Unit Conversion Flow:
+            Input (from env):     rad/s, rad/s, rad/s, deg, s
+                                 (gyro)  (wheel) (wheel) (pitch) (time)
+            ↓
+            Convert to display:   deg/s, rev/s, rev/s, deg, normalized
+            ↓
+            Normalize:            ÷600   ÷5     ÷5     ÷20   t/(t+10)
+            ↓
+            Network processing
+            ↓
+            Output (to env):      rad/s (actions)
+
         Args:
-            x: Observation from the environment (in simulation units: rad/s, deg, s)
+            x: Observation from environment in SI units (rad/s, deg, s)
 
         Returns:
-            action_means: predicted mean of the normal distribution (rad/s)
-            action_stddevs: predicted standard deviation (rad/s)
+            action_means: predicted mean in rad/s
+            action_stddevs: predicted stddev in rad/s
             value: state value estimate
         """
         x = x.clone()
 
-        # Convert to display units and normalize
+        # Convert SI units to human-friendly units before normalizing
         # Input order: pitch[deg], gyro[rad/s](3), left_vel[rad/s], right_vel[rad/s], time[s]
-        x[:, 0] = x[:, 0] / OBS_SCALES["filter/rp_pitch"]  # pitch already in deg
-        x[:, 1:4] = x[:, 1:4] * RAD2DEG / OBS_SCALES["sens/gyro"]  # rad/s -> deg/s
+        x[:, 0] = x[:, 0] / OBS_SCALES["filter/rp_pitch"]  # pitch: deg → normalized
+        x[:, 1:4] = (
+            x[:, 1:4] * RAD2DEG / OBS_SCALES["sens/gyro"]
+        )  # gyro: rad/s → deg/s → normalized
         x[:, 4] = (
             x[:, 4] * RAD2REV / OBS_SCALES["sens/left_wheel_vel"]
-        )  # rad/s -> rev/s
+        )  # wheel: rad/s → rev/s → normalized
         x[:, 5] = (
             x[:, 5] * RAD2REV / OBS_SCALES["sens/right_wheel_vel"]
-        )  # rad/s -> rev/s
-        x[:, 6] = x[:, 6] / (x[:, 6] + OBS_SCALES["env/time"])
+        )  # wheel: rad/s → rev/s → normalized
+        x[:, 6] = x[:, 6] / (
+            x[:, 6] + OBS_SCALES["env/time"]
+        )  # time: s → normalized (asymptotic)
 
         shared_features = self.shared_net(x)
 
+        # Output actions in rad/s (SI units for environment)
         action_means = (self.policy_mean_net(shared_features) - 0.5) * 2 * MAX_V
         action_stddevs = torch.log(
             1 + torch.exp(self.policy_stddev_net(shared_features))
