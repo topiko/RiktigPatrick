@@ -88,9 +88,11 @@ class REINFORCE:
         self.value_loss = torch.nn.MSELoss(reduction="mean")
 
         self.use_baseline = use_baseline
+        self.normalize_returns = RL_CONFIG.get("normalize_returns", False)
         self.model_input = model_input
         self.reward_normalizer = RunningNormalizer(momentum=0.99)
-        self.return_normalizer = RunningNormalizer(momentum=0.99)
+        if self.normalize_returns:
+            self.return_normalizer = RunningNormalizer(momentum=0.99)
 
     def sample_action(
         self,
@@ -128,28 +130,32 @@ class REINFORCE:
             G = compute_returns(tape.rewards, self.gamma)
             returns_list.append(G)
 
-            # Update return normalizer
-            self.return_normalizer.update(G)
+            # Update return normalizer if enabled
+            if self.normalize_returns:
+                self.return_normalizer.update(G)
 
             baseline = np.zeros_like(G)
             if self.use_baseline:
-                # Denormalize value predictions for baseline
                 baseline = tape.values.squeeze().detach().cpu().numpy()
-                baseline = (
-                    baseline * self.return_normalizer.std + self.return_normalizer.mean
-                )
+                if self.normalize_returns:
+                    # Denormalize value predictions for baseline
+                    baseline = (
+                        baseline * self.return_normalizer.std
+                        + self.return_normalizer.mean
+                    )
 
             advantages = G - baseline
 
-            # Value loss with normalized returns
+            # Value loss
             tape_values = tape.values.squeeze().to(self.device)
-            G_normalized = (
-                G - self.return_normalizer.mean
-            ) / self.return_normalizer.std
+            if self.normalize_returns:
+                G_target = (
+                    G - self.return_normalizer.mean
+                ) / self.return_normalizer.std
+            else:
+                G_target = G
             value_losses.append(
-                self.value_loss(
-                    tape_values, torch.tensor(G_normalized, device=self.device)
-                )
+                self.value_loss(tape_values, torch.tensor(G_target, device=self.device))
             )
 
             for log_prob, entropy, advantage in zip(
