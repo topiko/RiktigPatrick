@@ -50,6 +50,7 @@ class REINFORCE:
         self.value_learning_rate = RL_CONFIG.get(
             "value_learning_rate", self.learning_rate
         )
+        self.grad_clip = RL_CONFIG.get("grad_clip", 0.5)
         self.gamma = 0.99
         self.eps = 1e-6
         self.entropy_scale = RL_CONFIG["entropy_scale"]
@@ -156,7 +157,7 @@ class REINFORCE:
 
         self.optimizer.zero_grad()
         total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.net.parameters(), 0.5)
+        torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
         self.optimizer.step()
 
         returns_np = np.array([t.ep_return for t in tapes])
