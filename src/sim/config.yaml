@@ -13,7 +13,7 @@ training:
 
 rl:
   learning_rate: 0.0002
-  value_learning_rate: 0.01
+  value_learning_rate: 0.0002
   gamma: 0.99
   entropy_scale: 0.01
   value_loss_scale: 1.0
