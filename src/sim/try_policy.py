@@ -1,5 +1,4 @@
 import argparse
-from dataclasses import dataclass
 
 import gymnasium as gym
 import matplotlib
@@ -8,18 +7,15 @@ matplotlib.use("Agg")  # Non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from gymnasium.envs.registration import register
 from gymnasium.wrappers import (
-    RecordEpisodeStatistics,
     RecordVideo,
-    TransformObservation,
 )
 
 from sim.algos import REINFORCE, compute_returns, compute_value_estimates
 from sim.custom_policies import NetPolicy, PIDPolicy
+from sim.nets import PolicyNetwork
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE, RL_CONFIG
 from sim.utils import Tape, actiondim, model_indim, register_and_make_env
-from sim.nets import PolicyNetwork
 
 parser = argparse.ArgumentParser()
 
@@ -108,7 +104,7 @@ def plot_state_history(
 ):
     plot_groups = plot_groups or PlotGroups()
 
-    time_idx = idx_dict.pop("time")
+    time_idx = idx_dict["env/time"]
 
     print("Available:")
     for k in idx_dict:

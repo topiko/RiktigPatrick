@@ -215,7 +215,7 @@ class State:
         self.mahony = Mahony()
         self.prev_t = 0
         self._action_dict = StepAction().to_dict()
-        self._info_dict = {}
+        self._reward_dict = {}
         self._record = record
         self._history = []
 
@@ -231,11 +231,7 @@ class State:
         right_wheel_vel: float,
         true_pitch: float,
         action: Optional[StepAction] = None,
-        reward: Optional[float] = None,
-        reward_step: Optional[float] = None,
-        reward_pitch: Optional[float] = None,
-        reward_action: Optional[float] = None,
-        reward_yaw: Optional[float] = None,
+        reward_info: Optional[dict[str, float]] = None,
     ):
         self.obs.update_t = t
         self.obs.update_gyro = gyro
@@ -253,20 +249,11 @@ class State:
         if action is not None:
             self._action_dict = action.to_dict()
 
-        # Preserve env/time, clear rest
-        env_time = self._info_dict.get("env/time", np.array([0.0]))
-        env_time[0] = t
-        self._info_dict = {"env/time": env_time}
-        if reward is not None:
-            self._info_dict["reward"] = np.array([reward])
-        if reward_step is not None:
-            self._info_dict["reward/step"] = np.array([reward_step])
-        if reward_pitch is not None:
-            self._info_dict["reward/pitch"] = np.array([reward_pitch])
-        if reward_action is not None:
-            self._info_dict["reward/action"] = np.array([reward_action])
-        if reward_yaw is not None:
-            self._info_dict["reward/yaw"] = np.array([reward_yaw])
+        # Clear and update reward dict
+        self._reward_dict = {}
+        if reward_info is not None:
+            for key, value in reward_info.items():
+                self._reward_dict[key] = np.array([value])
 
         if self._record:
             arr = self.get_state_arr(keys="all")
@@ -306,7 +293,7 @@ class State:
         self.prev_t = 0
         self._history = []
         self._action_dict = StepAction().to_dict()
-        self._info_dict = {"reward": 0, "env/time": np.array([0.0])}
+        self._reward_dict = {}
         self.obs = Obs()
 
     def get_state_dict(
@@ -321,10 +308,10 @@ class State:
             "sens/right_wheel_vel": self.obs.right_wheel_vel,
             "filter/rp_pitch": np.array([self.euler[1]]),
             "simul/rp_pitch": self.obs.true_pitch,
-            "time": np.array([self.obs.t]),
+            "env/time": np.array([self.obs.t]),
         }
         d.update(self._action_dict)
-        d.update(self._info_dict)
+        d.update(self._reward_dict)
 
         if keys is None:
             keys = self.keys
@@ -375,7 +362,6 @@ class State:
             k: spaces.Box(-np.inf, np.inf, shape=(len(v),), dtype=float)
             for k, v in self.get_state_dict(keys="all").items()
         }
-        d["env/time"] = spaces.Box(0, np.inf, shape=(1,), dtype=float)
         return spaces.Dict(d)
 
 

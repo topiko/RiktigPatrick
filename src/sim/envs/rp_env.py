@@ -3,11 +3,11 @@ from typing import Any, Optional, Union
 import gymnasium
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 from dm_control import mjcf
-from filters.qutils import q2eul
 from gymnasium import spaces
-from riktigpatric.patrick import State, StepAction, StepReturn
+
+from filters.qutils import q2eul
+from riktigpatric.patrick import State, StepAction
 from sim.sim_config import MAX_V, REWARD_CONFIG
 
 BODY_D = 0.05
@@ -272,6 +272,10 @@ class GymRP(gymnasium.Env):
 
         reward, reward_info = self._get_reward()
 
+        # Prepare full reward info including total reward
+        full_reward_info = {"reward": reward}
+        full_reward_info.update(reward_info)
+
         self.state.update(
             t=self.dm_env.data.time,
             acc=self.dm_env.bind(self.acc_sens).sensordata.copy(),
@@ -286,25 +290,12 @@ class GymRP(gymnasium.Env):
             ).sensordata.copy()[0],
             true_pitch=pitch,
             action=self._prev_action,
-            reward=reward,
-            reward_step=reward_info["reward/step"],
-            reward_pitch=reward_info["reward/pitch"],
-            reward_action=reward_info["reward/action"],
-            reward_yaw=reward_info["reward/yaw"],
+            reward_info=full_reward_info,
         )
 
     def _get_obs(self) -> dict:
         d = self.state.get_state_dict(keys="all")
         return d
-
-    def reset(
-        self, options: Optional[Any] = None, seed: int | None = None
-    ) -> tuple[dict, dict]:
-        self.dm_env = self._reset_env(seed)
-        self.state.reset()
-
-        d, i = self._get_obs(), self._get_info()
-        return d, i
 
     def _get_reward(self) -> tuple[float, dict]:
         pitch = abs(self.state.euler[1])
@@ -323,6 +314,15 @@ class GymRP(gymnasium.Env):
             "reward/action": action_penalty,
             "reward/yaw": yaw_penalty,
         }
+
+        # Add termination penalty if robot falls
+        if self.terminated:
+            termination_penalty = -REWARD_CONFIG.get("termination_penalty", 0.0)
+            info["reward/termination"] = termination_penalty
+            total += termination_penalty
+        else:
+            info["reward/termination"] = 0.0
+
         return total, info
 
     def _get_info(self) -> dict:
@@ -443,14 +443,6 @@ class GymRP(gymnasium.Env):
         self._update_state()
 
         reward, reward_info = self._get_reward()
-
-        # Add termination penalty if robot falls
-        if self.terminated:
-            termination_penalty = -REWARD_CONFIG.get("termination_penalty", 0.0)
-            reward += termination_penalty
-            reward_info["reward/termination"] = termination_penalty
-        else:
-            reward_info["reward/termination"] = 0.0
 
         info = self._get_info()
         info.update(reward_info)
