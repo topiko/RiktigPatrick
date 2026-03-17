@@ -52,6 +52,8 @@ class Actions(str, Enum):
     ACC_RIGHT_WHEEL = "act/accelerate_right_wheel"
     ACC_HEAD_PITCH = "act/accelerate_head_pitch"
     ACC_HEAD_TURN = "act/accelerate_head_turn"
+    ACC_BOTH_WHEELS = "act/accelerate_both_wheels"
+    ACC_YAW_TURN = "act/accelerate_yaw_turn"
 
     VEL_LEFT_WHEEL = "act/left_wheel_vel"
     VEL_RIGHT_WHEEL = "act/right_wheel_vel"

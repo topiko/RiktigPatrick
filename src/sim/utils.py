@@ -11,7 +11,9 @@ def register_and_make_env(
     cfg: DictConfig,
 ) -> gym.Env | gym.vector.AsyncVectorEnv:
     env_config = dict(cfg.env)
-    n_parallel_env = env_config.pop("n_parallel_env", 1)
+    n_parallel = env_config.pop("n_parallel", 1)
+
+    env_config["actions"] = list(cfg.policy.actions)
 
     register(
         id="RiktigPatrick-v0",
@@ -20,7 +22,7 @@ def register_and_make_env(
         kwargs=env_config,
     )
 
-    if n_parallel_env > 1:
+    if n_parallel> 1:
         return gym.vector.AsyncVectorEnv(
             [
                 lambda: gym.make(
@@ -28,7 +30,7 @@ def register_and_make_env(
                     disable_env_checker=True,
                     **env_config,
                 )
-                for _ in range(n_parallel_env)
+                for _ in range(n_parallel)
             ]
         )
 

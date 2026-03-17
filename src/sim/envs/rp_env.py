@@ -1,18 +1,13 @@
 from typing import Any, Optional
 
 import gymnasium
+import gymnasium.spaces
 import matplotlib.pyplot as plt
 import numpy as np
 from dm_control import mjcf
 
 from filters.qutils import q2eul
 from riktigpatric.patrick import Actions, Observables, State, StepAction
-from sim.sim_config import (
-    MAX_V,
-    MAX_WHEEL_ACC,
-    MAX_WHEEL_VEL,
-    REWARD_CONFIG,
-)
 
 BODY_D = 0.05
 BODY_H = 0.25
@@ -27,8 +22,12 @@ HEAD_W = 0.1
 HEAD_M = 0.2
 
 FORCERANGE = 15
-MAXV = MAX_V
-MAXA = MAX_WHEEL_ACC
+
+MAX_WHEEL_VEL = 10
+MAX_WHEEL_ACC = 100
+
+RAD2REV = 1.0 / (2 * np.pi)  # rad/s → rev/s
+RAD2DEG = 180.0 / np.pi  # rad/s → deg/s
 
 
 class MujocoRP:
@@ -99,7 +98,7 @@ class MujocoRP:
                 joint=wheel,
                 gear=(1,),
                 ctrllimited=True,
-                ctrlrange=[-MAXV, MAXV],
+                ctrlrange=[-MAX_WHEEL_VEL, MAX_WHEEL_VEL],
                 # forcelimited=True,
                 # forcerange=[-FORCERANGE, FORCERANGE],
                 actrange=[-(10**6), 10**6],
@@ -211,6 +210,59 @@ def make_arena() -> mjcf.RootElement:
     return arena
 
 
+def _get_action_space(actions: list[str]) -> gymnasium.spaces.Dict:
+    d_ = {}
+    for k in actions:
+        if k in [Actions.HEAD_PITCH, Actions.HEAD_TURN]:
+            d_[k] = gymnasium.spaces.Box(
+                low=-1.0, high=1.0, shape=(1,), dtype=np.float32
+            )
+        elif k in [Actions.VEL_LEFT_WHEEL, Actions.VEL_RIGHT_WHEEL]:
+            d_[k] = gymnasium.spaces.Box(
+                low=-MAX_WHEEL_VEL, high=MAX_WHEEL_VEL, shape=(1,), dtype=np.float32
+            )
+        elif k in [
+            Actions.ACC_LEFT_WHEEL,
+            Actions.ACC_RIGHT_WHEEL,
+            Actions.ACC_BOTH_WHEELS,
+            Actions.ACC_YAW_TURN,
+        ]:
+            d_[k] = gymnasium.spaces.Box(
+                low=-MAX_WHEEL_ACC, high=MAX_WHEEL_ACC, shape=(1,), dtype=np.float32
+            )
+        else:
+            raise ValueError(f"Invalid action key: {k}")
+    return gymnasium.spaces.Dict(d_)
+
+
+def _get_observation_space() -> gymnasium.spaces.Dict:
+    d_ = {}
+    for obs in Observables:
+        if obs in [
+            Observables.OBS_TIME,
+            Observables.HEAD_PITCH,
+            Observables.HEAD_TURN,
+            Observables.LEFT_WHEEL_VEL,
+            Observables.RIGHT_WHEEL_VEL,
+            Observables.RP_PITCH,
+        ]:
+            d_[obs] = gymnasium.spaces.Box(
+                low=-100.0, high=100.0, shape=(1,), dtype=np.float32
+            )
+        elif obs in [Observables.ACC, Observables.GYRO]:
+            d_[obs] = gymnasium.spaces.Box(
+                low=-100.0, high=100.0, shape=(3,), dtype=np.float32
+            )
+        elif obs == Observables.TRUE_PITCH:
+            d_[obs] = gymnasium.spaces.Box(
+                low=-180.0, high=180.0, shape=(1,), dtype=np.float32
+            )
+        else:
+            raise ValueError(f"Invalid observation key: {obs}")
+
+    return gymnasium.spaces.Dict(d_)
+
+
 class GymRP(gymnasium.Env):
     metadata = {"render_modes": ["rgb_array"], "render_fps": 100}
 
@@ -219,6 +271,7 @@ class GymRP(gymnasium.Env):
         record: bool = False,
         step_time: float = 0.01,
         randomize: bool = False,
+        actions: list[str] = None,
     ):
         self._randomize = randomize
         self._init_pitch_scale = 2.0
@@ -233,6 +286,9 @@ class GymRP(gymnasium.Env):
         self.step_time = step_time
         self.render_mode = "rgb_array"
         self.metadata["render_fps"] = int(1 / self.step_time)
+
+        self.action_space = _get_action_space(actions)
+        self.observation_space = _get_observation_space()
 
     def _reset_env(self, seed: int | None = 42) -> mjcf.Physics:
         prng = np.random.default_rng(seed)
@@ -306,7 +362,7 @@ class GymRP(gymnasium.Env):
         )
 
     def _get_reward(self) -> tuple[float, dict]:
-        step_reward = REWARD_CONFIG["step"]
+        step_reward = 1
 
         return step_reward, {"step_reward": step_reward}
 
@@ -341,6 +397,8 @@ class GymRP(gymnasium.Env):
     def step(
         self, action_d: dict[Actions, np.ndarray]
     ) -> tuple[dict, float, bool, bool, dict]:
+        rvel = self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL)[0]
+        lvel = self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]
         # Apply the actions at time t.
         for a, val in action_d.items():
             if a == Actions.HEAD_PITCH:
@@ -361,12 +419,23 @@ class GymRP(gymnasium.Env):
                 left_vel = np.clip(left_vel, -MAX_WHEEL_VEL, MAX_WHEEL_VEL)
                 self.dm_env.bind(self.left_wheel_act).ctrl = left_vel
             elif a == Actions.ACC_RIGHT_WHEEL:
-                right_vel = (
-                    self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL)[0]
-                    + val[0] * self.step_time
-                )
+                right_vel = rvel + val[0] * self.step_time
                 right_vel = np.clip(right_vel, -MAX_WHEEL_VEL, MAX_WHEEL_VEL)
                 self.dm_env.bind(self.right_wheel_act).ctrl = right_vel
+
+            elif a == Actions.ACC_BOTH_WHEELS:
+                rvel = np.clip(
+                    rvel + val[0] * self.step_time, -MAX_WHEEL_VEL, MAX_WHEEL_VEL
+                )
+                lvel = np.clip(
+                    lvel + val[0] * self.step_time, -MAX_WHEEL_VEL, MAX_WHEEL_VEL
+                )
+                self.dm_env.bind(self.right_wheel_act).ctrl = rvel
+                self.dm_env.bind(self.left_wheel_act).ctrl = lvel
+
+            elif a == Actions.ACC_YAW_TURN:
+                raise NotImplementedError("ACC_YAW_TURN not implemented yet")
+
             else:
                 raise ValueError(f"Invalid action key: {a}")
 
