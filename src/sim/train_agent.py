@@ -34,9 +34,12 @@ def compute_returns(rewards: np.ndarray, discount: float) -> np.ndarray:
 
 
 def rollout(
-    rp_env: gym.Env | gym.vector.AsyncVectorEnv, agent: nn.Module, cfg: DictConfig
+    rp_env: gym.Env | gym.vector.AsyncVectorEnv,
+    agent: nn.Module,
+    cfg: DictConfig,
+    seed: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    obs_d, _ = rp_env.reset(seed=42)
+    obs_d, _ = rp_env.reset(seed=seed)
 
     max_steps = 1000
 
@@ -75,7 +78,7 @@ def main(cfg: DictConfig):
     while True:
         optimizer.zero_grad()
 
-        logps, rewards = rollout(rp_env, agent, cfg)
+        logps, rewards = rollout(rp_env, agent, cfg, seed=i)
 
         # Compute returns for each environment separately
         rewards_np = rewards.numpy()
