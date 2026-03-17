@@ -1,0 +1,67 @@
+defaults:
+  - _self_
+
+
+training:
+  nrollouts: 64
+  max_episodes: 20001
+  save_frequency: 10
+  seed: 42
+
+rl:
+  gamma: 0.99
+  entropy_scale: 0.01
+  value_loss_scale: 1.0
+  normalize_returns: true
+  use_baseline: true
+  init2zeros: false
+  load_net: false
+  trim_end_steps: 0
+
+train:
+  policy_lr: 0.0010
+  value_lr: 0.03
+  n_epochs: 10
+  grad_clip: 10.0
+
+env:
+  step_time: 0.01
+  randomize: true
+  n_parallel: 32
+
+policy:
+  actions:
+    - act/accelerate_both_wheels
+
+  act_map:
+    act/accelerate_both_wheels: 15
+
+  inputs:
+    - filter/rp_pitch
+    - sens/left_wheel_vel
+    - sens/right_wheel_vel
+    - env/obs_time
+
+
+
+reward:
+  step: 0.0
+  pitch_coef: 1.0
+  action_coef: 0.0
+  yaw_coef: 0.03
+  termination_penalty: 0.0
+
+model:
+  model_input:
+    - "filter/rp_pitch"
+    - "sens/gyro"
+    - "sens/left_wheel_vel"
+    - "sens/right_wheel_vel"
+    - "env/action_time"
+  # Fixed normalization scales (divide by these)
+  obs_scales:
+    filter/rp_pitch: 20.0  # deg (±20 deg range)
+    sens/gyro: 600.0  # deg/s (±600 deg/s range)
+    sens/left_wheel_vel: 5.0  # rev/s (max wheel vel)
+    sens/right_wheel_vel: 5.0  # rev/s (max wheel vel)
+    env/action_time: 10.0  # seconds (time constant for normalization)
