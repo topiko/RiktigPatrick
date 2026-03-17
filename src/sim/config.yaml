@@ -6,7 +6,7 @@
 # This prevents value function from being constrained by policy representation
 
 training:
-  nrollouts: 16
+  nrollouts: 64
   max_episodes: 20001
   save_frequency: 10
   seed: 42
@@ -15,22 +15,21 @@ rl:
   learning_rate: 0.0003
   value_learning_rate: 0.0003
   gamma: 0.99
-  entropy_scale: 0.5
-  value_loss_scale: 0.01
+  entropy_scale: 0.01
+  value_loss_scale: 1.0
   grad_clip: 10.0
   normalize_returns: true
   use_baseline: true
-  init2zeros: true
+  init2zeros: false
   load_net: false
-  trim_end_steps: 10
+  trim_end_steps: 0
 
 env:
-  lock_head: true
   step_time: 0.01
-  randomize: false
+  randomize: true
 
 policy:
-  type: "acceleration"  # "velocity" or "acceleration"
+  type: "velocity"  # "velocity" or "acceleration"
 
   # Velocity mode: continuous Gaussian policy
   velocity:
@@ -38,13 +37,13 @@ policy:
 
   # Acceleration mode: discrete Categorical policy
   acceleration:
-    n_actions: 5  # discrete actions per wheel: {-MAX, ..., 0, ..., +MAX}
-    max_wheel_acc: 10.0  # rev/s²
+    n_actions: 15  # discrete actions per wheel: {-MAX, ..., 0, ..., +MAX}
+    max_wheel_acc: 50.0  # rev/s²
 
 reward:
-  step: 1.0
-  pitch_coef: 0.1
-  action_coef: 0.02
+  step: 0.0
+  pitch_coef: 1.0
+  action_coef: 0.0
   yaw_coef: 0.03
   termination_penalty: 0.0
 

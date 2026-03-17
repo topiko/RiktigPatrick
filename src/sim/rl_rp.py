@@ -1,22 +1,12 @@
 from __future__ import annotations
 
-import sys
-
-print("Starting...", flush=True)
-
-import gymnasium as gym
 import numpy as np
-import torch
-from gymnasium.envs.registration import register
 from gymnasium.wrappers import RecordEpisodeStatistics
 
 from sim.algos import REINFORCE
-
-print("Imported algos", flush=True)
-
 from sim.sim_config import ENV_CONFIG, MODEL_INPUT, OBS_SPACE, RL_CONFIG, TRAIN_CONFIG
 from sim.try_policy import run_episode
-from sim.utils import Tape, actiondim, model_indim, register_and_make_env
+from sim.utils import Tape, register_and_make_env
 
 print("Making env...", flush=True)
 
@@ -31,13 +21,7 @@ if __name__ == "__main__":
     rpenv.reset()
     print("Env reset", flush=True)
 
-    indim = model_indim(rpenv, MODEL_INPUT)
-    actdim = actiondim(rpenv)
-    print(f"indim={indim}, actdim={actdim}", flush=True)
-
     agent = REINFORCE(
-        indim,
-        actdim,
         MODEL_INPUT,
         use_baseline=RL_CONFIG["use_baseline"],
         init2zeros=RL_CONFIG["init2zeros"],

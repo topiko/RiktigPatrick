@@ -13,6 +13,8 @@ dependencies = [
     "pandas",
     "pyyaml",
     "matplotlib>=3.10.8",
+    "hydra-core>=1.3.2",
+    "omegaconf>=2.3.0",
 ]
 
 [build-system]

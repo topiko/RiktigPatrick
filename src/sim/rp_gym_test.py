@@ -1,9 +1,8 @@
 import gymnasium as gym
 import matplotlib.pyplot as plt
 from gymnasium.envs.registration import register
-from riktigpatric.patrick import StepAction
 
-import sim
+from riktigpatric.patrick import StepAction
 
 register(
     id="RiktigPatrick-v0",

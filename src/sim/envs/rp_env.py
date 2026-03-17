@@ -1,19 +1,16 @@
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 import gymnasium
 import matplotlib.pyplot as plt
 import numpy as np
 from dm_control import mjcf
-from gymnasium import spaces
 
 from filters.qutils import q2eul
-from riktigpatric.patrick import State, StepAction
+from riktigpatric.patrick import Actions, Observables, State, StepAction
 from sim.sim_config import (
     MAX_V,
     MAX_WHEEL_ACC,
     MAX_WHEEL_VEL,
-    N_ACTIONS,
-    POLICY_TYPE,
     REWARD_CONFIG,
 )
 
@@ -219,116 +216,23 @@ class GymRP(gymnasium.Env):
 
     def __init__(
         self,
-        state_keys: list[str],
-        render_mode="rgb_array",
         record: bool = False,
-        lock_head: bool = True,
         step_time: float = 0.01,
         randomize: bool = False,
     ):
         self._randomize = randomize
         self._init_pitch_scale = 2.0
-        self._init_wheel_vel_scale = 1.0
-        self.lock_head = lock_head
-        self.policy_type = POLICY_TYPE
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
 
         self.simul_timestep = 0.002
         self.dm_env.model.opt.timestep = self.simul_timestep
 
-        self.state = State(keys=state_keys, record=record)
+        self.state = State(record=record)
 
-        self.observation_space = self.state.to_obs_space()
-
-        action_space = self._build_action_space()
-        self.action_space = spaces.Dict(action_space)
-        self.render_mode = render_mode
         self.step_time = step_time
+        self.render_mode = "rgb_array"
         self.metadata["render_fps"] = int(1 / self.step_time)
-        self._prev_action = StepAction()
-
-    def _build_action_space(self) -> dict:
-        if self.policy_type == "velocity":
-            return {
-                "act/velocity_left_wheel": spaces.Box(
-                    -MAX_WHEEL_VEL, MAX_WHEEL_VEL, shape=(1,), dtype=float
-                ),
-                "act/velocity_right_wheel": spaces.Box(
-                    -MAX_WHEEL_VEL, MAX_WHEEL_VEL, shape=(1,), dtype=float
-                ),
-            }
-        elif self.policy_type == "acceleration":
-            return {
-                "act/acceleration_left_wheel": spaces.Discrete(N_ACTIONS),
-                "act/acceleration_right_wheel": spaces.Discrete(N_ACTIONS),
-            }
-        else:
-            raise ValueError(f"Invalid policy type: {self.policy_type}")
-
-    @staticmethod
-    def _idx_to_acc(idx: int) -> float:
-        """Map discrete index to acceleration value.
-
-        N=5 example: idx {0,1,2,3,4} → {-MAX, -MAX/2, 0, +MAX/2, +MAX}
-        """
-        return (2 * idx / (N_ACTIONS - 1) - 1) * MAX_WHEEL_ACC
-
-    def _update_obs(self, action_time: float, obs_time: float):
-        body_quat = self.dm_env.bind(self.body_quat).sensordata.copy()
-        pitch = q2eul(body_quat)[1] / np.pi * 180
-
-        self.state.update_obs(
-            action_time=action_time,
-            obs_time=obs_time,
-            acc=self.dm_env.bind(self.acc_sens).sensordata.copy(),
-            gyro=self.dm_env.bind(self.gyro_sens).sensordata.copy(),
-            head_pitch=self.dm_env.bind(self.head_pitch_sens).sensordata.copy()[0],
-            head_turn=self.dm_env.bind(self.head_turn_sens).sensordata.copy()[0],
-            left_wheel_vel=self.dm_env.bind(self.left_wheel_vel_sens).sensordata.copy()[
-                0
-            ],
-            right_wheel_vel=self.dm_env.bind(
-                self.right_wheel_vel_sens
-            ).sensordata.copy()[0],
-            true_pitch=pitch,
-            action=self._prev_action,
-        )
-
-    def _get_obs(self) -> dict:
-        d = self.state.get_state_dict(keys="all")
-        return d
-
-    def _get_reward(self) -> tuple[float, dict]:
-        pitch = abs(self.state.euler[1])
-        step_reward = REWARD_CONFIG["step"]
-        pitch_penalty = -pitch * REWARD_CONFIG["pitch_coef"]
-        action_penalty = -REWARD_CONFIG["action_coef"] * float(
-            self._prev_action.left_wheel**2 + self._prev_action.right_wheel**2
-        )
-        yaw_penalty = -REWARD_CONFIG["yaw_coef"] * (
-            float(self._prev_action.left_wheel - self._prev_action.right_wheel) ** 2
-        )
-        total = step_reward + pitch_penalty + action_penalty + yaw_penalty
-        info = {
-            "reward/step": step_reward,
-            "reward/pitch": pitch_penalty,
-            "reward/action": action_penalty,
-            "reward/yaw": yaw_penalty,
-        }
-
-        # Add termination penalty if robot falls
-        if self.terminated:
-            termination_penalty = -REWARD_CONFIG.get("termination_penalty", 0.0)
-            info["reward/termination"] = termination_penalty
-            total += termination_penalty
-        else:
-            info["reward/termination"] = 0.0
-
-        return total, info
-
-    def _get_info(self) -> dict:
-        return {}
 
     def _reset_env(self, seed: int | None = 42) -> mjcf.Physics:
         prng = np.random.default_rng(seed)
@@ -355,6 +259,8 @@ class GymRP(gymnasium.Env):
         # Actuators:
         self.left_wheel_act = rp.model.find("actuator", "leftwheel_actuator")
         self.right_wheel_act = rp.model.find("actuator", "rightwheel_actuator")
+        self.head_pitch_act = rp.model.find("actuator", "headpitch_actuator")
+        self.head_turn_act = rp.model.find("actuator", "headturn_actuator")
 
         # Sensors:
         self.gyro_sens = rp.model.find("sensor", "gyro")
@@ -365,21 +271,47 @@ class GymRP(gymnasium.Env):
         self.left_wheel_vel_sens = rp.model.find("sensor", "leftwheel_vel_sensor")
         self.right_wheel_vel_sens = rp.model.find("sensor", "rightwheel_vel_sensor")
 
-        if not self.lock_head:
-            self.head_pitch_act = rp.model.find("actuator", "headpitch_actuator")
-            self.head_turn_act = rp.model.find("actuator", "headturn_actuator")
         # Make environment:
         physics = mjcf.Physics.from_mjcf_model(arena)
 
-        # Set initial wheel velocity perturbation
-        if self._randomize:
-            init_wheel_vel = prng.normal(0, self._init_wheel_vel_scale)
-            left_joint_id = physics.model.name2id("frame/leftwheel_joint", "joint")
-            right_joint_id = physics.model.name2id("frame/rightwheel_joint", "joint")
-            physics.data.qvel[left_joint_id] = init_wheel_vel
-            physics.data.qvel[right_joint_id] = init_wheel_vel
-
         return physics
+
+    def _get_obs(self) -> dict[str, np.ndarray]:
+        return self.state.obs.to_dict()
+
+    @property
+    def simul_time(self) -> float:
+        return self.dm_env.data.time
+
+    def _update_obs(self):
+        def _get_sens(sens):
+            return self.dm_env.bind(sens).sensordata.copy()
+
+        self.state.update_obs(
+            {
+                Observables.OBS_TIME: self.simul_time,
+                Observables.ACC: _get_sens(self.acc_sens),
+                Observables.GYRO: _get_sens(self.gyro_sens),
+                Observables.HEAD_PITCH: _get_sens(self.head_pitch_sens)[0],
+                Observables.HEAD_TURN: _get_sens(self.head_turn_sens)[0],
+                Observables.LEFT_WHEEL_VEL: _get_sens(self.left_wheel_vel_sens)[0],
+                Observables.RIGHT_WHEEL_VEL: _get_sens(self.right_wheel_vel_sens)[0],
+                Observables.TRUE_PITCH: q2eul(
+                    self.dm_env.bind(self.body_quat).sensordata.copy()
+                )[1]
+                / np.pi
+                * 180,
+                Observables.RP_PITCH: self.state.euler[1],
+            }
+        )
+
+    def _get_reward(self) -> tuple[float, dict]:
+        step_reward = REWARD_CONFIG["step"]
+
+        return step_reward, {"step_reward": step_reward}
+
+    def _get_info(self) -> dict:
+        return {}
 
     def reset(
         self, options: Optional[Any] = None, seed: int | None = None
@@ -387,89 +319,80 @@ class GymRP(gymnasium.Env):
         self.dm_env = self._reset_env(seed)
         self.state.reset()
 
+        self._update_obs()
+
         d, i = self._get_obs(), self._get_info()
         return d, i
 
     @property
     def terminated(self) -> bool:
+        print(self.state.euler[1])
+        print(self.state.obs.get_observable(Observables.TRUE_PITCH))
         return abs(self.state.euler[1]) > 20
 
     @property
     def truncated(self) -> bool:
-        return self.state.obs.action_time[0] >= 20.0  # 20 second time limit
+        return self.state.obs.get_observable(Observables.OBS_TIME) > 20
 
     def render(self):
         if self.render_mode == "rgb_array":
             return self.dm_env.render(camera_id=0, height=480, width=640)
 
     def step(
-        self, action: Optional[dict[str, np.ndarray]] = None
+        self, action_d: dict[Actions, np.ndarray]
     ) -> tuple[dict, float, bool, bool, dict]:
-        t0 = self.dm_env.data.time
+        # Apply the actions at time t.
+        for a, val in action_d.items():
+            if a == Actions.HEAD_PITCH:
+                self.dm_env.bind(self.head_pitch_act).ctrl = val[0]
+            elif a == Actions.HEAD_TURN:
+                self.dm_env.bind(self.head_turn_act).ctrl = val[0]
+            elif a == Actions.VEL_LEFT_WHEEL:
+                self.dm_env.bind(self.left_wheel_act).ctrl = val[0]
 
-        if action is not None:
-            if self.policy_type == "velocity":
-                left_vel = action["act/velocity_left_wheel"][0]
-                right_vel = action["act/velocity_right_wheel"][0]
-                self._prev_action = StepAction().from_dict(
-                    {
-                        "act/left_wheel": np.array([left_vel]),
-                        "act/right_wheel": np.array([right_vel]),
-                    }
+            elif a == Actions.VEL_RIGHT_WHEEL:
+                self.dm_env.bind(self.right_wheel_act).ctrl = val[0]
+
+            elif a == Actions.ACC_LEFT_WHEEL:
+                left_vel = (
+                    self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]
+                    + val[0] * self.step_time
                 )
-
-            elif self.policy_type == "acceleration":
-                left_idx_arr = action["act/acceleration_left_wheel"]
-                right_idx_arr = action["act/acceleration_right_wheel"]
-                left_idx = int(
-                    left_idx_arr.item()
-                    if hasattr(left_idx_arr, "item")
-                    else left_idx_arr
-                )
-                right_idx = int(
-                    right_idx_arr.item()
-                    if hasattr(right_idx_arr, "item")
-                    else right_idx_arr
-                )
-
-                left_acc = self._idx_to_acc(left_idx)
-                right_acc = self._idx_to_acc(right_idx)
-
-                current_left_vel = self.state.obs.left_wheel_vel[0]
-                current_right_vel = self.state.obs.right_wheel_vel[0]
-
-                dt = self.step_time
-                left_vel = current_left_vel + left_acc * dt
-                right_vel = current_right_vel + right_acc * dt
-
                 left_vel = np.clip(left_vel, -MAX_WHEEL_VEL, MAX_WHEEL_VEL)
-                right_vel = np.clip(right_vel, -MAX_WHEEL_VEL, MAX_WHEEL_VEL)
-
-                self._prev_action = StepAction().from_dict(
-                    {
-                        "act/left_wheel": np.array([left_vel]),
-                        "act/right_wheel": np.array([right_vel]),
-                    }
+                self.dm_env.bind(self.left_wheel_act).ctrl = left_vel
+            elif a == Actions.ACC_RIGHT_WHEEL:
+                right_vel = (
+                    self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL)[0]
+                    + val[0] * self.step_time
                 )
+                right_vel = np.clip(right_vel, -MAX_WHEEL_VEL, MAX_WHEEL_VEL)
+                self.dm_env.bind(self.right_wheel_act).ctrl = right_vel
+            else:
+                raise ValueError(f"Invalid action key: {a}")
 
-            self.dm_env.bind(self.left_wheel_act).ctrl = self._prev_action.left_wheel
-            self.dm_env.bind(self.right_wheel_act).ctrl = self._prev_action.right_wheel
+        self._prev_action = StepAction(action_d)
 
+        # Step the MuJoCo environment t -> t + self.step_time.
+        t0 = self.dm_env.data.time
         t = t0
         while t < t0 + self.step_time:
             self.dm_env.step()
             t = self.dm_env.data.time
 
-        self._update_obs(action_time=t0, obs_time=t)
+        # Read the observation at time t + self.step_time.
+        self._update_obs()
 
+        # The action was taken at t0
+        self.state.update_action(t0, action_d)
+
+        # The reward is received at time t
         reward, reward_info = self._get_reward()
+        self.state.update_rewards(reward_info)
 
-        full_reward_info = {"reward": reward}
-        full_reward_info.update(reward_info)
-        self.state.update_rewards(t, full_reward_info)
+        # The state needs a step as ewll
+        self.state.step()
 
         info = self._get_info()
-        info.update(reward_info)
 
         return (
             self._get_obs(),

@@ -1,6 +1,8 @@
-import numpy as np
 import logging
-from filters.qutils import Quaternion, eul2q, q2eul, as_rotation_matrix
+
+import numpy as np
+
+from filters.qutils import Quaternion, as_rotation_matrix, eul2q, q2eul
 
 LOG = logging.getLogger()
 
@@ -18,7 +20,7 @@ class Mahony:
         assert dt > 0
 
         if not np.isclose(np.linalg.norm(acc), 1):
-            acc_ = acc/np.linalg.norm(acc)
+            acc_ = acc / np.linalg.norm(acc)
         else:
             acc_ = acc
 

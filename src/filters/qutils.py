@@ -17,22 +17,48 @@ class Quaternion:
 
     def __mul__(self, other):
         if isinstance(other, Quaternion):
-            w = self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z
-            x = self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y
-            y = self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x
-            z = self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w
+            w = (
+                self.w * other.w
+                - self.x * other.x
+                - self.y * other.y
+                - self.z * other.z
+            )
+            x = (
+                self.w * other.x
+                + self.x * other.w
+                + self.y * other.z
+                - self.z * other.y
+            )
+            y = (
+                self.w * other.y
+                - self.x * other.z
+                + self.y * other.w
+                + self.z * other.x
+            )
+            z = (
+                self.w * other.z
+                + self.x * other.y
+                - self.y * other.x
+                + self.z * other.w
+            )
             return Quaternion(w, x, y, z)
         else:
-            return Quaternion(self.w * other, self.x * other, self.y * other, self.z * other)
+            return Quaternion(
+                self.w * other, self.x * other, self.y * other, self.z * other
+            )
 
     def __rmul__(self, other):
         return self.__mul__(other)
 
     def __add__(self, other):
-        return Quaternion(self.w + other.w, self.x + other.x, self.y + other.y, self.z + other.z)
+        return Quaternion(
+            self.w + other.w, self.x + other.x, self.y + other.y, self.z + other.z
+        )
 
     def __truediv__(self, other):
-        return Quaternion(self.w / other, self.x / other, self.y / other, self.z / other)
+        return Quaternion(
+            self.w / other, self.x / other, self.y / other, self.z / other
+        )
 
     @property
     def vec(self):
@@ -90,11 +116,13 @@ def as_rotation_matrix(q) -> np.ndarray:
 
     w, x, y, z = q.w, q.x, q.y, q.z
 
-    return np.array([
-        [1 - 2*(y*y + z*z), 2*(x*y - w*z), 2*(x*z + w*y)],
-        [2*(x*y + w*z), 1 - 2*(x*x + z*z), 2*(y*z - w*x)],
-        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x*x + y*y)]
-    ])
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+        ]
+    )
 
 
 def q2rotmat(q) -> np.ndarray:

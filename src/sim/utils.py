@@ -1,44 +1,18 @@
 from __future__ import annotations
 
 import gymnasium as gym
-import matplotlib.animation as animation
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from gymnasium.envs.registration import register
-from gymnasium import spaces
-
-from sim.sim_config import POLICY_TYPE
-
-
-def model_indim(
-    rpenv: gym.Env | gym.vector.AsyncVectorEnv, model_input: list[str]
-) -> int:
-    if isinstance(rpenv, gym.vector.AsyncVectorEnv):
-        obs_space = rpenv.single_observation_space
-    else:
-        obs_space = rpenv.observation_space
-
-    return sum(v.shape[0] for k, v in obs_space.items() if k in model_input)
-
-
-def actiondim(rpenv: gym.Env | gym.vector.AsyncVectorEnv) -> int:
-    if POLICY_TYPE == "velocity":
-        if isinstance(rpenv, gym.vector.AsyncVectorEnv):
-            act_space = rpenv.single_action_space
-        else:
-            act_space = rpenv.action_space
-        return sum(v.shape[0] for v in act_space.values())
-    elif POLICY_TYPE == "acceleration":
-        return 2  # Two wheels
+from omegaconf import DictConfig
 
 
 def register_and_make_env(
-    env_config: dict,
-    obs_space: list[str],
-    vector_env: bool = False,
-    batch_size: int = 1,
+    cfg: DictConfig,
 ) -> gym.Env | gym.vector.AsyncVectorEnv:
+    env_config = dict(cfg.env)
+    n_parallel_env = env_config.pop("n_parallel_env", 1)
+
     register(
         id="RiktigPatrick-v0",
         entry_point="sim.envs.rp_env:GymRP",
@@ -46,24 +20,20 @@ def register_and_make_env(
         kwargs=env_config,
     )
 
-    if vector_env:
+    if n_parallel_env > 1:
         return gym.vector.AsyncVectorEnv(
             [
                 lambda: gym.make(
                     "RiktigPatrick-v0",
-                    state_keys=obs_space,
-                    render_mode="rgb_array",
                     disable_env_checker=True,
                     **env_config,
                 )
-                for _ in range(batch_size)
+                for _ in range(n_parallel_env)
             ]
         )
 
     return gym.make(
         "RiktigPatrick-v0",
-        state_keys=obs_space,
-        render_mode="rgb_array",
         disable_env_checker=True,
         **env_config,
     )

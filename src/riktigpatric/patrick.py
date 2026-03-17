@@ -6,12 +6,10 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional, Union
+from enum import Enum
 
 import numpy as np
 import pandas as pd
-import torch
-from gymnasium import spaces
 
 from filters.mahony import Mahony
 from relay.conversions import make_ctrl
@@ -26,7 +24,7 @@ MINPHI = -40
 MAXPHI = 40
 SERVOMODE = "position"
 
-htheta_params = {
+HTHETA_PARAMS = {
     "name": "head_theta",
     "max_speed": (MAXTHETA - MINTHETA) * SPEEDSCALE,  # [deg/sec]
     "minlim": MINTHETA,
@@ -37,7 +35,7 @@ htheta_params = {
     "operation_mode": SERVOMODE,
 }
 
-hphi_params = {
+HPHI_PARAMS = {
     "name": "head_phi",
     "max_speed": (MAXPHI - MINPHI) * SPEEDSCALE,  # [deg/sec]
     "minlim": MINPHI,
@@ -49,233 +47,175 @@ hphi_params = {
 }
 
 
-class StepAction:
-    left_wheel: Union[np.ndarray, float] = 0.0
-    right_wheel: Union[np.ndarray, float] = 0.0
-    head_pitch: Union[np.ndarray, float] = 0.0
-    head_turn: Union[np.ndarray, float] = 0.0
+class Actions(str, Enum):
+    ACC_LEFT_WHEEL = "act/accelerate_left_wheel"
+    ACC_RIGHT_WHEEL = "act/accelerate_right_wheel"
+    ACC_HEAD_PITCH = "act/accelerate_head_pitch"
+    ACC_HEAD_TURN = "act/accelerate_head_turn"
 
-    def __init__(self, lock_head: bool = True):
-        self.lock_head = lock_head
-        if self.lock_head:
-            self._ndim = 2
-        else:
-            self._ndim = 4
+    VEL_LEFT_WHEEL = "act/left_wheel_vel"
+    VEL_RIGHT_WHEEL = "act/right_wheel_vel"
+    VEL_HEAD_PITCH = "act/head_pitch_vel"
+    VEL_HEAD_TURN = "act/head_turn_vel"
+
+    HEAD_PITCH = "act/head_pitch"
+    HEAD_TURN = "act/head_turn"
+    TIME = "act/time"
+
+
+class StepAction:
+    def __init__(self, action_d: dict[Actions, np.ndarray]):
+        self._ndim = len(action_d)
+        self._actions = action_d.keys()
+
+        self.from_dict(action_d)
 
     @property
     def ndim(self) -> int:
         return self._ndim
 
-    def to_dict(self) -> dict[str, np.ndarray]:
-        act_arr = {
-            "act/left_wheel": self.left_wheel,
-            "act/right_wheel": self.right_wheel,
-        }
-        if not self.lock_head:
-            act_arr.update(
-                {
-                    "act/head_pitch": self.head_pitch,
-                    "act/head_turn": self.head_turn,
-                }
-            )
-        if isinstance(self.left_wheel, float):
-            return {k: np.array([v]) for k, v in act_arr.items()}
+    def to_dict(self) -> dict[str | Actions, np.ndarray]:
+        d_: dict[Actions, np.ndarray] = {}
+        for a in self._actions:
+            if (a_val := getattr(self, a)) is None:
+                raise ValueError(f"Action {a} is not set!")
 
-        return act_arr
+            if isinstance(a_val, float):
+                a_val = np.array([a_val])
+            elif isinstance(a_val, np.ndarray):
+                pass
+            else:
+                raise ValueError(f"Invalid type for action {a} : {type(a_val)}")
 
-    def from_dict(self, d: dict[str, np.ndarray]) -> StepAction:
-        if d["act/left_wheel"].ndim != 1:
-            raise NotImplementedError()
-        self.left_wheel = d["act/left_wheel"][0]
-        self.right_wheel = d["act/right_wheel"][0]
-        if not self.lock_head:
-            self.head_pitch = d["act/head_pitch"][0]
-            self.head_turn = d["act/head_turn"][0]
+            d_[a] = a_val
+
+        return d_
+
+    def from_dict(self, d: dict[Actions, np.ndarray]) -> StepAction:
+        for key, val in d.items():
+            if key not in self._actions:
+                raise KeyError(f"Invalid action key {key} in input dict!")
+
+            if not isinstance(val, np.ndarray):
+                raise ValueError(f"Invalid type for action {key} : {type(val)}")
+
+            setattr(self, key, val)
+
         return self
 
-    def from_array(
-        self,
-        action: np.ndarray,
-        lock_head: bool = True,
-    ) -> StepAction:
-        if action.ndim == 1:
-            # print("Ndim == 1")
-            action = action.reshape(1, -1)
 
-        action = action.astype(np.float64)
-
-        # TODO: implement control mapping here.
-        self.left_wheel = action[:, 0].reshape(-1, 1)
-        self.right_wheel = action[:, 1].reshape(-1, 1)
-
-        if lock_head:
-            return self
-
-        self.lock_head = lock_head
-        self.head_pitch = action[:, 2].reshape(-1, 1)
-        self.head_turn = action[:, 3].reshape(-1, 1)
-        return self
-
-    def __str__(self) -> str:
-        return f"left_wheel : {self.left_wheel}"
+class Observables(str, Enum):
+    ACC = "sens/acc"
+    GYRO = "sens/gyro"
+    HEAD_PITCH = "sens/head_pitch"
+    HEAD_TURN = "sens/head_turn"
+    LEFT_WHEEL_VEL = "sens/left_wheel_vel"
+    RIGHT_WHEEL_VEL = "sens/right_wheel_vel"
+    RP_PITCH = "filter/rp_pitch"
+    TRUE_PITCH = "simul/rp_pitch"
+    OBS_TIME = "env/obs_time"
 
 
 class Obs:
-    def __init__(self):
-        self._acc: np.ndarray = np.zeros(3)
-        self._gyro: np.ndarray = np.zeros(3)
-        self._head_pitch: np.ndarray = np.zeros(1)
-        self._head_turn: np.ndarray = np.zeros(1)
-        self._left_wheel_vel: np.ndarray = np.zeros(1)
-        self._right_wheel_vel: np.ndarray = np.zeros(1)
-        self._true_pitch: np.ndarray = np.zeros(1)
-        self._action_time: np.ndarray = np.zeros(1)
-        self._obs_time: np.ndarray = np.zeros(1)
+    def __init__(self, obs_d: dict[Observables, np.ndarray]):
+        self.set_observables(obs_d)
 
-    @property
-    def ndim(self) -> int:
-        return 9
+    def set_observable(self, obs: Observables, value: np.ndarray | float):
+        if obs not in Observables:
+            raise ValueError(f"Invalid observable {obs}!")
+        if isinstance(value, float):
+            value = np.array([value])
+        elif isinstance(value, np.ndarray):
+            pass
+        else:
+            raise ValueError(f"Invalid type for observable {obs} : {type(value)}")
 
-    @property
-    def acc(self) -> np.ndarray:
-        return self._acc
+        setattr(self, obs, value)
 
-    @acc.setter
-    def update_acc(self, acc: Union[np.ndarray, torch.Tensor]):
-        if isinstance(acc, torch.Tensor):
-            acc = acc.numpy()
-        self._acc = acc
+    def get_observable(self, obs: Observables) -> np.ndarray:
+        if obs not in Observables:
+            raise ValueError(f"Invalid observable {obs}!")
 
-    @property
-    def gyro(self) -> np.ndarray:
-        return self._gyro
+        if (val := getattr(self, obs)) is None:
+            raise ValueError(f"Observable {obs} is not set!")
 
-    @gyro.setter
-    def update_gyro(self, gyro: Union[np.ndarray, torch.Tensor]):
-        if isinstance(gyro, torch.Tensor):
-            gyro = gyro.numpy()
-        self._gyro = gyro
+        if not isinstance(val, np.ndarray):
+            raise ValueError(f"Invalid type for observable {obs} : {type(val)}")
 
-    @property
-    def head_pitch(self) -> np.ndarray:
-        return self._head_pitch
+        return val
 
-    @head_pitch.setter
-    def update_head_pitch(self, head_pitch: float):
-        self._head_pitch = np.array([head_pitch])
+    def set_observables(self, obs_d: dict[Observables, np.ndarray]):
+        for obs, value in obs_d.items():
+            self.set_observable(obs, value)
 
-    @property
-    def head_turn(self) -> np.ndarray:
-        return self._head_turn
-
-    @head_turn.setter
-    def update_head_turn(self, head_turn: float):
-        self._head_turn = np.array([head_turn])
-
-    @property
-    def left_wheel_vel(self) -> np.ndarray:
-        return self._left_wheel_vel
-
-    @left_wheel_vel.setter
-    def update_left_wheel_vel(self, vel: float):
-        self._left_wheel_vel = np.array([vel])
-
-    @property
-    def right_wheel_vel(self) -> np.ndarray:
-        return self._right_wheel_vel
-
-    @right_wheel_vel.setter
-    def update_right_wheel_vel(self, vel: float):
-        self._right_wheel_vel = np.array([vel])
-
-    @property
-    def true_pitch(self) -> np.ndarray:
-        return self._true_pitch
-
-    @true_pitch.setter
-    def update_true_pitch(self, pitch: float):
-        self._true_pitch = np.array([pitch])
-
-    @property
-    def action_time(self) -> np.ndarray:
-        return self._action_time
-
-    @action_time.setter
-    def update_action_time(self, t: float):
-        self._action_time = np.array([t])
-
-    @property
-    def obs_time(self) -> np.ndarray:
-        return self._obs_time
-
-    @obs_time.setter
-    def update_obs_time(self, t: float):
-        self._obs_time = np.array([t])
+    def to_dict(self) -> dict[str | Observables, np.ndarray]:
+        return {obs: self.get_observable(obs) for obs in Observables}
 
 
 class State:
     def __init__(
         self,
-        keys: list[str] = ["sens/gyro", "filter/rp_pitch", "act/left_wheel"],
         record: bool = False,
     ):
-        self.obs = Obs()
-        self.keys = keys
         self.mahony = Mahony()
-        self.prev_t = 0.0
-        self._action_dict = StepAction().to_dict()
-        self._reward_dict = {}
         self._record = record
-        self._history = []
-        self._last_obs_t: Optional[float] = None
+        self._history: list[np.ndarray] = []
 
-    def update_obs(
-        self,
-        *,
-        action_time: float,
-        obs_time: float,
-        acc: np.ndarray,
-        gyro: np.ndarray,
-        head_pitch: float,
-        head_turn: float,
-        left_wheel_vel: float,
-        right_wheel_vel: float,
-        true_pitch: float,
-        action: Optional[StepAction] = None,
-    ):
-        self.obs.update_action_time = action_time
-        self.obs.update_obs_time = obs_time
-        self.obs.update_gyro = gyro
-        self.obs.update_acc = acc
-        self.obs.update_head_pitch = head_pitch
-        self.obs.update_head_turn = head_turn
-        self.obs.update_left_wheel_vel = left_wheel_vel
-        self.obs.update_right_wheel_vel = right_wheel_vel
-        self.obs.update_true_pitch = true_pitch
-
-        self.mahony.update(acc, gyro, obs_time - self.prev_t)
-        self.prev_t = obs_time
-
-        if action is not None:
-            self._action_dict = action.to_dict()
-
-        self._last_obs_t = obs_time
-
-    def update_rewards(self, t: float, reward_info: dict[str, float]):
-        if self._last_obs_t is None:
-            raise RuntimeError("update_rewards() called without prior update_obs()")
-        if self._last_obs_t != t:
-            raise RuntimeError(
-                f"update_rewards(t={t}) called but last update_obs was at t={self._last_obs_t}"
-            )
-        self._reward_dict = {}
-        for key, value in reward_info.items():
-            self._reward_dict[key] = np.array([value])
-        self._last_obs_t = None
+    def step(self):
+        obs_t = self.obs.get_observable(Observables.OBS_TIME)[0]
+        self.mahony.update(
+            self.obs.get_observable(Observables.ACC),
+            self.obs.get_observable(Observables.GYRO),
+            obs_t - self.prev_t,
+        )
+        self.prev_t = obs_t
 
         if self._record:
-            arr = self.get_state_arr(keys="all")
+            arr, _ = self.get_state_arr()
             self._history.append(np.copy(arr))
+
+    def update_action(self, action_t: float, action_dict: dict[Actions, np.ndarray]):
+        action_dict[Actions.TIME] = np.array([action_t])
+        self.action = StepAction(action_dict)
+
+    def update_rewards(self, reward_dict: dict[str, np.ndarray]):
+        self.reward_dict = reward_dict
+
+    def update_obs(self, obs_dict: dict[Observables, np.ndarray]):
+        self.obs = Obs(obs_dict)
+
+    def get_state_dict(self) -> dict[str, np.ndarray]:
+        d_ = self.obs.to_dict()
+        d_.update(self.action.to_dict())
+        d_.update(self.reward_dict)
+
+        return d_
+
+    def get_state_arr(self) -> tuple[np.ndarray, dict[str, int]]:
+        d = self.get_state_dict()
+        arr = None
+        keys = []
+        for k in sorted(d.keys()):
+            arr_ = d[k]
+            if not isinstance(arr_, np.ndarray):
+                raise ValueError(f"Invalid type for state variable {k} : {type(arr_)}")
+
+            if len(arr_) == 0:
+                raise ValueError(f"Empty array for state variable {k}!")
+
+            if arr_.ndim != 1:
+                raise ValueError(f"State variable {k} has invalid shape {arr_.shape}!")
+
+            if len(arr_) > 1:
+                keys_ = [f"{k}_{i}" for i in range(len(arr_))]
+            else:
+                keys_ = [k]
+
+            arr = np.concatenate((arr, arr_), axis=0)
+            keys += keys_
+
+        keys_d = {k: i for i, k in enumerate(keys)}
+        return arr, keys_d
 
     @property
     def history(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
@@ -297,85 +237,12 @@ class State:
         self.mahony.reset()
         self.prev_t = 0.0
         self._history = []
-        self._action_dict = StepAction().to_dict()
-        self._reward_dict = {}
-        self._last_obs_t = None
-        self.obs = Obs()
-
-    def get_state_dict(
-        self, keys: Optional[Union[str, list[str]]] = None
-    ) -> dict[str, np.ndarray]:
-        d = {
-            "sens/acc": self.obs.acc,
-            "sens/gyro": self.obs.gyro,
-            "sens/head_pitch": self.obs.head_pitch,
-            "sens/head_turn": self.obs.head_turn,
-            "sens/left_wheel_vel": self.obs.left_wheel_vel,
-            "sens/right_wheel_vel": self.obs.right_wheel_vel,
-            "filter/rp_pitch": np.array([self.euler[1]]),
-            "simul/rp_pitch": self.obs.true_pitch,
-            "env/action_time": self.obs.action_time,
-            "env/obs_time": self.obs.obs_time,
-        }
-        d.update(self._action_dict)
-        d.update(self._reward_dict)
-
-        if keys is None:
-            keys = self.keys
-        elif keys == "all":
-            keys = list(d.keys())
-        elif isinstance(keys, list):
-            pass
-        else:
-            raise ValueError("Invalid keys!")
-
-        d = {k: d[k] for k in sorted(keys)}
-
-        return d
-
-    def get_state_arr(
-        self, keys: Optional[Union[str, list[str]]] = None, ret_idxs: bool = False
-    ) -> Union[np.ndarray, tuple[np.ndarray, dict[str, np.ndarray]]]:
-        """
-
-        Args:
-            keys: list of keys to include.
-            ret_idxs: Whether to return dictionary with idxs for the measurements.
-
-        Returns:
-
-
-        """
-        state_d = self.get_state_dict(keys=keys)
-
-        state_arr = np.concatenate([arr.flatten() for arr in state_d.values()], axis=0)
-        if ret_idxs:
-            start_idx = 0
-            idxs_d = {}
-            for k, v in state_d.items():
-                if len(v) == 1:
-                    idxs_d[k] = np.array([start_idx])
-                else:
-                    for i in range(len(v)):
-                        idxs_d[f"{k}_{i}"] = np.array([start_idx + i])
-                start_idx += len(v)
-
-            return state_arr, idxs_d
-
-        return state_arr
-
-    def to_obs_space(self) -> spaces.Dict:
-        d = {
-            k: spaces.Box(-np.inf, np.inf, shape=(len(v),), dtype=float)
-            for k, v in self.get_state_dict(keys="all").items()
-        }
-        return spaces.Dict(d)
 
 
 class RPHead:
     def __init__(self):
-        self.phiservo = Servo(**hphi_params)
-        self.thetaservo = Servo(**htheta_params)
+        self.phiservo = Servo(**HPHI_PARAMS)
+        self.thetaservo = Servo(**HTHETA_PARAMS)
         self._servo_init = 0
         self._servosinited = False
         self._servo_operation_mode = SERVOMODE
