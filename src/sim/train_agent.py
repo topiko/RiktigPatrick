@@ -50,7 +50,7 @@ def rollout(
         action_np = tensor2numpy(action)
         obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
 
-        done = terminated | truncated
+        done = terminated | truncated.flatten()
         if done.any():
             break
 
@@ -77,9 +77,14 @@ def main(cfg: DictConfig):
 
         logps, rewards = rollout(rp_env, agent, cfg)
 
-        G = compute_returns(rewards.numpy(), discount=0.99)
+        # Compute returns for each environment separately
+        rewards_np = rewards.numpy()
+        G = np.zeros_like(rewards_np)
+        for env_idx in range(rewards_np.shape[0]):
+            G[env_idx] = compute_returns(rewards_np[env_idx], discount=0.99)
+
         G_t = torch.from_numpy(G)
-        advantages = G_t - G_t.mean(dim=0, keepdim=True)
+        advantages = G_t - G_t.mean(dim=1, keepdim=True)
 
         policy_loss = -torch.mean(logps * advantages)
         policy_loss.backward()

@@ -34,7 +34,7 @@ policy:
     - act/accelerate_both_wheels
 
   act_map:
-    act/accelerate_both_wheels: 3
+    act/accelerate_both_wheels: 7
 
   inputs:
     - filter/rp_pitch
