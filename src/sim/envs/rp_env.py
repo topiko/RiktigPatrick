@@ -382,8 +382,6 @@ class GymRP(gymnasium.Env):
 
     @property
     def terminated(self) -> bool:
-        print(self.state.euler[1])
-        print(self.state.obs.get_observable(Observables.TRUE_PITCH))
         return abs(self.state.euler[1]) > 20
 
     @property
