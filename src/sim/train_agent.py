@@ -79,16 +79,16 @@ def main(cfg: DictConfig):
 
         G = compute_returns(rewards.numpy(), discount=0.99)
         G_t = torch.from_numpy(G)
-        advantages = G_t # - G_t.mean()
+        advantages = G_t - G_t.mean(dim=0, keepdim=True)
 
         policy_loss = -torch.mean(logps * advantages)
         policy_loss.backward()
         optimizer.step()
 
-        print(G.shape)
         if i % 10 == 0:
-            print("Policy loss:", policy_loss.item())
-            print("Returns:", G.sum(axis=1).mean())
+            print(
+                f"Step {i:4d}: policy_loss={policy_loss.item():.4f}, returns={G.sum(axis=1).mean():.2f}, min_ep_len={rewards.shape[1]}"
+            )
 
         i += 1
 

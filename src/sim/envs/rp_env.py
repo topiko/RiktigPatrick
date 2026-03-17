@@ -24,7 +24,7 @@ HEAD_M = 0.2
 FORCERANGE = 15
 
 MAX_WHEEL_VEL = 10
-MAX_WHEEL_ACC = 100
+MAX_WHEEL_ACC = 20
 
 RAD2REV = 1.0 / (2 * np.pi)  # rad/s → rev/s
 RAD2DEG = 180.0 / np.pi  # rad/s → deg/s

@@ -19,22 +19,22 @@ rl:
   trim_end_steps: 0
 
 train:
-  policy_lr: 0.0010
+  policy_lr: 0.001
   value_lr: 0.03
   n_epochs: 10
   grad_clip: 10.0
 
 env:
   step_time: 0.01
-  randomize: true
-  n_parallel: 32
+  randomize: false
+  n_parallel: 5
 
 policy:
   actions:
     - act/accelerate_both_wheels
 
   act_map:
-    act/accelerate_both_wheels: 15
+    act/accelerate_both_wheels: 3
 
   inputs:
     - filter/rp_pitch
