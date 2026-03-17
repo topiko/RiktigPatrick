@@ -7,3 +7,4 @@ mlflow-artifacts/
 .env
 video/
 plots/
+claude/
