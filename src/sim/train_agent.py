@@ -182,8 +182,8 @@ def main(cfg: DictConfig):
             )
             eps = Episode(obs_l, action_l, reward_l)
 
-            # Generate plot
-            fig = plot_episode(eps, env_idx=0, figsize=(14, 12))
+            # Generate plot (eps is single episode)
+            fig = plot_episode(eps)
             if fig and cfg.logging.mlflow.enabled:
                 plot_path = f"./plots/episode_iter_{i:04d}.png"
                 fig.savefig(plot_path, dpi=230, bbox_inches="tight")

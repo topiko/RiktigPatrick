@@ -267,9 +267,9 @@ def plot_episode(eps: Episode, figsize=None):
 
     # Get time array for x-axis
     if hasattr(eps, "TIME"):
-        time_data = eps.TIME[:, env_idx, 0]
+        time_data = eps.TIME[:, 0] if eps.TIME.ndim > 1 else eps.TIME
     elif hasattr(eps, "OBS_TIME"):
-        time_data = eps.OBS_TIME[:, env_idx, 0]
+        time_data = eps.OBS_TIME[:, 0] if eps.TIME.ndim > 1 else eps.TIME
     else:
         raise ValueError("Episode must have TIME or OBS_TIME attribute for time axis")
 
@@ -277,7 +277,7 @@ def plot_episode(eps: Episode, figsize=None):
 
     # Plot observations
     for obs_name in obs_names:
-        obs_data = getattr(eps, obs_name)[:, env_idx, :]
+        obs_data = getattr(eps, obs_name)
 
         if obs_data.shape[1] == 1:
             axes[plot_idx].plot(time_data, obs_data[:, 0], label=obs_name)
@@ -296,7 +296,7 @@ def plot_episode(eps: Episode, figsize=None):
 
     # Plot actions
     for action_name in action_names:
-        action_data = getattr(eps, action_name)[:, env_idx, :]
+        action_data = getattr(eps, action_name)
 
         if action_data.shape[1] == 1:
             axes[plot_idx].plot(
@@ -326,7 +326,7 @@ def plot_episode(eps: Episode, figsize=None):
 
     # Plot rewards
     for reward_key in reward_keys:
-        reward_data = eps.reward_components[reward_key][:, env_idx]
+        reward_data = eps.reward_components[reward_key]
 
         axes[plot_idx].plot(time_data, reward_data, label=reward_key)
         axes[plot_idx].set_ylabel(reward_key, fontsize=9)
@@ -337,18 +337,18 @@ def plot_episode(eps: Episode, figsize=None):
         plot_idx += 1
 
     axes[-1].set_xlabel("Time (s)")
-    fig.suptitle(f"Complete Episode - Environment {env_idx}", fontsize=12)
+    fig.suptitle(f"Complete Episode - Episode", fontsize=12)
     fig.tight_layout()
 
     return fig
 
 
-def plot_episode_grid(eps: Episode, env_idx: int = 0, figsize=(16, 10)):
+def plot_episode_grid(eps: Episode, figsize=(16, 10)):
     """Plot episode data in a grid layout (observations, actions, rewards as columns).
 
     Args:
         eps: Episode object
-        env_idx: Which environment to plot (default: 0)
+        
         figsize: Figure size tuple
 
     Returns:
@@ -371,7 +371,7 @@ def plot_episode_grid(eps: Episode, env_idx: int = 0, figsize=(16, 10)):
 
     for idx, obs_name in enumerate(obs_names):
         ax = plt.subplot(max(n_obs, 3), 3, idx * 3 + 1)
-        obs_data = getattr(eps, obs_name)[:, env_idx, :]
+        obs_data = getattr(eps, obs_name)
 
         if obs_data.shape[1] == 1:
             ax.plot(obs_data[:, 0])
@@ -399,7 +399,7 @@ def plot_episode_grid(eps: Episode, env_idx: int = 0, figsize=(16, 10)):
 
     for idx, action_name in enumerate(action_names):
         ax = plt.subplot(max(n_actions, 3), 3, idx * 3 + 2)
-        action_data = getattr(eps, action_name)[:, env_idx, :]
+        action_data = getattr(eps, action_name)
 
         if action_data.shape[1] == 1:
             ax.plot(action_data[:, 0], marker="o", markersize=2)
@@ -420,7 +420,7 @@ def plot_episode_grid(eps: Episode, env_idx: int = 0, figsize=(16, 10)):
 
         for idx, reward_key in enumerate(reward_keys):
             ax = plt.subplot(max(n_rewards, 3), 3, idx * 3 + 3)
-            reward_data = eps.reward_components[reward_key][:, env_idx]
+            reward_data = eps.reward_components[reward_key]
 
             ax.plot(reward_data)
             ax.set_ylabel(reward_key, fontsize=8)
@@ -428,7 +428,7 @@ def plot_episode_grid(eps: Episode, env_idx: int = 0, figsize=(16, 10)):
             if idx == n_rewards - 1:
                 ax.set_xlabel("Timestep", fontsize=8)
 
-    fig.suptitle(f"Episode Grid - Environment {env_idx}", fontsize=12)
+    fig.suptitle(f"Episode Grid - Episode", fontsize=12)
     fig.tight_layout()
 
     return fig
