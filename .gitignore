@@ -1,6 +1,7 @@
 *__pycache__
 *.log
 *.stl
+test_plots/
 */data
 mlruns/
 mlflow-artifacts/
