@@ -9,6 +9,69 @@ from omegaconf import DictConfig
 from riktigpatric.patrick import Actions, Observables
 
 
+def _add_batch_dim(
+    data: dict | np.ndarray | torch.Tensor | float | bool,
+) -> dict | np.ndarray | torch.Tensor:
+    """Add batch dimension to data if needed.
+
+    Args:
+        data: dict, np.ndarray, torch.Tensor, or scalar value
+
+    Returns:
+        Data with batch dimension added where ndim == 1
+        - dict: Recursively add batch dim to values
+        - np.ndarray with ndim==1: shape (N,) -> (1, N)
+        - torch.Tensor with ndim==1: shape (N,) -> (1, N)
+        - scalar: converted to np.array([scalar])
+    """
+    if isinstance(data, dict):
+        return {k: _add_batch_dim(v) for k, v in data.items()}
+    elif isinstance(data, np.ndarray):
+        if data.ndim == 1:
+            return data[np.newaxis, :]
+        else:
+            return data
+    elif isinstance(data, torch.Tensor):
+        if data.ndim == 1:
+            return data.unsqueeze(0)
+        else:
+            return data
+    else:
+        # Scalar (float, bool, int) - convert to array with batch dim
+        return np.array([data])
+
+
+def _remove_batch_dim(
+    data: dict | np.ndarray | torch.Tensor,
+) -> dict | np.ndarray | torch.Tensor | float:
+    """Remove batch dimension from data (assumes batch size = 1).
+
+    Args:
+        data: dict, np.ndarray, or torch.Tensor with batch dimension
+
+    Returns:
+        Data with batch dimension removed
+        - dict: Recursively remove batch dim from values
+        - np.ndarray with shape[0]==1: shape (1, N) -> (N,)
+        - torch.Tensor with shape[0]==1: shape (1, N) -> (N,)
+        - Otherwise: return as-is
+    """
+    if isinstance(data, dict):
+        return {k: _remove_batch_dim(v) for k, v in data.items()}
+    elif isinstance(data, np.ndarray):
+        if data.shape[0] == 1:
+            return data[0]
+        else:
+            return data
+    elif isinstance(data, torch.Tensor):
+        if data.shape[0] == 1:
+            return data[0]
+        else:
+            return data
+    else:
+        return data
+
+
 class SingleEnvWrapper:
     """Minimal wrapper to add/remove batch dimension for single environment.
 
@@ -35,43 +98,29 @@ class SingleEnvWrapper:
             Batched obs_d (1, dim) and info
         """
         obs_d, info = self.env.reset(seed=seed)
-
-        # Add batch dimension: (dim,) -> (1, dim)
-        obs_d_batched = {
-            k: v[np.newaxis, :] if v.ndim == 1 else v[np.newaxis, ...]
-            for k, v in obs_d.items()
-        }
-
+        obs_d_batched = _add_batch_dim(obs_d)
         return obs_d_batched, info
 
-    def step(self, action_d):
+    def step(self, action_d: dict) -> tuple:
         """Remove batch dim before step, add it back after.
 
         Args:
             action_d: Dict with batched actions, shape (1, dim)
 
         Returns:
-            Batched outputs: obs_d (1, dim), reward (1,), terminated (1,), truncated (1, 1)
+            Batched outputs: obs_d (1, dim), reward (1,), terminated (1,), truncated (1, 1), reward_info
         """
         # Remove batch dimension: (1, dim) -> (dim)
-        action_single = {k: v[0] for k, v in action_d.items()}
+        action_single = _remove_batch_dim(action_d)
 
         # Call underlying single env
         obs_d, reward, terminated, truncated, reward_info = self.env.step(action_single)
 
         # Add batch dimension back
-        # obs_d: (dim,) -> (1, dim)
-        obs_d_batched = {
-            k: v[np.newaxis, :] if v.ndim == 1 else v[np.newaxis, ...]
-            for k, v in obs_d.items()
-        }
-        # reward: scalar -> (1,)
-        reward_batched = (
-            np.array([reward]) if np.isscalar(reward) else reward[np.newaxis]
-        )
-        # terminated: bool -> (1,)
-        terminated_batched = np.array([terminated])
-        # truncated: bool -> (1, 1) to match AsyncVectorEnv format
+        obs_d_batched = _add_batch_dim(obs_d)
+        reward_batched = _add_batch_dim(reward)
+        terminated_batched = _add_batch_dim(terminated)
+        # truncated needs special shape (1, 1) to match AsyncVectorEnv format
         truncated_batched = np.array([[truncated]])
 
         return (
