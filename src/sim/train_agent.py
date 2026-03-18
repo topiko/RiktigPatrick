@@ -61,7 +61,6 @@ def rollout(
     torch.Tensor,
     list[dict[Observables, np.ndarray]],
     list[dict[Actions, np.ndarray]],
-    list[str, np.ndarray],
 ]:
     obs_d, _ = rp_env.reset(seed=seed)
 
@@ -70,18 +69,18 @@ def rollout(
     obs_l = []
     action_l = []
     rewards_l = []
-    rewards_l2 = []
     logps_l = []
 
     for _ in range(max_steps):
         obs_d_t = np2tensor(obs_d)
+
         action, logp = agent.act(obs_d_t)
 
         obs_l.append(obs_d)
         action_np = tensor2numpy(action)
         action_l.append(action_np)
 
-        obs_d, reward, terminated, truncated, reward_info = rp_env.step(action_np)
+        obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
 
         done = terminated | truncated.flatten()
         if done.any():
@@ -89,12 +88,11 @@ def rollout(
 
         logps_l.append(logp)
         rewards_l.append(reward)
-        rewards_l2.append(reward_info)
 
     logps_t = torch.cat(logps_l, dim=1)
-    rewards = np.stack(rewards_l, axis=1)  # Shape: (num_envs, num_steps)
+    rewards = np.concat(rewards_l, axis=1)  # Shape: (num_envs, num_steps)
 
-    return logps_t, rewards, obs_l, action_l, rewards_l2
+    return logps_t, rewards, obs_l, action_l
 
 
 @hydra.main(config_path=HYDRA_CONFIG_DIR, config_name="rlrp", version_base=None)
@@ -113,6 +111,9 @@ def main(cfg: DictConfig):
 
     # Create environment
     rp_env = register_and_make_env(cfg)
+
+    if cfg.env.n_parallel == 1:
+        rp_env = SingleEnvWrapper(rp_env)
 
     # video env: Wrap single env with batch dimension handler for rollout compatibility
     rp_video_env = SingleEnvWrapper(
@@ -136,7 +137,7 @@ def main(cfg: DictConfig):
     while True:
         optimizer.zero_grad()
 
-        logps, rewards, _, _, _ = rollout(rp_env, agent, cfg, seed=i)
+        logps, rewards, _, _ = rollout(rp_env, agent, cfg, seed=i)
 
         # Compute returns for each environment separately
         G = np.zeros_like(rewards)
@@ -177,10 +178,8 @@ def main(cfg: DictConfig):
         # Generate plots periodically
         if i % plot_freq == 0:
             rp_video_env.name_prefix = f"policy_iter_{i:04d}"
-            _, _, obs_l, action_l, reward_l = rollout(
-                rp_video_env, agent, cfg, seed=i + 10000
-            )
-            eps = Episode(obs_l, action_l, reward_l)
+            _, _, obs_l, action_l = rollout(rp_video_env, agent, cfg, seed=i + 10000)
+            eps = Episode(obs_l, action_l)
 
             # Generate plot (eps is single episode)
             fig = plot_episode(
@@ -193,7 +192,8 @@ def main(cfg: DictConfig):
                 + [
                     (Actions.TIME, (Actions.from_str(list(a.keys())[0]),))
                     for a in cfg.policy.actions
-                ],
+                ]
+                + [(Observables.OBS_TIME, (Observables.REWARD_TOTAL,))],
             )
             plot_path = f"./plots/episode_iter_{i:04d}.png"
             fig.savefig(plot_path, dpi=230, bbox_inches="tight")

@@ -289,6 +289,10 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
             Observables.LEFT_WHEEL_VEL,
             Observables.RIGHT_WHEEL_VEL,
             Observables.RP_PITCH,
+            Observables.TRUE_PITCH,
+            Observables.REWARD_STEP,
+            Observables.REWARD_TOTAL,
+            Observables.REWARD_RP_PITCH,
         ]:
             d_[obs] = gymnasium.spaces.Box(
                 low=-100.0, high=100.0, shape=(1,), dtype=np.float32
@@ -296,10 +300,6 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
         elif obs in [Observables.ACC, Observables.GYRO]:
             d_[obs] = gymnasium.spaces.Box(
                 low=-100.0, high=100.0, shape=(3,), dtype=np.float32
-            )
-        elif obs == Observables.TRUE_PITCH:
-            d_[obs] = gymnasium.spaces.Box(
-                low=-180.0, high=180.0, shape=(1,), dtype=np.float32
             )
         else:
             raise ValueError(f"Invalid observation key: {obs}")
@@ -407,36 +407,39 @@ class GymRP(gymnasium.Env):
         def _get_sens(sens):
             return self.dm_env.bind(sens).sensordata.copy()
 
-        self.state.update_obs(
-            {
-                Observables.OBS_TIME: self.simul_time,  # seconds
-                Observables.ACC: _get_sens(self.acc_sens),  # m/s²
-                Observables.GYRO: _get_sens(self.gyro_sens),  # rad/s
-                Observables.HEAD_PITCH: _get_sens(self.head_pitch_sens)[0],  # rad
-                Observables.HEAD_TURN: _get_sens(self.head_turn_sens)[0],  # rad
-                Observables.LEFT_WHEEL_VEL: _get_sens(self.left_wheel_vel_sens)[
-                    0
-                ],  # rad/s
-                Observables.RIGHT_WHEEL_VEL: _get_sens(self.right_wheel_vel_sens)[
-                    0
-                ],  # rad/s
-                Observables.TRUE_PITCH: q2eul(
-                    self.dm_env.bind(self.body_quat).sensordata.copy()
-                )[1]
-                / np.pi
-                * 180,  # deg (converted for historical reasons)
-                Observables.RP_PITCH: self.state.euler[1],  # deg (filtered pitch)
-            }
-        )
+        obs_d = {
+            Observables.OBS_TIME: self.simul_time,  # seconds
+            Observables.ACC: _get_sens(self.acc_sens),  # m/s²
+            Observables.GYRO: _get_sens(self.gyro_sens),  # rad/s
+            Observables.HEAD_PITCH: _get_sens(self.head_pitch_sens)[0],  # rad
+            Observables.HEAD_TURN: _get_sens(self.head_turn_sens)[0],  # rad
+            Observables.LEFT_WHEEL_VEL: _get_sens(self.left_wheel_vel_sens)[0],  # rad/s
+            Observables.RIGHT_WHEEL_VEL: _get_sens(self.right_wheel_vel_sens)[
+                0
+            ],  # rad/s
+            Observables.TRUE_PITCH: q2eul(
+                self.dm_env.bind(self.body_quat).sensordata.copy()
+            )[1]
+            / np.pi
+            * 180,  # deg (converted for historical reasons)
+            Observables.RP_PITCH: self.state.euler[1],  # deg (filtered pitch)
+        }
 
-    def _get_reward(self) -> tuple[float, dict[str, float]]:
-        step_reward = 1
+        rew_d = self._get_reward()
+        obs_d.update(rew_d)
+
+        self.state.update_obs(obs_d)
+
+    def _get_reward(self) -> dict[Observables, float]:
+        step_reward = 1.0
 
         total = step_reward
-        return total, {"step_reward": step_reward, "time": self.simul_time}
-
-    def _get_info(self) -> dict:
-        return {}
+        # We need to list all obrservable rewards here...
+        return {
+            Observables.REWARD_STEP: step_reward,
+            Observables.REWARD_RP_PITCH: 0.0,
+            Observables.REWARD_TOTAL: total,
+        }
 
     def reset(
         self, options: Optional[Any] = None, seed: int | None = None
@@ -446,8 +449,7 @@ class GymRP(gymnasium.Env):
 
         self._update_obs()
 
-        d, i = self._get_obs(), self._get_info()
-        return d, i
+        return self._get_obs(), {}
 
     @property
     def terminated(self) -> bool:
@@ -553,19 +555,19 @@ class GymRP(gymnasium.Env):
             t = self.dm_env.data.time
 
         # Read the observation at time t + self.step_time.
+        # We also update the reward here.
         self._update_obs()
 
         # The action was taken at t0
         self.state.update_action(t0, action_d)
 
         # The reward is received at time t
-        reward, reward_d = self._get_reward()
-        self.state.update_rewards(reward_d)
+        reward = self.state.obs.get_observable(Observables.REWARD_TOTAL)
 
         # The state needs a step as ewll
         self.state.step()
 
-        return self._get_obs(), reward, self.terminated, self.truncated, reward_d
+        return self._get_obs(), reward, self.terminated, self.truncated, {}
 
 
 def display_video(frames, framerate=30, fname: str = ""):

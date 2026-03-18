@@ -135,6 +135,10 @@ class Observables(str, Enum):
     TRUE_PITCH = "simul/rp_pitch"
     OBS_TIME = "env/obs_time"
 
+    REWARD_STEP = "reward/step"
+    REWARD_RP_PITCH = "reward/rp_pitch"
+    REWARD_TOTAL = "reward/total"
+
     @classmethod
     def from_str(cls, value: str) -> Observables:
         """Convert string value to Observables enum.

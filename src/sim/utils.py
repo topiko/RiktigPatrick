@@ -216,7 +216,6 @@ class Episode:
         self,
         obs_l: list[dict[Observables, np.ndarray]],
         action_l: list[dict[Actions, np.ndarray]],
-        rewards_l: list[dict[str, np.ndarray]],
     ):
         """Initialize episode from rollout data for SINGLE episode.
 
@@ -225,8 +224,6 @@ class Episode:
                    Each obs value should have shape (dim,) for single episode
             action_l: List of action dicts (keys are strings)
                       Each action value should have shape (dim,) for single episode
-            rewards_l: List of reward_info dicts (keys are strings)
-                       Each reward value should be scalar for single episode
 
         Raises:
             ValueError: If input data contains batch dimension (multiple environments)
@@ -251,12 +248,6 @@ class Episode:
             action_array = np.concat([act[action_key] for act in action_l], axis=0)
 
             setattr(self, f"ACT_{action_key.name}", action_array)
-
-        # Stack reward components over time: (num_steps, 1)
-        for reward_key in rewards_l[0].keys():
-            reward_array = np.concat([r[reward_key] for r in rewards_l], axis=0)
-
-            setattr(self, f"REWARD_{reward_key}", reward_array)
 
     def get_data(self, key: Actions | Observables | str) -> np.ndarray:
         if isinstance(key, Observables):
