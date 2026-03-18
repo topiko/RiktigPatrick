@@ -122,12 +122,15 @@ class SingleEnvWrapper:
         terminated_batched = _add_batch_dim(terminated)
         truncated_batched = _add_batch_dim(truncated)
 
+        # Add batch dimension to reward_info values for consistent Episode stacking
+        reward_info_batched = {k: _add_batch_dim(v) for k, v in reward_info.items()}
+
         return (
             obs_d_batched,
             reward_batched,
             terminated_batched,
             truncated_batched,
-            reward_info,
+            reward_info_batched,
         )
 
     def __getattr__(self, name):

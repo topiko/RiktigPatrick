@@ -197,12 +197,9 @@ def plot_rewards(eps: Episode, env_idx: int = 0, figsize=None):
         raise ValueError("Episode must have TIME or OBS_TIME attribute for time axis")
 
     for idx, reward_key in enumerate(reward_keys):
-        reward_data = eps.reward_components[reward_key]  # Shape: (num_steps, num_envs)
+        reward_data = eps.reward_components[reward_key][:, env_idx]
 
-        # Get data for this environment
-        env_data = reward_data[:, env_idx]  # Shape: (num_steps,)
-
-        axes[idx].plot(time_data, env_data, label=reward_key)
+        axes[idx].plot(time_data, reward_data, label=reward_key)
         axes[idx].set_ylabel(reward_key)
         axes[idx].legend(loc="upper right")
         axes[idx].grid(True, alpha=0.3)
