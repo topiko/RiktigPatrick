@@ -35,7 +35,7 @@ def _flatten_dict(d, parent_key="", sep="_"):
 
 
 def np2tensor(np_dict: dict) -> dict:
-    return {k: torch.from_numpy(v) for k, v in np_dict.items()}
+    return {k: torch.from_numpy(v).float() for k, v in np_dict.items()}
 
 
 def tensor2numpy(tensor_dict: dict) -> dict:
