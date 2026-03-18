@@ -25,9 +25,12 @@ train:
   grad_clip: 10.0
 
 env:
-  step_time: 0.01
+  step_time: 0.01  # seconds
   randomize: false
   n_parallel: 5
+  # All units are SI (International System of Units)
+  max_wheel_vel: 60  # rad/s - maximum wheel velocity
+  max_wheel_acc: 400   # rad/s² - maximum wheel acceleration
 
 policy:
   actions:
@@ -41,8 +44,6 @@ policy:
     - sens/left_wheel_vel
     - sens/right_wheel_vel
     - env/obs_time
-
-
 
 reward:
   step: 0.0
@@ -58,10 +59,4 @@ model:
     - "sens/left_wheel_vel"
     - "sens/right_wheel_vel"
     - "env/action_time"
-  # Fixed normalization scales (divide by these)
-  obs_scales:
-    filter/rp_pitch: 20.0  # deg (±20 deg range)
-    sens/gyro: 600.0  # deg/s (±600 deg/s range)
-    sens/left_wheel_vel: 5.0  # rev/s (max wheel vel)
-    sens/right_wheel_vel: 5.0  # rev/s (max wheel vel)
-    env/action_time: 10.0  # seconds (time constant for normalization)
+

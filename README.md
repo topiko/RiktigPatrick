@@ -14,15 +14,19 @@ Train a balancing robot using RL to balance upright and respond to disturbances.
 
 ```
 RiktigPatrick/
+├── config/
+│   └── rlrp.yaml          # Hydra configuration (SI units)
 ├── src/sim/               # RL training in MuJoCo
-│   ├── rl_rp.py          # Sequential RL training
-│   ├── parallel_rl_rp.py  # Parallel RL training (faster)
-│   ├── try_policy.py      # Test trained policy
-│   ├── algos.py           # REINFORCE algorithm
-│   ├── nets.py            # Neural network architectures
-│   ├── config.yaml        # Centralized configuration
-│   ├── sim_config.py      # Config loader
-│   └── envs/rp_env.py     # MuJoCo environment
+│   ├── train_agent.py     # Main training script (uses Hydra config)
+│   ├── rl_rp.py           # Sequential RL training (legacy)
+│   ├── parallel_rl_rp.py  # Parallel RL training (legacy)
+│   ├── try_policy.py      # Test trained policy (legacy)
+│   ├── algos.py           # REINFORCE algorithm (legacy)
+│   ├── nets.py            # Neural network architectures (legacy)
+│   ├── utils.py           # Environment registration
+│   └── envs/rp_env.py     # MuJoCo environment (SI units)
+├── src/nn_ctrl/
+│   └── nns.py             # Neural network agent (SI units)
 ├── src/filters/           # Sensor filtering
 │   ├── qutils.py          # Quaternion utilities
 │   └── mahony.py          # AHRS filter
@@ -41,6 +45,20 @@ uv pip install gymnasium mujoco dm-control torch numpy mlflow pandas
 
 ## Run Training
 
+### New Training (Recommended - uses Hydra config, SI units)
+
+```bash
+cd src/
+export PYTHONPATH="$PWD:$PYTHONPATH"
+
+# Run training with Hydra configuration
+python sim/train_agent.py
+```
+
+Configuration is in `config/rlrp.yaml`. All values use SI units.
+
+### Legacy Training (older scripts)
+
 ```bash
 cd src/
 export PYTHONPATH="$PWD:$PYTHONPATH"
@@ -50,12 +68,14 @@ export MLFLOW_TRACKING_URI=https://ml.twohands.dev
 export MLFLOW_TRACKING_USERNAME=topiko
 export MLFLOW_TRACKING_PASSWORD='your-password'
 
-# Parallel training (recommended)
-python parallel_rl_rp.py
+# Parallel training
+python sim/parallel_rl_rp.py
 
-# Sequential training (for debugging)
-python rl_rp.py
+# Sequential training
+python sim/rl_rp.py
 ```
+
+Note: Legacy scripts use deprecated `sim_config.py` and may need updates.
 
 ## Test Policy
 
@@ -66,7 +86,26 @@ python try_policy.py --policy pid
 
 ## Configuration
 
-Edit `src/sim/config.yaml`:
+### New Training Configuration
+
+Edit `config/rlrp.yaml` (all values in SI units):
+
+| Section | Parameter | Description | Units |
+|---------|-----------|-------------|-------|
+| env | step_time | Simulation timestep | seconds |
+| env | randomize | Enable initial state randomization | boolean |
+| env | n_parallel | Number of parallel environments | - |
+| env | max_wheel_vel | Maximum wheel velocity | rad/s |
+| env | max_wheel_acc | Maximum wheel acceleration | rad/s² |
+| train | policy_lr | Policy learning rate | - |
+| policy | actions | List of action types | - |
+| policy | act_map | Action space bins per action | - |
+| reward | pitch_coef | Penalty coefficient for pitch deviation | - |
+| reward | yaw_coef | Penalty coefficient for yaw deviation | - |
+
+### Legacy Configuration
+
+Edit `src/sim/config.yaml` (for legacy scripts):
 
 | Section | Parameter | Description |
 |---------|-----------|-------------|
@@ -74,12 +113,6 @@ Edit `src/sim/config.yaml`:
 | training | max_episodes | Total training episodes |
 | rl | learning_rate | Optimizer learning rate |
 | rl | gamma | Discount factor |
-| rl | init2zeros | If true, initialize stddev to 0.01; else ~0.5-1.0 |
-| env | randomize | Enable initial state randomization |
-| env | ctrl_mode | "vel" or "acc" control mode |
-| reward | step | Survival reward per step |
-| reward | pitch_coef | Penalty coefficient for pitch deviation |
-| reward | yaw_coef | Penalty coefficient for yaw deviation |
 
 ## Reward Function
 
@@ -93,6 +126,14 @@ The episode terminates when |pitch| > 20 degrees.
 
 ## State Space
 
+### New Training (`train_agent.py`)
+Model input (4 dims, all SI units):
+- `filter/rp_pitch` - Filtered pitch angle (rad)
+- `sens/left_wheel_vel` - Left wheel velocity (rad/s)
+- `sens/right_wheel_vel` - Right wheel velocity (rad/s)
+- `env/obs_time` - Simulation time (s)
+
+### Legacy Training
 Model input (7 dims):
 - Filtered pitch (from AHRS)
 - Gyroscope (3-axis)
@@ -102,33 +143,48 @@ Model input (7 dims):
 
 ## Units and Conversions
 
-The system uses a layered unit approach:
+**The system uses SI units (International System of Units) throughout:**
 
-**Simulation Layer (MuJoCo)** - SI units internally:
-- Angular velocity: rad/s
-- Angles: rad
-- Time: s
+### Physical Quantities
+- **Angles**: radians (rad)
+- **Angular velocities**: radians per second (rad/s)
+- **Angular accelerations**: radians per second squared (rad/s²)
+- **Time**: seconds (s)
+- **Linear accelerations**: meters per second squared (m/s²)
 
-**Network Layer** - Human-friendly units for normalization:
-- Gyro: deg/s (converted from rad/s)
-- Wheel velocity: rev/s (converted from rad/s)
-- Pitch: deg (already in deg from filter)
-- Time: normalized via `t / (t + 10)`
+### Observations (from MuJoCo sensors)
+All observations are in SI units:
+- `sens/left_wheel_vel`: rad/s (wheel angular velocity)
+- `sens/right_wheel_vel`: rad/s (wheel angular velocity)
+- `sens/gyro`: rad/s (gyroscope, 3-axis)
+- `filter/rp_pitch`: rad (filtered pitch angle)
+- `sens/acc`: m/s² (accelerometer, 3-axis)
+- `env/obs_time`: s (simulation time)
 
-**Display Layer (Plots)** - Human-readable:
-- Gyro: deg/s
-- Wheel velocity: rev/s
-- Pitch: deg
+### Actions (to MuJoCo actuators)
+All actions are in SI units:
+- `act/accelerate_both_wheels`: rad/s² (wheel acceleration)
+- Velocity control modes: rad/s (target wheel velocity)
 
-Conversion factors defined in `sim_config.py`:
-- `RAD2DEG = 180/π` - rad/s → deg/s
-- `RAD2REV = 1/(2π)` - rad/s → rev/s
+### Configuration Parameters
+All parameters in `config/rlrp.yaml` use SI units:
+- `max_wheel_vel: 10.0` - rad/s (maximum wheel velocity)
+- `max_wheel_acc: 50.0` - rad/s² (maximum wheel acceleration)
+- `step_time: 0.01` - seconds (simulation timestep)
 
-Normalization scales in `config.yaml`:
-- `filter/rp_pitch: 20.0` - ±20 deg range
-- `sens/gyro: 600.0` - ±600 deg/s range
-- `sens/left_wheel_vel: 5.0` - max 5 rev/s
-- `sens/right_wheel_vel: 5.0` - max 5 rev/s
+### Normalization Scales
+The `obs_scales` in config are in SI units (placeholders, need tuning):
+- `filter/rp_pitch: 0.35` - rad (~±20° range)
+- `sens/gyro: 10.5` - rad/s (~±600°/s range)
+- `sens/left_wheel_vel: 10.0` - rad/s (max wheel velocity)
+- `sens/right_wheel_vel: 10.0` - rad/s (max wheel velocity)
+
+### Conversion Constants
+For reference only (defined in `rp_env.py`, not used in main training):
+- `RAD2DEG = 180/π` - Convert rad/s → deg/s (for display)
+- `RAD2REV = 1/(2π)` - Convert rad/s → rev/s (for display)
+
+**Note**: The new training code (`train_agent.py`) uses only SI units end-to-end. Legacy training scripts may use different unit conventions.
 
 ## Randomization
 

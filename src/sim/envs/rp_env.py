@@ -1,3 +1,20 @@
+"""
+MuJoCo Robot Environment for RiktigPatrick
+
+UNIT SYSTEM:
+All units follow the International System of Units (SI):
+- Angles: radians (rad)
+- Angular velocities: radians per second (rad/s)
+- Angular accelerations: radians per second squared (rad/s²)
+- Time: seconds (s)
+- Distances: meters (m)
+- Mass: kilograms (kg)
+
+MuJoCo natively uses SI units throughout.
+Observations from sensors are in SI units (e.g., jointvel sensor returns rad/s).
+Actions (wheel accelerations) are in rad/s².
+"""
+
 from typing import Any, Optional
 
 import gymnasium
@@ -23,11 +40,9 @@ HEAD_M = 0.2
 
 FORCERANGE = 15
 
-MAX_WHEEL_VEL = 10
-MAX_WHEEL_ACC = 50
-
-RAD2REV = 1.0 / (2 * np.pi)  # rad/s → rev/s
-RAD2DEG = 180.0 / np.pi  # rad/s → deg/s
+# Unit conversion constants (for display/debugging only - not used in main code path)
+RAD2REV = 1.0 / (2 * np.pi)  # rad/s → rev/s (revolutions per second)
+RAD2DEG = 180.0 / np.pi  # rad/s → deg/s (degrees per second)
 
 
 class MujocoRP:
@@ -36,23 +51,34 @@ class MujocoRP:
         rgba: list[float] = [0.20269912, 0.4307427, 0.33218761, 1.0],
         wheel_markers: bool = True,
         seed: Optional[int] = None,
+        max_wheel_vel: float = 10.0,  # rad/s (SI units)
+        max_wheel_acc: float = 50.0,  # rad/s² (SI units)
     ):
         """
+        Initialize MuJoCo robot model.
+
+        All physical parameters use SI units (m, kg, s, rad).
 
         Args:
-            rgba:
-            markers:
-            seed: random seed to introduce variance None for deterministic env. NOT IMPLEMENTED
+            rgba: Robot body color
+            wheel_markers: Whether to add visual markers to wheels
+            seed: Random seed (NOT IMPLEMENTED)
+            max_wheel_vel: Maximum wheel velocity in rad/s (SI units)
+            max_wheel_acc: Maximum wheel acceleration in rad/s² (SI units)
 
         """
         # TODO: seed to introduce variance to RP
+
+        # Store limits (SI units: rad/s, rad/s²)
+        self.max_wheel_vel = max_wheel_vel
+        self.max_wheel_acc = max_wheel_acc
 
         self.model = mjcf.RootElement("frame")
 
         # Body:
         frame = self.model.worldbody.add("body", name="torso")
 
-        body = frame.add(
+        frame.add(
             "geom",
             name="body",
             type="box",
@@ -98,7 +124,7 @@ class MujocoRP:
                 joint=wheel,
                 gear=(1,),
                 ctrllimited=True,
-                ctrlrange=[-MAX_WHEEL_VEL, MAX_WHEEL_VEL],
+                ctrlrange=[-self.max_wheel_vel, self.max_wheel_vel],
                 # forcelimited=True,
                 # forcerange=[-FORCERANGE, FORCERANGE],
                 actrange=[-(10**6), 10**6],
@@ -210,7 +236,9 @@ def make_arena() -> mjcf.RootElement:
     return arena
 
 
-def _get_action_space(actions: list[str]) -> gymnasium.spaces.Dict:
+def _get_action_space(
+    actions: list[str], max_wheel_vel: float, max_wheel_acc: float
+) -> gymnasium.spaces.Dict:
     d_ = {}
     for k in actions:
         if k in [Actions.HEAD_PITCH, Actions.HEAD_TURN]:
@@ -219,7 +247,7 @@ def _get_action_space(actions: list[str]) -> gymnasium.spaces.Dict:
             )
         elif k in [Actions.VEL_LEFT_WHEEL, Actions.VEL_RIGHT_WHEEL]:
             d_[k] = gymnasium.spaces.Box(
-                low=-MAX_WHEEL_VEL, high=MAX_WHEEL_VEL, shape=(1,), dtype=np.float32
+                low=-max_wheel_vel, high=max_wheel_vel, shape=(1,), dtype=np.float32
             )
         elif k in [
             Actions.ACC_LEFT_WHEEL,
@@ -228,7 +256,7 @@ def _get_action_space(actions: list[str]) -> gymnasium.spaces.Dict:
             Actions.ACC_YAW_TURN,
         ]:
             d_[k] = gymnasium.spaces.Box(
-                low=-MAX_WHEEL_ACC, high=MAX_WHEEL_ACC, shape=(1,), dtype=np.float32
+                low=-max_wheel_acc, high=max_wheel_acc, shape=(1,), dtype=np.float32
             )
         else:
             raise ValueError(f"Invalid action key: {k}")
@@ -272,9 +300,13 @@ class GymRP(gymnasium.Env):
         step_time: float = 0.01,
         randomize: bool = False,
         actions: list[str] = None,
+        max_wheel_vel: float = 10.0,  # rad/s
+        max_wheel_acc: float = 50.0,  # rad/s²
     ):
         self._randomize = randomize
         self._init_pitch_scale = 2.0
+        self.max_wheel_vel = max_wheel_vel
+        self.max_wheel_acc = max_wheel_acc
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
 
@@ -287,14 +319,19 @@ class GymRP(gymnasium.Env):
         self.render_mode = "rgb_array"
         self.metadata["render_fps"] = int(1 / self.step_time)
 
-        self.action_space = _get_action_space(actions)
+        self.action_space = _get_action_space(
+            actions, self.max_wheel_vel, self.max_wheel_acc
+        )
         self.observation_space = _get_observation_space()
 
     def _reset_env(self, seed: int | None = 42) -> mjcf.Physics:
         prng = np.random.default_rng(seed)
 
         # Make rp:
-        rp = MujocoRP()
+        rp = MujocoRP(
+            max_wheel_vel=self.max_wheel_vel,
+            max_wheel_acc=self.max_wheel_acc,
+        )
 
         # Make arena:
         arena = make_arena()
@@ -340,24 +377,39 @@ class GymRP(gymnasium.Env):
         return self.dm_env.data.time
 
     def _update_obs(self):
+        """Update observations from MuJoCo sensors.
+
+        All observations are in SI units:
+        - ACC: m/s² (accelerometer)
+        - GYRO: rad/s (gyroscope)
+        - HEAD_PITCH, HEAD_TURN: rad (joint angles)
+        - LEFT_WHEEL_VEL, RIGHT_WHEEL_VEL: rad/s (from jointvel sensors)
+        - TRUE_PITCH: deg (converted from quaternion for compatibility)
+        - RP_PITCH: deg (filtered pitch, computed in degrees)
+        """
+
         def _get_sens(sens):
             return self.dm_env.bind(sens).sensordata.copy()
 
         self.state.update_obs(
             {
-                Observables.OBS_TIME: self.simul_time,
-                Observables.ACC: _get_sens(self.acc_sens),
-                Observables.GYRO: _get_sens(self.gyro_sens),
-                Observables.HEAD_PITCH: _get_sens(self.head_pitch_sens)[0],
-                Observables.HEAD_TURN: _get_sens(self.head_turn_sens)[0],
-                Observables.LEFT_WHEEL_VEL: _get_sens(self.left_wheel_vel_sens)[0],
-                Observables.RIGHT_WHEEL_VEL: _get_sens(self.right_wheel_vel_sens)[0],
+                Observables.OBS_TIME: self.simul_time,  # seconds
+                Observables.ACC: _get_sens(self.acc_sens),  # m/s²
+                Observables.GYRO: _get_sens(self.gyro_sens),  # rad/s
+                Observables.HEAD_PITCH: _get_sens(self.head_pitch_sens)[0],  # rad
+                Observables.HEAD_TURN: _get_sens(self.head_turn_sens)[0],  # rad
+                Observables.LEFT_WHEEL_VEL: _get_sens(self.left_wheel_vel_sens)[
+                    0
+                ],  # rad/s
+                Observables.RIGHT_WHEEL_VEL: _get_sens(self.right_wheel_vel_sens)[
+                    0
+                ],  # rad/s
                 Observables.TRUE_PITCH: q2eul(
                     self.dm_env.bind(self.body_quat).sensordata.copy()
                 )[1]
                 / np.pi
-                * 180,
-                Observables.RP_PITCH: self.state.euler[1],
+                * 180,  # deg (converted for historical reasons)
+                Observables.RP_PITCH: self.state.euler[1],  # deg (filtered pitch)
             }
         )
 
@@ -395,9 +447,16 @@ class GymRP(gymnasium.Env):
     def step(
         self, action_d: dict[Actions, np.ndarray]
     ) -> tuple[dict, float, bool, bool, dict]:
-        rvel = self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL)[0]
-        lvel = self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]
-        # Apply the actions at time t.
+        """Execute one environment step.
+
+        All actions are in SI units:
+        - VEL_*_WHEEL: rad/s (wheel velocities)
+        - ACC_*_WHEEL: rad/s² (wheel accelerations)
+        - HEAD_PITCH, HEAD_TURN: rad (head positions)
+        """
+        rvel = self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL)[0]  # rad/s
+        lvel = self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]  # rad/s
+        # Apply the actions at time t (all in SI units)
         for a, val in action_d.items():
             if a == Actions.HEAD_PITCH:
                 self.dm_env.bind(self.head_pitch_act).ctrl = val[0]
@@ -410,23 +469,30 @@ class GymRP(gymnasium.Env):
                 self.dm_env.bind(self.right_wheel_act).ctrl = val[0]
 
             elif a == Actions.ACC_LEFT_WHEEL:
+                # Acceleration mode: integrate acc (rad/s²) to velocity (rad/s)
                 left_vel = (
                     self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]
-                    + val[0] * self.step_time
+                    + val[0] * self.step_time  # rad/s² * s = rad/s
                 )
-                left_vel = np.clip(left_vel, -MAX_WHEEL_VEL, MAX_WHEEL_VEL)
+                left_vel = np.clip(left_vel, -self.max_wheel_vel, self.max_wheel_vel)
                 self.dm_env.bind(self.left_wheel_act).ctrl = left_vel
             elif a == Actions.ACC_RIGHT_WHEEL:
-                right_vel = rvel + val[0] * self.step_time
-                right_vel = np.clip(right_vel, -MAX_WHEEL_VEL, MAX_WHEEL_VEL)
+                # Acceleration mode: integrate acc (rad/s²) to velocity (rad/s)
+                right_vel = rvel + val[0] * self.step_time  # rad/s² * s = rad/s
+                right_vel = np.clip(right_vel, -self.max_wheel_vel, self.max_wheel_vel)
                 self.dm_env.bind(self.right_wheel_act).ctrl = right_vel
 
             elif a == Actions.ACC_BOTH_WHEELS:
+                # Acceleration mode: integrate acc (rad/s²) to velocity (rad/s)
                 rvel = np.clip(
-                    rvel + val[0] * self.step_time, -MAX_WHEEL_VEL, MAX_WHEEL_VEL
+                    rvel + val[0] * self.step_time,  # rad/s² * s = rad/s
+                    -self.max_wheel_vel,
+                    self.max_wheel_vel,
                 )
                 lvel = np.clip(
-                    lvel + val[0] * self.step_time, -MAX_WHEEL_VEL, MAX_WHEEL_VEL
+                    lvel + val[0] * self.step_time,  # rad/s² * s = rad/s
+                    -self.max_wheel_vel,
+                    self.max_wheel_vel,
                 )
                 self.dm_env.bind(self.right_wheel_act).ctrl = rvel
                 self.dm_env.bind(self.left_wheel_act).ctrl = lvel

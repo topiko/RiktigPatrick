@@ -1,22 +1,63 @@
+"""
+Neural Network Agent for RiktigPatrick
+
+UNIT SYSTEM:
+All inputs and outputs use SI units (International System of Units):
+- Observations: rad, rad/s (wheel velocities, gyro, etc.)
+- Actions: rad/s² (wheel accelerations)
+- See rp_env.py for detailed unit documentation
+"""
+
 import torch
 from torch import nn
 
 from riktigpatric.patrick import Actions, Observables
-from sim.envs.rp_env import MAX_WHEEL_ACC
 
 
-def idx2value(action: Actions, idx: torch.tensor, nbins: int) -> torch.tensor:
+def idx2value(
+    action: Actions, idx: torch.tensor, nbins: int, max_acc: float
+) -> torch.tensor:
+    """Convert discrete action index to continuous acceleration value.
+
+    Args:
+        action: Action type
+        idx: Discrete action index (0 to nbins-1)
+        nbins: Number of discrete action bins
+        max_acc: Maximum acceleration in rad/s² (SI units)
+
+    Returns:
+        Continuous action value in rad/s² (SI units)
+    """
     if action == Actions.ACC_BOTH_WHEELS:
-        return (-1.0 + 2.0 * idx / (nbins - 1)) * MAX_WHEEL_ACC
+        return (-1.0 + 2.0 * idx / (nbins - 1)) * max_acc  # rad/s²
 
     raise ValueError(f"Unknown action: {action}")
 
 
 class Agent(nn.Module):
-    def __init__(self, inputs: tuple[Observables], actions: dict[Actions, int]):
+    """Neural network policy for robot control.
+
+    Inputs: Observations in SI units (rad, rad/s, etc.)
+    Outputs: Actions in SI units (rad/s²)
+    """
+
+    def __init__(
+        self,
+        inputs: tuple[Observables],
+        actions: dict[Actions, int],
+        max_wheel_acc: float,
+    ):
+        """Initialize agent.
+
+        Args:
+            inputs: List of observation keys to use as input
+            actions: Dict mapping action types to number of discrete bins
+            max_wheel_acc: Maximum wheel acceleration in rad/s² (SI units)
+        """
         super().__init__()
         self.inputs = inputs
         self.actions = actions
+        self.max_wheel_acc = max_wheel_acc  # rad/s² (SI units)
         self.model = torch.nn.Sequential(
             torch.nn.Linear(len(inputs), 128),
             torch.nn.ReLU(),
@@ -54,7 +95,7 @@ class Agent(nn.Module):
                 dist = torch.distributions.Categorical(logits=v)
                 action_idx = dist.sample()
                 logp = dist.log_prob(action_idx)
-                action = idx2value(k, action_idx, self.actions[k])
+                action = idx2value(k, action_idx, self.actions[k], self.max_wheel_acc)
 
             else:
                 raise ValueError(f"Unknown action: {k}")

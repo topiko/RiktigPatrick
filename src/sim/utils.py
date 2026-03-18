@@ -14,6 +14,8 @@ def register_and_make_env(
     n_parallel = env_config.pop("n_parallel", 1)
 
     env_config["actions"] = list(cfg.policy.actions)
+    env_config["max_wheel_vel"] = cfg.env.max_wheel_vel
+    env_config["max_wheel_acc"] = cfg.env.max_wheel_acc
 
     register(
         id="RiktigPatrick-v0",
@@ -22,7 +24,7 @@ def register_and_make_env(
         kwargs=env_config,
     )
 
-    if n_parallel> 1:
+    if n_parallel > 1:
         return gym.vector.AsyncVectorEnv(
             [
                 lambda: gym.make(

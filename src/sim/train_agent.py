@@ -70,7 +70,9 @@ def rollout(
 def main(cfg: DictConfig):
     rp_env = register_and_make_env(cfg)
     action_d = {a: cfg.policy.act_map[a] for a in cfg.policy.actions}
-    agent = Agent(inputs=cfg.policy.inputs, actions=action_d)
+    agent = Agent(
+        inputs=cfg.policy.inputs, actions=action_d, max_wheel_acc=cfg.env.max_wheel_acc
+    )
 
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
 
