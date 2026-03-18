@@ -168,20 +168,22 @@ class Agent(nn.Module):
                 action_value = bins[action_idx]
 
                 actions[action_key] = action_value.unsqueeze(-1)
+                # Note: If this action had multiple components (e.g., separate left/right),
+                # sum their log probs before appending.
+                # Currently each action is single component.
                 logp_l.append(logp.unsqueeze(-1))
 
             elif action_cfg["type"] == "continuous":
                 # For future: sample from Gaussian distribution
-                # mean = action_cfg.get('mean', 0.0)
-                # std = action_cfg.get('std', 1.0)
-                # dist = torch.distributions.Normal(logits[..., 0], torch.exp(logits[..., 1]))
-                # action_value = dist.sample()
-                # logp = dist.log_prob(action_value)
+                # If action has multiple components, sum log probs before appending:
+                # logp_total = logp.sum(dim=-1, keepdim=True)
+                # logp_l.append(logp_total)
                 raise NotImplementedError("Continuous actions not yet implemented")
 
             else:
                 raise ValueError(f"Unknown action type: {action_cfg['type']}")
 
+        # Sum log probabilities across all actions
         logp = torch.cat(logp_l, dim=1).sum(dim=1, keepdim=True)
 
         return actions, logp
