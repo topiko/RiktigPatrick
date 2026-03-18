@@ -1,4 +1,5 @@
 """
+
 MuJoCo Robot Environment for RiktigPatrick
 
 UNIT SYSTEM:
@@ -15,6 +16,7 @@ Observations from sensors are in SI units (e.g., jointvel sensor returns rad/s).
 Actions (wheel accelerations) are in rad/s².
 """
 
+import warnings
 from typing import Any, Optional
 
 import gymnasium
@@ -471,36 +473,21 @@ class GymRP(gymnasium.Env):
         - TIME: seconds (observation time for sync check, not applied as action)
         """
         # Check time synchronization if TIME action is present
-        if Actions.TIME in action_d or "act/time" in action_d:
-            action_time = action_d.get(Actions.TIME, action_d.get("act/time"))
-            current_time = self.state.obs.get_observable(Observables.OBS_TIME)
+        try:
+            action_time = action_d[Actions.TIME]
+        except KeyError:
+            action_time = None
 
-            # Debug: Check shape compatibility
-            if action_time.ndim == 2:
-                action_time_flat = action_time.flatten()
-            else:
-                action_time_flat = action_time
-
-            if current_time.ndim == 2:
-                current_time_flat = current_time.flatten()
-            else:
-                current_time_flat = current_time
-
+        if action_time is not None:
             # Check if times are roughly aligned (within half a timestep)
-            time_diff = np.abs(action_time_flat - current_time_flat)
+            time_diff = np.abs(action_time - self.simul_time)
             max_diff = self.step_time * 0.5  # Half timestep tolerance
 
-            if np.any(time_diff > max_diff):
-                import warnings
-
-                msg = (
+            if time_diff > max_diff:
+                warnings.warn(
                     f"Action time desync detected! "
                     f"Max diff: {time_diff.max():.6f}s (allowed: {max_diff:.6f}s)"
                 )
-                print(
-                    f"WARNING: {msg}"
-                )  # Print to ensure visibility in multiprocessing
-                warnings.warn(msg)
 
         rvel = self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL)[0]  # rad/s
         lvel = self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]  # rad/s
