@@ -7,7 +7,7 @@ from riktigpatric.patrick import Actions, Observables
 from sim.utils import Episode
 
 
-def plot_observations(eps: Episode, env_idx: int = 0, figsize=(12, 10)):
+def plot_observations(eps: Episode, env_idx: int = 0, figsize=None):
     """Plot all observations for a single environment.
 
     Args:
@@ -35,11 +35,21 @@ def plot_observations(eps: Episode, env_idx: int = 0, figsize=(12, 10)):
         print("No observations found in episode")
         return None, None
 
-    # Create subplots - one per observation
+    # Create subplots - one per observation (each row 3x taller)
     n_obs = len(obs_names)
+    row_height = 3  # Height per row
+    if figsize is None:
+        figsize = (12, n_obs * row_height)
+
     fig, axes = plt.subplots(n_obs, 1, figsize=figsize, sharex=True)
     if n_obs == 1:
         axes = [axes]
+
+    # Get time array for x-axis - MUST be present
+    if not hasattr(eps, "OBS_TIME"):
+        raise ValueError("Episode must have OBS_TIME attribute for time axis")
+
+    time_data = eps.OBS_TIME[:, env_idx, 0]  # Shape: (num_steps,)
 
     for idx, obs_name in enumerate(obs_names):
         obs_data = getattr(eps, obs_name)  # Shape: (num_steps, num_envs, dim)
@@ -47,27 +57,29 @@ def plot_observations(eps: Episode, env_idx: int = 0, figsize=(12, 10)):
         # Get data for this environment
         env_data = obs_data[:, env_idx, :]  # Shape: (num_steps, dim)
 
-        # Plot each dimension
+        # Plot each dimension with actual time
         if env_data.shape[1] == 1:
             # Scalar observation
-            axes[idx].plot(env_data[:, 0], label=obs_name)
+            axes[idx].plot(time_data, env_data[:, 0], label=obs_name)
         else:
             # Vector observation (e.g., gyro with 3 channels)
             for dim in range(env_data.shape[1]):
-                axes[idx].plot(env_data[:, dim], label=f"{obs_name}[{dim}]")
+                axes[idx].plot(time_data, env_data[:, dim], label=f"{obs_name}[{dim}]")
 
         axes[idx].set_ylabel(obs_name)
         axes[idx].legend(loc="upper right")
         axes[idx].grid(True, alpha=0.3)
+        axes[idx].spines["top"].set_visible(False)
+        axes[idx].spines["right"].set_visible(False)
 
-    axes[-1].set_xlabel("Timestep")
+    axes[-1].set_xlabel("Time (s)")
     fig.suptitle(f"Observations - Environment {env_idx}")
     fig.tight_layout()
 
     return fig, axes
 
 
-def plot_actions(eps: Episode, env_idx: int = 0, figsize=(10, 6)):
+def plot_actions(eps: Episode, env_idx: int = 0, figsize=None):
     """Plot all actions for a single environment.
 
     Args:
@@ -91,15 +103,27 @@ def plot_actions(eps: Episode, env_idx: int = 0, figsize=(10, 6)):
         except:
             pass
 
-    # Create subplots
+    # Create subplots (each row 3x taller)
     n_actions = len(action_names)
     if n_actions == 0:
         print("No actions found in episode")
         return None, None
 
+    row_height = 3  # Height per row
+    if figsize is None:
+        figsize = (10, n_actions * row_height)
+
     fig, axes = plt.subplots(n_actions, 1, figsize=figsize, sharex=True)
     if n_actions == 1:
         axes = [axes]
+
+    # Get time array for x-axis - MUST be present (use TIME action or OBS_TIME)
+    if hasattr(eps, "TIME"):
+        time_data = eps.TIME[:, env_idx, 0]
+    elif hasattr(eps, "OBS_TIME"):
+        time_data = eps.OBS_TIME[:, env_idx, 0]
+    else:
+        raise ValueError("Episode must have TIME or OBS_TIME attribute for time axis")
 
     for idx, action_name in enumerate(action_names):
         action_data = getattr(eps, action_name)  # Shape: (num_steps, num_envs, dim)
@@ -107,12 +131,15 @@ def plot_actions(eps: Episode, env_idx: int = 0, figsize=(10, 6)):
         # Get data for this environment
         env_data = action_data[:, env_idx, :]  # Shape: (num_steps, dim)
 
-        # Plot each dimension
+        # Plot each dimension with actual time
         if env_data.shape[1] == 1:
-            axes[idx].plot(env_data[:, 0], label=action_name, marker="o", markersize=3)
+            axes[idx].plot(
+                time_data, env_data[:, 0], label=action_name, marker="o", markersize=3
+            )
         else:
             for dim in range(env_data.shape[1]):
                 axes[idx].plot(
+                    time_data,
                     env_data[:, dim],
                     label=f"{action_name}[{dim}]",
                     marker="o",
@@ -123,15 +150,17 @@ def plot_actions(eps: Episode, env_idx: int = 0, figsize=(10, 6)):
         axes[idx].legend(loc="upper right")
         axes[idx].grid(True, alpha=0.3)
         axes[idx].axhline(y=0, color="k", linestyle="--", alpha=0.3)
+        axes[idx].spines["top"].set_visible(False)
+        axes[idx].spines["right"].set_visible(False)
 
-    axes[-1].set_xlabel("Timestep")
+    axes[-1].set_xlabel("Time (s)")
     fig.suptitle(f"Actions - Environment {env_idx}")
     fig.tight_layout()
 
     return fig, axes
 
 
-def plot_rewards(eps: Episode, env_idx: int = 0, figsize=(10, 6)):
+def plot_rewards(eps: Episode, env_idx: int = 0, figsize=None):
     """Plot reward components for a single environment.
 
     Args:
@@ -149,10 +178,23 @@ def plot_rewards(eps: Episode, env_idx: int = 0, figsize=(10, 6)):
     # Get reward component names
     reward_keys = list(eps.reward_components.keys())
 
-    # Create subplots
-    fig, axes = plt.subplots(len(reward_keys), 1, figsize=figsize, sharex=True)
-    if len(reward_keys) == 1:
+    # Create subplots (each row 3x taller)
+    n_rewards = len(reward_keys)
+    row_height = 3
+    if figsize is None:
+        figsize = (10, n_rewards * row_height)
+
+    fig, axes = plt.subplots(n_rewards, 1, figsize=figsize, sharex=True)
+    if n_rewards == 1:
         axes = [axes]
+
+    # Get time array for x-axis
+    if hasattr(eps, "TIME"):
+        time_data = eps.TIME[:, env_idx, 0]
+    elif hasattr(eps, "OBS_TIME"):
+        time_data = eps.OBS_TIME[:, env_idx, 0]
+    else:
+        raise ValueError("Episode must have TIME or OBS_TIME attribute for time axis")
 
     for idx, reward_key in enumerate(reward_keys):
         reward_data = eps.reward_components[reward_key]  # Shape: (num_steps, num_envs)
@@ -160,19 +202,21 @@ def plot_rewards(eps: Episode, env_idx: int = 0, figsize=(10, 6)):
         # Get data for this environment
         env_data = reward_data[:, env_idx]  # Shape: (num_steps,)
 
-        axes[idx].plot(env_data, label=reward_key)
+        axes[idx].plot(time_data, env_data, label=reward_key)
         axes[idx].set_ylabel(reward_key)
         axes[idx].legend(loc="upper right")
         axes[idx].grid(True, alpha=0.3)
+        axes[idx].spines["top"].set_visible(False)
+        axes[idx].spines["right"].set_visible(False)
 
-    axes[-1].set_xlabel("Timestep")
+    axes[-1].set_xlabel("Time (s)")
     fig.suptitle(f"Rewards - Environment {env_idx}")
     fig.tight_layout()
 
     return fig, axes
 
 
-def plot_episode(eps: Episode, env_idx: int = 0, figsize=(14, 12)):
+def plot_episode(eps: Episode, env_idx: int = 0, figsize=None):
     """Plot complete episode: observations, actions, and rewards in one figure.
 
     Creates a multi-row figure with:
@@ -219,9 +263,22 @@ def plot_episode(eps: Episode, env_idx: int = 0, figsize=(14, 12)):
         print("No data found in episode")
         return None
 
+    # Each row 3x taller
+    row_height = 3
+    if figsize is None:
+        figsize = (14, total_plots * row_height)
+
     fig, axes = plt.subplots(total_plots, 1, figsize=figsize, sharex=True)
     if total_plots == 1:
         axes = [axes]
+
+    # Get time array for x-axis
+    if hasattr(eps, "TIME"):
+        time_data = eps.TIME[:, env_idx, 0]
+    elif hasattr(eps, "OBS_TIME"):
+        time_data = eps.OBS_TIME[:, env_idx, 0]
+    else:
+        raise ValueError("Episode must have TIME or OBS_TIME attribute for time axis")
 
     plot_idx = 0
 
@@ -230,16 +287,18 @@ def plot_episode(eps: Episode, env_idx: int = 0, figsize=(14, 12)):
         obs_data = getattr(eps, obs_name)[:, env_idx, :]
 
         if obs_data.shape[1] == 1:
-            axes[plot_idx].plot(obs_data[:, 0], label=obs_name)
+            axes[plot_idx].plot(time_data, obs_data[:, 0], label=obs_name)
         else:
             for dim in range(obs_data.shape[1]):
                 axes[plot_idx].plot(
-                    obs_data[:, dim], label=f"{obs_name}[{dim}]", alpha=0.7
+                    time_data, obs_data[:, dim], label=f"{obs_name}[{dim}]", alpha=0.7
                 )
 
         axes[plot_idx].set_ylabel(obs_name, fontsize=9)
         axes[plot_idx].legend(loc="upper right", fontsize=7)
         axes[plot_idx].grid(True, alpha=0.3)
+        axes[plot_idx].spines["top"].set_visible(False)
+        axes[plot_idx].spines["right"].set_visible(False)
         plot_idx += 1
 
     # Plot actions
@@ -248,11 +307,16 @@ def plot_episode(eps: Episode, env_idx: int = 0, figsize=(14, 12)):
 
         if action_data.shape[1] == 1:
             axes[plot_idx].plot(
-                action_data[:, 0], label=action_name, marker="o", markersize=2
+                time_data,
+                action_data[:, 0],
+                label=action_name,
+                marker="o",
+                markersize=2,
             )
         else:
             for dim in range(action_data.shape[1]):
                 axes[plot_idx].plot(
+                    time_data,
                     action_data[:, dim],
                     label=f"{action_name}[{dim}]",
                     marker="o",
@@ -263,19 +327,23 @@ def plot_episode(eps: Episode, env_idx: int = 0, figsize=(14, 12)):
         axes[plot_idx].legend(loc="upper right", fontsize=7)
         axes[plot_idx].grid(True, alpha=0.3)
         axes[plot_idx].axhline(y=0, color="k", linestyle="--", alpha=0.3)
+        axes[plot_idx].spines["top"].set_visible(False)
+        axes[plot_idx].spines["right"].set_visible(False)
         plot_idx += 1
 
     # Plot rewards
     for reward_key in reward_keys:
         reward_data = eps.reward_components[reward_key][:, env_idx]
 
-        axes[plot_idx].plot(reward_data, label=reward_key)
+        axes[plot_idx].plot(time_data, reward_data, label=reward_key)
         axes[plot_idx].set_ylabel(reward_key, fontsize=9)
         axes[plot_idx].legend(loc="upper right", fontsize=7)
         axes[plot_idx].grid(True, alpha=0.3)
+        axes[plot_idx].spines["top"].set_visible(False)
+        axes[plot_idx].spines["right"].set_visible(False)
         plot_idx += 1
 
-    axes[-1].set_xlabel("Timestep")
+    axes[-1].set_xlabel("Time (s)")
     fig.suptitle(f"Complete Episode - Environment {env_idx}", fontsize=12)
     fig.tight_layout()
 
