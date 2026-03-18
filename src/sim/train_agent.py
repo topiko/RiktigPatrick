@@ -205,24 +205,48 @@ def main(cfg: DictConfig):
         # Generate video periodically
         if i % video_freq == 0 and i > 0 and video_env is not None:
             print(f"  🎥 Recording video...")
-            # Run one episode in video environment
-            obs_d, _ = video_env.reset(seed=i + 20000)
 
-            # Add batch dimension for single env
-            for _ in range(1000):
-                obs_d_batched = {
-                    k: v[np.newaxis, :] if v.ndim == 1 else v for k, v in obs_d.items()
-                }
-                obs_d_t = np2tensor(obs_d_batched)
-                action, _ = agent.act(obs_d_t)
+            # Create a temporary single-env wrapper for rollout
+            # We need to wrap video_env to work with rollout (expects vectorized or single env)
+            class SingleEnvWrapper:
+                """Wrapper to make single env compatible with rollout batching."""
 
-                # Remove batch dimension
-                action_np = {k: v.cpu().numpy()[0] for k, v in action.items()}
+                def __init__(self, env):
+                    self.env = env
 
-                obs_d, reward, terminated, truncated, _ = video_env.step(action_np)
+                def reset(self, seed=None):
+                    obs_d, info = self.env.reset(seed=seed)
+                    # Add batch dimension
+                    obs_d_batched = {
+                        k: v[np.newaxis, :] if v.ndim == 1 else v
+                        for k, v in obs_d.items()
+                    }
+                    return obs_d_batched, info
 
-                if terminated or truncated:
-                    break
+                def step(self, action_d):
+                    # Remove batch dimension
+                    action_single = {k: v[0] for k, v in action_d.items()}
+                    obs_d, reward, terminated, truncated, reward_info = self.env.step(
+                        action_single
+                    )
+                    # Add batch dimension
+                    obs_d_batched = {
+                        k: v[np.newaxis, :] if v.ndim == 1 else v
+                        for k, v in obs_d.items()
+                    }
+                    reward = (
+                        np.array([reward])
+                        if isinstance(reward, (int, float))
+                        else reward[np.newaxis]
+                    )
+                    terminated = np.array([terminated])
+                    truncated = np.array([truncated])
+                    return obs_d_batched, reward, terminated, truncated, reward_info
+
+            wrapped_video_env = SingleEnvWrapper(video_env)
+
+            # Use rollout function for video
+            _ = rollout(wrapped_video_env, agent, cfg, seed=i + 20000)
 
             # Videos are automatically saved by RecordVideo wrapper
             # Log video to MLflow
