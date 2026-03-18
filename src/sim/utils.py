@@ -227,17 +227,20 @@ def dict2tensor(obs_d: dict[str, np.ndarray]) -> torch.Tensor:
 
 
 class Episode:
-    """Episode data container with attribute-based access.
+    """Episode data container for SINGLE episode with attribute-based access.
 
     Provides direct access to observations, actions, and rewards using enum names.
-    All arrays have shape: (num_steps, num_envs, dim)
+    All arrays have shape: (num_steps, dim) - NO batch/env dimension!
+
+    IMPORTANT: Episode represents a SINGLE episode. If you have data from multiple
+    environments, create separate Episode objects for each.
 
     Example:
         eps = Episode(obs_l, action_l, rewards_l)
-        pitch = eps.RP_PITCH           # (num_steps, num_envs, 1)
-        gyro = eps.GYRO                # (num_steps, num_envs, 3)
-        wheel_acc = eps.ACC_BOTH_WHEELS  # (num_steps, num_envs, 1)
-        rewards = eps.rewards           # (num_steps, num_envs)
+        pitch = eps.RP_PITCH           # (num_steps, 1)
+        gyro = eps.GYRO                # (num_steps, 3)
+        wheel_acc = eps.ACC_BOTH_WHEELS  # (num_steps, 1)
+        rewards = eps.rewards           # (num_steps,)
 
     Available observation attributes (from Observables enum):
         .ACC, .GYRO, .HEAD_PITCH, .HEAD_TURN, .LEFT_WHEEL_VEL,
@@ -253,26 +256,47 @@ class Episode:
         action_l: list[dict[str, np.ndarray]],
         rewards_l: list[dict[str, np.ndarray]],
     ):
-        """Initialize episode from rollout data.
+        """Initialize episode from rollout data for SINGLE episode.
 
         Args:
             obs_l: List of observation dicts (keys are Observables enum)
+                   Each obs value should have shape (dim,) for single episode
             action_l: List of action dicts (keys are strings)
+                      Each action value should have shape (dim,) for single episode
             rewards_l: List of reward_info dicts (keys are strings)
+                       Each reward value should be scalar for single episode
+
+        Raises:
+            ValueError: If input data contains batch dimension (multiple environments)
         """
-        # Stack observations over time: (num_steps, num_envs, obs_dim)
+        # Check that we have single episode data, not batched
+        if obs_l:
+            first_obs_value = list(obs_l[0].values())[0]
+            if first_obs_value.ndim > 1 and first_obs_value.shape[0] > 1:
+                raise ValueError(
+                    f"Episode expects single episode data, but got batched data with "
+                    f"shape {first_obs_value.shape}. Extract single environment first."
+                )
+
+        # Stack observations over time: (num_steps, obs_dim)
         if obs_l:
             for obs_key in obs_l[0].keys():
                 # obs_key is Observables.ACC, use obs_key.name to get "ACC"
                 obs_array = np.stack([obs[obs_key] for obs in obs_l], axis=0)
+                # Remove batch dim if present (shape (num_steps, 1, dim) -> (num_steps, dim))
+                if obs_array.ndim == 3 and obs_array.shape[1] == 1:
+                    obs_array = obs_array[:, 0, :]
                 setattr(self, obs_key.name, obs_array)
 
-        # Stack actions over time: (num_steps, num_envs, action_dim)
+        # Stack actions over time: (num_steps, action_dim)
         if action_l:
             for action_key_str in action_l[0].keys():
                 action_array = np.stack(
                     [act[action_key_str] for act in action_l], axis=0
                 )
+                # Remove batch dim if present
+                if action_array.ndim == 3 and action_array.shape[1] == 1:
+                    action_array = action_array[:, 0, :]
 
                 # Try to find matching Actions enum for nice attribute name
                 action_enum = None
@@ -290,11 +314,14 @@ class Episode:
                     attr_name = action_key_str.replace("act/", "").replace("/", "_")
                     setattr(self, attr_name, action_array)
 
-        # Stack reward components over time
+        # Stack reward components over time: (num_steps,)
         self.reward_components = {}
         if rewards_l:
             for reward_key in rewards_l[0].keys():
                 reward_array = np.stack([r[reward_key] for r in rewards_l], axis=0)
+                # Remove batch dim if present
+                if reward_array.ndim == 2 and reward_array.shape[1] == 1:
+                    reward_array = reward_array[:, 0]
                 self.reward_components[reward_key] = reward_array
 
             # Store total reward if available

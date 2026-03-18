@@ -7,12 +7,11 @@ from riktigpatric.patrick import Actions, Observables
 from sim.utils import Episode
 
 
-def plot_observations(eps: Episode, env_idx: int = 0, figsize=None):
-    """Plot all observations for a single environment.
+def plot_observations(eps: Episode, figsize=None):
+    """Plot all observations for a single episode.
 
     Args:
-        eps: Episode object with observation data
-        env_idx: Which environment to plot (default: 0)
+        eps: Episode object with observation data (single episode)
         figsize: Figure size tuple
 
     Returns:
@@ -49,22 +48,21 @@ def plot_observations(eps: Episode, env_idx: int = 0, figsize=None):
     if not hasattr(eps, "OBS_TIME"):
         raise ValueError("Episode must have OBS_TIME attribute for time axis")
 
-    time_data = eps.OBS_TIME[:, env_idx, 0]  # Shape: (num_steps,)
+    time_data = (
+        eps.OBS_TIME[:, 0] if eps.OBS_TIME.ndim > 1 else eps.OBS_TIME
+    )  # Shape: (num_steps,)
 
     for idx, obs_name in enumerate(obs_names):
-        obs_data = getattr(eps, obs_name)  # Shape: (num_steps, num_envs, dim)
-
-        # Get data for this environment
-        env_data = obs_data[:, env_idx, :]  # Shape: (num_steps, dim)
+        obs_data = getattr(eps, obs_name)  # Shape: (num_steps, dim)
 
         # Plot each dimension with actual time
-        if env_data.shape[1] == 1:
+        if obs_data.shape[1] == 1:
             # Scalar observation
-            axes[idx].plot(time_data, env_data[:, 0], label=obs_name)
+            axes[idx].plot(time_data, obs_data[:, 0], label=obs_name)
         else:
             # Vector observation (e.g., gyro with 3 channels)
-            for dim in range(env_data.shape[1]):
-                axes[idx].plot(time_data, env_data[:, dim], label=f"{obs_name}[{dim}]")
+            for dim in range(obs_data.shape[1]):
+                axes[idx].plot(time_data, obs_data[:, dim], label=f"{obs_name}[{dim}]")
 
         axes[idx].set_ylabel(obs_name)
         axes[idx].legend(loc="upper right")
@@ -73,18 +71,17 @@ def plot_observations(eps: Episode, env_idx: int = 0, figsize=None):
         axes[idx].spines["right"].set_visible(False)
 
     axes[-1].set_xlabel("Time (s)")
-    fig.suptitle(f"Observations - Environment {env_idx}")
+    fig.suptitle("Observations")
     fig.tight_layout()
 
     return fig, axes
 
 
-def plot_actions(eps: Episode, env_idx: int = 0, figsize=None):
-    """Plot all actions for a single environment.
+def plot_actions(eps: Episode, figsize=None):
+    """Plot all actions for a single episode.
 
     Args:
-        eps: Episode object with action data
-        env_idx: Which environment to plot (default: 0)
+        eps: Episode object with action data (single episode)
         figsize: Figure size tuple
 
     Returns:
@@ -119,28 +116,29 @@ def plot_actions(eps: Episode, env_idx: int = 0, figsize=None):
 
     # Get time array for x-axis - MUST be present (use TIME action or OBS_TIME)
     if hasattr(eps, "TIME"):
-        time_data = eps.TIME[:, env_idx, 0]
+        time_data = eps.TIME[:, 0] if eps.TIME.ndim > 1 else eps.TIME
     elif hasattr(eps, "OBS_TIME"):
-        time_data = eps.OBS_TIME[:, env_idx, 0]
+        time_data = eps.OBS_TIME[:, 0] if eps.OBS_TIME.ndim > 1 else eps.OBS_TIME
     else:
         raise ValueError("Episode must have TIME or OBS_TIME attribute for time axis")
 
     for idx, action_name in enumerate(action_names):
-        action_data = getattr(eps, action_name)  # Shape: (num_steps, num_envs, dim)
-
-        # Get data for this environment
-        env_data = action_data[:, env_idx, :]  # Shape: (num_steps, dim)
+        action_data = getattr(eps, action_name)  # Shape: (num_steps, dim)
 
         # Plot each dimension with actual time
-        if env_data.shape[1] == 1:
+        if action_data.shape[1] == 1:
             axes[idx].plot(
-                time_data, env_data[:, 0], label=action_name, marker="o", markersize=3
+                time_data,
+                action_data[:, 0],
+                label=action_name,
+                marker="o",
+                markersize=3,
             )
         else:
-            for dim in range(env_data.shape[1]):
+            for dim in range(action_data.shape[1]):
                 axes[idx].plot(
                     time_data,
-                    env_data[:, dim],
+                    action_data[:, dim],
                     label=f"{action_name}[{dim}]",
                     marker="o",
                     markersize=3,
@@ -154,18 +152,17 @@ def plot_actions(eps: Episode, env_idx: int = 0, figsize=None):
         axes[idx].spines["right"].set_visible(False)
 
     axes[-1].set_xlabel("Time (s)")
-    fig.suptitle(f"Actions - Environment {env_idx}")
+    fig.suptitle("Actions")
     fig.tight_layout()
 
     return fig, axes
 
 
-def plot_rewards(eps: Episode, env_idx: int = 0, figsize=None):
-    """Plot reward components for a single environment.
+def plot_rewards(eps: Episode, figsize=None):
+    """Plot reward components for a single episode.
 
     Args:
-        eps: Episode object with reward data
-        env_idx: Which environment to plot (default: 0)
+        eps: Episode object with reward data (single episode)
         figsize: Figure size tuple
 
     Returns:
@@ -190,14 +187,14 @@ def plot_rewards(eps: Episode, env_idx: int = 0, figsize=None):
 
     # Get time array for x-axis
     if hasattr(eps, "TIME"):
-        time_data = eps.TIME[:, env_idx, 0]
+        time_data = eps.TIME[:, 0] if eps.TIME.ndim > 1 else eps.TIME
     elif hasattr(eps, "OBS_TIME"):
-        time_data = eps.OBS_TIME[:, env_idx, 0]
+        time_data = eps.OBS_TIME[:, 0] if eps.OBS_TIME.ndim > 1 else eps.OBS_TIME
     else:
         raise ValueError("Episode must have TIME or OBS_TIME attribute for time axis")
 
     for idx, reward_key in enumerate(reward_keys):
-        reward_data = eps.reward_components[reward_key][:, env_idx]
+        reward_data = eps.reward_components[reward_key]  # Shape: (num_steps,)
 
         axes[idx].plot(time_data, reward_data, label=reward_key)
         axes[idx].set_ylabel(reward_key)
@@ -207,13 +204,13 @@ def plot_rewards(eps: Episode, env_idx: int = 0, figsize=None):
         axes[idx].spines["right"].set_visible(False)
 
     axes[-1].set_xlabel("Time (s)")
-    fig.suptitle(f"Rewards - Environment {env_idx}")
+    fig.suptitle("Rewards")
     fig.tight_layout()
 
     return fig, axes
 
 
-def plot_episode(eps: Episode, env_idx: int = 0, figsize=None):
+def plot_episode(eps: Episode, figsize=None):
     """Plot complete episode: observations, actions, and rewards in one figure.
 
     Creates a multi-row figure with:
@@ -222,8 +219,7 @@ def plot_episode(eps: Episode, env_idx: int = 0, figsize=None):
     - Bottom rows: Reward components
 
     Args:
-        eps: Episode object
-        env_idx: Which environment to plot (default: 0)
+        eps: Episode object (single episode)
         figsize: Figure size tuple
 
     Returns:
