@@ -120,8 +120,7 @@ class SingleEnvWrapper:
         obs_d_batched = _add_batch_dim(obs_d)
         reward_batched = _add_batch_dim(reward)
         terminated_batched = _add_batch_dim(terminated)
-        # truncated needs special shape (1, 1) to match AsyncVectorEnv format
-        truncated_batched = np.array([[truncated]])
+        truncated_batched = _add_batch_dim(truncated)
 
         return (
             obs_d_batched,
