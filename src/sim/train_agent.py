@@ -3,14 +3,20 @@ import os
 import dotenv
 import gymnasium as gym
 import hydra
+import matplotlib
+import matplotlib.pyplot as plt
+import mlflow
 import numpy as np
 import torch
-from omegaconf import DictConfig
+from gymnasium.wrappers import RecordVideo
+from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
 from nn_ctrl.nns import Agent
+from sim.plot_utils import plot_episode
 from sim.utils import Episode, register_and_make_env
 
+matplotlib.use("Agg")  # Non-interactive backend for headless rendering
 dotenv.load_dotenv()
 
 HYDRA_CONFIG_DIR = os.getenv("HYDRA_CONFIG_DIR", "config")
@@ -81,10 +87,53 @@ def rollout(
 
 @hydra.main(config_path=HYDRA_CONFIG_DIR, config_name="rlrp", version_base=None)
 def main(cfg: DictConfig):
+    # Setup MLflow if enabled
+    if cfg.mlflow.enabled:
+        mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
+        mlflow.set_experiment(cfg.mlflow.experiment_name)
+        mlflow.start_run()
+
+        # Log config parameters
+        flat_params = OmegaConf.to_container(cfg, resolve=True)
+        mlflow.log_params(
+            {str(k): str(v) for k, v in _flatten_dict(flat_params).items()}
+        )
+
+    # Create environment
     rp_env = register_and_make_env(cfg)
 
-    # Convert config to list format for Agent
-    # Actions now include their config inline
+    # Create video recording environment (for periodic video generation)
+    video_env = None
+    if cfg.mlflow.enabled and cfg.training.get("video_frequency", 0) > 0:
+        # Create separate env for video recording
+        video_env_config = dict(cfg.env)
+        video_env_config.pop("n_parallel")
+        video_env_config["record"] = True
+        action_keys = [
+            list(action_item.keys())[0] for action_item in cfg.policy.actions
+        ]
+        video_env_config["actions"] = action_keys
+
+        from gymnasium.envs.registration import register
+
+        register(
+            id="RiktigPatrick-video-v0",
+            entry_point="sim.envs.rp_env:GymRP",
+            max_episode_steps=2000,
+            kwargs=video_env_config,
+        )
+
+        base_video_env = gym.make(
+            "RiktigPatrick-video-v0", disable_env_checker=True, **video_env_config
+        )
+        video_env = RecordVideo(
+            base_video_env,
+            "./video",
+            episode_trigger=lambda ep_id: True,  # Record when we call it
+            name_prefix="training",
+        )
+
+    # Create agent
     agent = Agent(
         inputs=list(cfg.policy.inputs),
         actions=list(cfg.policy.actions),
@@ -110,21 +159,96 @@ def main(cfg: DictConfig):
         policy_loss.backward()
         optimizer.step()
 
+        # Logging and visualization
+        plot_freq = cfg.training.get("plot_frequency", 10)
+        video_freq = cfg.training.get("video_frequency", 100)
+
         if i % 10 == 0:
+            mean_return = G.sum(axis=1).mean()
+            min_ep_len = rewards.shape[1]
+
             print(
-                f"Step {i:4d}: policy_loss={policy_loss.item():.4f}, returns={G.sum(axis=1).mean():.2f}, min_ep_len={rewards.shape[1]}"
+                f"Step {i:4d}: policy_loss={policy_loss.item():.4f}, "
+                f"returns={mean_return:.2f}, min_ep_len={min_ep_len}"
             )
 
-            _, _, obs_l, action_l, reward_l = rollout(rp_env, agent, cfg, seed=i + 1000)
+            # Log metrics to MLflow
+            if cfg.mlflow.enabled:
+                mlflow.log_metrics(
+                    {
+                        "policy_loss": policy_loss.item(),
+                        "mean_return": float(mean_return),
+                        "min_episode_length": int(min_ep_len),
+                        "max_return": float(G.sum(axis=1).max()),
+                        "std_return": float(G.sum(axis=1).std()),
+                    },
+                    step=i,
+                )
 
+        # Generate plots periodically
+        if i % plot_freq == 0 and i > 0:
+            _, _, obs_l, action_l, reward_l = rollout(
+                rp_env, agent, cfg, seed=i + 10000
+            )
             eps = Episode(obs_l, action_l, reward_l)
 
-            # Example: Access episode data using enum names
-            # print(f"Pitch trajectory: {eps.RP_PITCH.shape}")
-            # print(f"Gyro trajectory: {eps.GYRO.shape}")
-            # print(f"Actions: {eps.ACC_BOTH_WHEELS.shape}")
+            # Generate plot
+            fig = plot_episode(eps, env_idx=0, figsize=(14, 12))
+            if fig and cfg.mlflow.enabled:
+                plot_path = f"./plots/episode_iter_{i:04d}.png"
+                os.makedirs("./plots", exist_ok=True)
+                fig.savefig(plot_path, dpi=100, bbox_inches="tight")
+                mlflow.log_artifact(plot_path)
+                plt.close(fig)
+                print(f"  📊 Saved plot: {plot_path}")
+
+        # Generate video periodically
+        if i % video_freq == 0 and i > 0 and video_env is not None:
+            print(f"  🎥 Recording video...")
+            # Run one episode in video environment
+            obs_d, _ = video_env.reset(seed=i + 20000)
+
+            # Add batch dimension for single env
+            for _ in range(1000):
+                obs_d_batched = {
+                    k: v[np.newaxis, :] if v.ndim == 1 else v for k, v in obs_d.items()
+                }
+                obs_d_t = np2tensor(obs_d_batched)
+                action, _ = agent.act(obs_d_t)
+
+                # Remove batch dimension
+                action_np = {k: v.cpu().numpy()[0] for k, v in action.items()}
+
+                obs_d, reward, terminated, truncated, _ = video_env.step(action_np)
+
+                if terminated or truncated:
+                    break
+
+            # Videos are automatically saved by RecordVideo wrapper
+            # Log video to MLflow
+            if cfg.mlflow.enabled:
+                # Find the latest video file
+                video_files = sorted(
+                    [f for f in os.listdir("./video") if f.endswith(".mp4")]
+                )
+                if video_files:
+                    latest_video = os.path.join("./video", video_files[-1])
+                    mlflow.log_artifact(latest_video)
+                    print(f"  🎥 Logged video: {latest_video}")
 
         i += 1
+
+
+def _flatten_dict(d, parent_key="", sep="_"):
+    """Flatten nested dict for MLflow params."""
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 
 if __name__ == "__main__":

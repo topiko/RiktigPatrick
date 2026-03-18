@@ -1,12 +1,18 @@
 defaults:
   - _self_
 
+mlflow:
+  tracking_uri: "https://ml.twohands.dev"
+  experiment_name: "rp_training"
+  enabled: true
 
 training:
   nrollouts: 64
   max_episodes: 20001
   save_frequency: 10
   seed: 42
+  plot_frequency: 10  # Generate plots every N iterations
+  video_frequency: 100  # Generate videos every N iterations
 
 rl:
   gamma: 0.99
