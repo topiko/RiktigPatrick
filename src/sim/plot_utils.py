@@ -32,7 +32,9 @@ def plot_episode(
 ) -> plt.Figure:
     nrows = len(keys)
 
-    fig, axes = plt.subplots(nrows=nrows, ncols=1, figsize=(figw, rowh * nrows))
+    fig, axes = plt.subplots(
+        nrows=nrows, ncols=1, figsize=(figw, rowh * nrows), sharex=True
+    )
     if nrows == 1:
         axes = [axes]  # Ensure axes is always a list for consistency
 
