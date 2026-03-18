@@ -13,7 +13,10 @@ def register_and_make_env(
     env_config = dict(cfg.env)
     n_parallel = env_config.pop("n_parallel", 1)
 
-    env_config["actions"] = list(cfg.policy.actions)
+    # Extract action keys from new config format
+    # Actions are now dicts like: {'act/accelerate_both_wheels': {'type': 'discrete', ...}}
+    action_keys = [list(action_item.keys())[0] for action_item in cfg.policy.actions]
+    env_config["actions"] = action_keys
     env_config["max_wheel_vel"] = cfg.env.max_wheel_vel
     env_config["max_wheel_acc"] = cfg.env.max_wheel_acc
 

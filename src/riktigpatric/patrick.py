@@ -115,6 +115,21 @@ class Observables(str, Enum):
     TRUE_PITCH = "simul/rp_pitch"
     OBS_TIME = "env/obs_time"
 
+    def dim(self) -> int:
+        if self in {
+            Observables.HEAD_PITCH,
+            Observables.HEAD_TURN,
+            Observables.LEFT_WHEEL_VEL,
+            Observables.RIGHT_WHEEL_VEL,
+            Observables.RP_PITCH,
+            Observables.TRUE_PITCH,
+            Observables.OBS_TIME,
+        }:
+            return 1
+        if self in {Observables.ACC, Observables.GYRO}:
+            return 3
+        raise ValueError(f"Unknown observable {self}!")
+
 
 class Obs:
     def __init__(self, obs_d: dict[Observables, np.ndarray]):

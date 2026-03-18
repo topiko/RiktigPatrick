@@ -69,9 +69,12 @@ def rollout(
 @hydra.main(config_path=HYDRA_CONFIG_DIR, config_name="rlrp", version_base=None)
 def main(cfg: DictConfig):
     rp_env = register_and_make_env(cfg)
-    action_d = {a: cfg.policy.act_map[a] for a in cfg.policy.actions}
+
+    # Convert config to list format for Agent
+    # Actions now include their config inline
     agent = Agent(
-        inputs=cfg.policy.inputs, actions=action_d, max_wheel_acc=cfg.env.max_wheel_acc
+        inputs=list(cfg.policy.inputs),
+        actions=list(cfg.policy.actions),
     )
 
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
