@@ -1,18 +1,14 @@
 defaults:
   - _self_
 
-mlflow:
-  tracking_uri: "https://ml.twohands.dev"
-  experiment_name: "rp_training"
-  enabled: true
+seed: 42
 
-training:
-  nrollouts: 64
-  max_episodes: 20001
-  save_frequency: 10
-  seed: 42
-  plot_frequency: 10  # Generate plots every N iterations
-  video_frequency: 100  # Generate videos every N iterations
+logging:
+  mlflow:
+    experiment_name: "rp_training"
+    enabled: true
+
+  plot_freq: 10  # Generate plots every N iterations
 
 rl:
   gamma: 0.99
@@ -24,10 +20,16 @@ rl:
   load_net: false
   trim_end_steps: 0
 
+reward:
+  step: 0.0
+  pitch_coef: 1.0
+  action_coef: 0.0
+  yaw_coef: 0.03
+  termination_penalty: 0.0
+
 train:
   policy_lr: 0.001
   value_lr: 0.03
-  n_epochs: 10
   grad_clip: 10.0
 
 env:
@@ -55,18 +57,4 @@ policy:
     - env/obs_time
     - sens/gyro
 
-reward:
-  step: 0.0
-  pitch_coef: 1.0
-  action_coef: 0.0
-  yaw_coef: 0.03
-  termination_penalty: 0.0
-
-model:
-  model_input:
-    - "filter/rp_pitch"
-    - "sens/gyro"
-    - "sens/left_wheel_vel"
-    - "sens/right_wheel_vel"
-    - "env/action_time"
 

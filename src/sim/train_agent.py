@@ -3,7 +3,6 @@ import os
 import dotenv
 import gymnasium as gym
 import hydra
-import matplotlib
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
@@ -13,13 +12,26 @@ from omegaconf import DictConfig, OmegaConf
 from torch import nn
 
 from nn_ctrl.nns import Agent
+from riktigpatric.patrick import Actions, Observables
 from sim.plot_utils import plot_episode
-from sim.utils import Episode, register_and_make_env
+from sim.utils import Episode, SingleEnvWrapper, register_and_make_env
 
-matplotlib.use("Agg")  # Non-interactive backend for headless rendering
-dotenv.load_dotenv()
+dotenv.load_dotenv()  # Load environment variables from .env file
+
 
 HYDRA_CONFIG_DIR = os.getenv("HYDRA_CONFIG_DIR", "config")
+
+
+def _flatten_dict(d, parent_key="", sep="_"):
+    """Flatten nested dict for MLflow params."""
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 
 def np2tensor(np_dict: dict) -> dict:
@@ -47,8 +59,8 @@ def rollout(
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
-    list[dict[str, np.ndarray]],
-    list[dict[str, np.ndarray]],
+    list[dict[Observables, np.ndarray]],
+    list[dict[Actions, np.ndarray]],
     list[str, np.ndarray],
 ]:
     obs_d, _ = rp_env.reset(seed=seed)
@@ -88,9 +100,9 @@ def rollout(
 @hydra.main(config_path=HYDRA_CONFIG_DIR, config_name="rlrp", version_base=None)
 def main(cfg: DictConfig):
     # Setup MLflow if enabled
-    if cfg.mlflow.enabled:
-        mlflow.set_tracking_uri(cfg.mlflow.tracking_uri)
-        mlflow.set_experiment(cfg.mlflow.experiment_name)
+    if cfg.logging.mlflow.enabled:
+        mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI"))
+        mlflow.set_experiment(cfg.logging.mlflow.experiment_name)
         mlflow.start_run()
 
         # Log config parameters
@@ -102,36 +114,15 @@ def main(cfg: DictConfig):
     # Create environment
     rp_env = register_and_make_env(cfg)
 
-    # Create video recording environment (for periodic video generation)
-    video_env = None
-    if cfg.mlflow.enabled and cfg.training.get("video_frequency", 0) > 0:
-        # Create separate env for video recording
-        video_env_config = dict(cfg.env)
-        video_env_config.pop("n_parallel")
-        video_env_config["record"] = True
-        action_keys = [
-            list(action_item.keys())[0] for action_item in cfg.policy.actions
-        ]
-        video_env_config["actions"] = action_keys
-
-        from gymnasium.envs.registration import register
-
-        register(
-            id="RiktigPatrick-video-v0",
-            entry_point="sim.envs.rp_env:GymRP",
-            max_episode_steps=2000,
-            kwargs=video_env_config,
-        )
-
-        base_video_env = gym.make(
-            "RiktigPatrick-video-v0", disable_env_checker=True, **video_env_config
-        )
-        video_env = RecordVideo(
-            base_video_env,
+    # video env: Wrap single env with batch dimension handler for rollout compatibility
+    rp_video_env = SingleEnvWrapper(
+        RecordVideo(
+            register_and_make_env(cfg, force_single_env=True),
             "./video",
-            episode_trigger=lambda ep_id: True,  # Record when we call it
-            name_prefix="training",
+            episode_trigger=lambda _: True,
+            name_prefix="try_policy_rp",
         )
+    )
 
     # Create agent
     agent = Agent(
@@ -159,120 +150,48 @@ def main(cfg: DictConfig):
         policy_loss.backward()
         optimizer.step()
 
-        # Logging and visualization
-        plot_freq = cfg.training.get("plot_frequency", 10)
-        video_freq = cfg.training.get("video_frequency", 100)
+        mean_return = G.sum(axis=1).mean()
+        min_ep_len = rewards.shape[1]
 
-        if i % 10 == 0:
-            mean_return = G.sum(axis=1).mean()
-            min_ep_len = rewards.shape[1]
+        print(
+            f"Step {i:4d}: policy_loss={policy_loss.item():.4f}, "
+            f"returns={mean_return:.2f}, min_ep_len={min_ep_len}"
+        )
 
-            print(
-                f"Step {i:4d}: policy_loss={policy_loss.item():.4f}, "
-                f"returns={mean_return:.2f}, min_ep_len={min_ep_len}"
+        # Log metrics to MLflow
+        if cfg.logging.mlflow.enabled:
+            mlflow.log_metrics(
+                {
+                    "policy_loss": policy_loss.item(),
+                    "mean_return": float(mean_return),
+                    "min_episode_length": int(min_ep_len),
+                    "max_return": float(G.sum(axis=1).max()),
+                    "std_return": float(G.sum(axis=1).std()),
+                },
+                step=i,
             )
 
-            # Log metrics to MLflow
-            if cfg.mlflow.enabled:
-                mlflow.log_metrics(
-                    {
-                        "policy_loss": policy_loss.item(),
-                        "mean_return": float(mean_return),
-                        "min_episode_length": int(min_ep_len),
-                        "max_return": float(G.sum(axis=1).max()),
-                        "std_return": float(G.sum(axis=1).std()),
-                    },
-                    step=i,
-                )
+        # Logging and visualization
+        plot_freq = cfg.logging.plot_freq
 
         # Generate plots periodically
-        if i % plot_freq == 0 and i > 0:
+        if i % plot_freq == 0:
+            rp_video_env.name_prefix = f"policy_iter_{i:04d}"
             _, _, obs_l, action_l, reward_l = rollout(
-                rp_env, agent, cfg, seed=i + 10000
+                rp_video_env, agent, cfg, seed=i + 10000
             )
             eps = Episode(obs_l, action_l, reward_l)
 
             # Generate plot
             fig = plot_episode(eps, env_idx=0, figsize=(14, 12))
-            if fig and cfg.mlflow.enabled:
+            if fig and cfg.logging.mlflow.enabled:
                 plot_path = f"./plots/episode_iter_{i:04d}.png"
-                os.makedirs("./plots", exist_ok=True)
-                fig.savefig(plot_path, dpi=100, bbox_inches="tight")
+                fig.savefig(plot_path, dpi=230, bbox_inches="tight")
                 mlflow.log_artifact(plot_path)
                 plt.close(fig)
                 print(f"  📊 Saved plot: {plot_path}")
 
-        # Generate video periodically
-        if i % video_freq == 0 and i > 0 and video_env is not None:
-            print(f"  🎥 Recording video...")
-
-            # Create a temporary single-env wrapper for rollout
-            # We need to wrap video_env to work with rollout (expects vectorized or single env)
-            class SingleEnvWrapper:
-                """Wrapper to make single env compatible with rollout batching."""
-
-                def __init__(self, env):
-                    self.env = env
-
-                def reset(self, seed=None):
-                    obs_d, info = self.env.reset(seed=seed)
-                    # Add batch dimension
-                    obs_d_batched = {
-                        k: v[np.newaxis, :] if v.ndim == 1 else v
-                        for k, v in obs_d.items()
-                    }
-                    return obs_d_batched, info
-
-                def step(self, action_d):
-                    # Remove batch dimension
-                    action_single = {k: v[0] for k, v in action_d.items()}
-                    obs_d, reward, terminated, truncated, reward_info = self.env.step(
-                        action_single
-                    )
-                    # Add batch dimension
-                    obs_d_batched = {
-                        k: v[np.newaxis, :] if v.ndim == 1 else v
-                        for k, v in obs_d.items()
-                    }
-                    reward = (
-                        np.array([reward])
-                        if isinstance(reward, (int, float))
-                        else reward[np.newaxis]
-                    )
-                    terminated = np.array([terminated])
-                    truncated = np.array([truncated])
-                    return obs_d_batched, reward, terminated, truncated, reward_info
-
-            wrapped_video_env = SingleEnvWrapper(video_env)
-
-            # Use rollout function for video
-            _ = rollout(wrapped_video_env, agent, cfg, seed=i + 20000)
-
-            # Videos are automatically saved by RecordVideo wrapper
-            # Log video to MLflow
-            if cfg.mlflow.enabled:
-                # Find the latest video file
-                video_files = sorted(
-                    [f for f in os.listdir("./video") if f.endswith(".mp4")]
-                )
-                if video_files:
-                    latest_video = os.path.join("./video", video_files[-1])
-                    mlflow.log_artifact(latest_video)
-                    print(f"  🎥 Logged video: {latest_video}")
-
         i += 1
-
-
-def _flatten_dict(d, parent_key="", sep="_"):
-    """Flatten nested dict for MLflow params."""
-    items = []
-    for k, v in d.items():
-        new_key = f"{parent_key}{sep}{k}" if parent_key else k
-        if isinstance(v, dict):
-            items.extend(_flatten_dict(v, new_key, sep=sep).items())
-        else:
-            items.append((new_key, v))
-    return dict(items)
 
 
 if __name__ == "__main__":

@@ -9,11 +9,100 @@ from omegaconf import DictConfig
 from riktigpatric.patrick import Actions, Observables
 
 
+class SingleEnvWrapper:
+    """Minimal wrapper to add/remove batch dimension for single environment.
+
+    Makes single env compatible with rollout that expects batched format.
+    Only wraps step() to handle batch dimension - other methods pass through.
+
+    Usage:
+        single_env = gym.make("MyEnv-v0")
+        batched_env = SingleEnvWrapper(single_env)
+        # Now returns batched format: obs (1, dim), reward (1,), etc.
+    """
+
+    def __init__(self, env):
+        self.env = env
+        self.num_envs = 1  # Signal that this provides batched format
+
+    def reset(self, seed=None):
+        """Add batch dimension to reset output.
+
+        Args:
+            seed: Random seed
+
+        Returns:
+            Batched obs_d (1, dim) and info
+        """
+        obs_d, info = self.env.reset(seed=seed)
+
+        # Add batch dimension: (dim,) -> (1, dim)
+        obs_d_batched = {
+            k: v[np.newaxis, :] if v.ndim == 1 else v[np.newaxis, ...]
+            for k, v in obs_d.items()
+        }
+
+        return obs_d_batched, info
+
+    def step(self, action_d):
+        """Remove batch dim before step, add it back after.
+
+        Args:
+            action_d: Dict with batched actions, shape (1, dim)
+
+        Returns:
+            Batched outputs: obs_d (1, dim), reward (1,), terminated (1,), truncated (1, 1)
+        """
+        # Remove batch dimension: (1, dim) -> (dim)
+        action_single = {k: v[0] for k, v in action_d.items()}
+
+        # Call underlying single env
+        obs_d, reward, terminated, truncated, reward_info = self.env.step(action_single)
+
+        # Add batch dimension back
+        # obs_d: (dim,) -> (1, dim)
+        obs_d_batched = {
+            k: v[np.newaxis, :] if v.ndim == 1 else v[np.newaxis, ...]
+            for k, v in obs_d.items()
+        }
+        # reward: scalar -> (1,)
+        reward_batched = (
+            np.array([reward]) if np.isscalar(reward) else reward[np.newaxis]
+        )
+        # terminated: bool -> (1,)
+        terminated_batched = np.array([terminated])
+        # truncated: bool -> (1, 1) to match AsyncVectorEnv format
+        truncated_batched = np.array([[truncated]])
+
+        return (
+            obs_d_batched,
+            reward_batched,
+            terminated_batched,
+            truncated_batched,
+            reward_info,
+        )
+
+    def __getattr__(self, name):
+        """Pass through any other attributes/methods to underlying env."""
+        return getattr(self.env, name)
+
+    def __setattr__(self, name, value):
+        """Set attributes - special handling for 'env' and 'num_envs', pass others through."""
+        if name in ("env", "num_envs"):
+            # Set on wrapper itself
+            object.__setattr__(self, name, value)
+        else:
+            # Pass through to underlying env (e.g., RecordVideo.name_prefix)
+            setattr(self.env, name, value)
+
+
 def register_and_make_env(
-    cfg: DictConfig,
+    cfg: DictConfig, force_single_env: bool = False
 ) -> gym.Env | gym.vector.AsyncVectorEnv:
     env_config = dict(cfg.env)
     n_parallel = env_config.pop("n_parallel", 1)
+    if force_single_env:
+        n_parallel = 1
 
     # Extract action keys from new config format
     # Actions are now dicts like: {'act/accelerate_both_wheels': {'type': 'discrete', ...}}
