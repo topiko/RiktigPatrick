@@ -29,8 +29,8 @@ env:
   randomize: false
   n_parallel: 5
   # All units are SI (International System of Units)
-  max_wheel_vel: 60  # rad/s - maximum wheel velocity
-  max_wheel_acc: 400   # rad/s² - maximum wheel acceleration
+  max_wheel_vel: 10.0  # rad/s - maximum wheel velocity
+  max_wheel_acc: 50.0  # rad/s² - maximum wheel acceleration
 
 policy:
   actions:

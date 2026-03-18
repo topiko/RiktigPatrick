@@ -57,11 +57,9 @@ class Actions(str, Enum):
 
     VEL_LEFT_WHEEL = "act/left_wheel_vel"
     VEL_RIGHT_WHEEL = "act/right_wheel_vel"
-    VEL_HEAD_PITCH = "act/head_pitch_vel"
-    VEL_HEAD_TURN = "act/head_turn_vel"
+    VEL_HEAD_PITCH = "act/head_pitch_vel"  # rad/s - head pitch velocity control
+    VEL_HEAD_TURN = "act/head_turn_vel"  # rad/s - head turn velocity control
 
-    HEAD_PITCH = "act/head_pitch"
-    HEAD_TURN = "act/head_turn"
     TIME = "act/time"
 
 

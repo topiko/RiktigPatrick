@@ -164,7 +164,11 @@ All observations are in SI units:
 ### Actions (to MuJoCo actuators)
 All actions are in SI units:
 - `act/accelerate_both_wheels`: rad/s² (wheel acceleration)
-- Velocity control modes: rad/s (target wheel velocity)
+- `act/left_wheel_vel`, `act/right_wheel_vel`: rad/s (wheel target velocity)
+- `act/head_pitch_vel`, `act/head_turn_vel`: rad/s (head velocity, ±1 rad/s max)
+
+**Note**: All actuators use **velocity control** (`intvelocity` type in MuJoCo).
+Wheel accelerations are integrated to velocities before sending to actuators.
 
 ### Configuration Parameters
 All parameters in `config/rlrp.yaml` use SI units:

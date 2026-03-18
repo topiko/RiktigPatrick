@@ -169,14 +169,14 @@ class MujocoRP:
             name="headpitch_actuator",
             joint=head_pitch,
             kp=kp_servo,
-            actrange=[-1, 1],  # <--- range in radians
+            actrange=[-1, 1],  # rad/s - velocity control range
         )
         self.model.actuator.add(
             "intvelocity",
             name="headturn_actuator",
             joint=head_lr,
             kp=kp_servo,
-            actrange=[-1, 1],  # <--- range in radians
+            actrange=[-1, 1],  # rad/s - velocity control range
         )
 
         # Sensors:
@@ -239,11 +239,25 @@ def make_arena() -> mjcf.RootElement:
 def _get_action_space(
     actions: list[str], max_wheel_vel: float, max_wheel_acc: float
 ) -> gymnasium.spaces.Dict:
+    """Define action space for the robot.
+
+    Args:
+        actions: List of action keys to include
+        max_wheel_vel: Maximum wheel velocity in rad/s
+        max_wheel_acc: Maximum wheel acceleration in rad/s²
+
+    Returns:
+        Dict space with action ranges (all SI units)
+    """
     d_ = {}
     for k in actions:
-        if k in [Actions.HEAD_PITCH, Actions.HEAD_TURN]:
+        # Head velocity control (hardcoded ±1 rad/s)
+        if k in [Actions.VEL_HEAD_PITCH, Actions.VEL_HEAD_TURN]:
             d_[k] = gymnasium.spaces.Box(
-                low=-1.0, high=1.0, shape=(1,), dtype=np.float32
+                low=-1.0,
+                high=1.0,
+                shape=(1,),
+                dtype=np.float32,  # rad/s
             )
         elif k in [Actions.VEL_LEFT_WHEEL, Actions.VEL_RIGHT_WHEEL]:
             d_[k] = gymnasium.spaces.Box(
@@ -450,23 +464,25 @@ class GymRP(gymnasium.Env):
         """Execute one environment step.
 
         All actions are in SI units:
-        - VEL_*_WHEEL: rad/s (wheel velocities)
+        - VEL_*_WHEEL: rad/s (wheel target velocities)
         - ACC_*_WHEEL: rad/s² (wheel accelerations)
-        - HEAD_PITCH, HEAD_TURN: rad (head positions)
+        - VEL_HEAD_PITCH, VEL_HEAD_TURN: rad/s (head velocities)
         """
         rvel = self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL)[0]  # rad/s
         lvel = self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]  # rad/s
         # Apply the actions at time t (all in SI units)
         for a, val in action_d.items():
-            if a == Actions.HEAD_PITCH:
-                self.dm_env.bind(self.head_pitch_act).ctrl = val[0]
-            elif a == Actions.HEAD_TURN:
-                self.dm_env.bind(self.head_turn_act).ctrl = val[0]
+            # Head velocity control (rad/s)
+            if a == Actions.VEL_HEAD_PITCH:
+                self.dm_env.bind(self.head_pitch_act).ctrl = val[0]  # rad/s
+            elif a == Actions.VEL_HEAD_TURN:
+                self.dm_env.bind(self.head_turn_act).ctrl = val[0]  # rad/s
+            # Wheel velocity control (rad/s)
             elif a == Actions.VEL_LEFT_WHEEL:
-                self.dm_env.bind(self.left_wheel_act).ctrl = val[0]
+                self.dm_env.bind(self.left_wheel_act).ctrl = val[0]  # rad/s
 
             elif a == Actions.VEL_RIGHT_WHEEL:
-                self.dm_env.bind(self.right_wheel_act).ctrl = val[0]
+                self.dm_env.bind(self.right_wheel_act).ctrl = val[0]  # rad/s
 
             elif a == Actions.ACC_LEFT_WHEEL:
                 # Acceleration mode: integrate acc (rad/s²) to velocity (rad/s)
