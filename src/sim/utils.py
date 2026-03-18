@@ -6,6 +6,8 @@ import torch
 from gymnasium.envs.registration import register
 from omegaconf import DictConfig
 
+from riktigpatric.patrick import Actions, Observables
+
 
 def register_and_make_env(
     cfg: DictConfig,
@@ -82,3 +84,92 @@ def dict2tensor(obs_d: dict[str, np.ndarray]) -> torch.Tensor:
         raise TypeError()
 
     return torch.Tensor(obs_arr)
+
+
+class Episode:
+    """Episode data container with attribute-based access.
+
+    Provides direct access to observations, actions, and rewards using enum names.
+    All arrays have shape: (num_steps, num_envs, dim)
+
+    Example:
+        eps = Episode(obs_l, action_l, rewards_l)
+        pitch = eps.RP_PITCH           # (num_steps, num_envs, 1)
+        gyro = eps.GYRO                # (num_steps, num_envs, 3)
+        wheel_acc = eps.ACC_BOTH_WHEELS  # (num_steps, num_envs, 1)
+        rewards = eps.rewards           # (num_steps, num_envs)
+
+    Available observation attributes (from Observables enum):
+        .ACC, .GYRO, .HEAD_PITCH, .HEAD_TURN, .LEFT_WHEEL_VEL,
+        .RIGHT_WHEEL_VEL, .RP_PITCH, .TRUE_PITCH, .OBS_TIME
+
+    Available action attributes (from Actions enum):
+        .ACC_BOTH_WHEELS, .VEL_HEAD_PITCH, etc.
+    """
+
+    def __init__(
+        self,
+        obs_l: list[dict[Observables, np.ndarray]],
+        action_l: list[dict[str, np.ndarray]],
+        rewards_l: list[dict[str, np.ndarray]],
+    ):
+        """Initialize episode from rollout data.
+
+        Args:
+            obs_l: List of observation dicts (keys are Observables enum)
+            action_l: List of action dicts (keys are strings)
+            rewards_l: List of reward_info dicts (keys are strings)
+        """
+        # Stack observations over time: (num_steps, num_envs, obs_dim)
+        if obs_l:
+            for obs_key in obs_l[0].keys():
+                # obs_key is Observables.ACC, use obs_key.name to get "ACC"
+                obs_array = np.stack([obs[obs_key] for obs in obs_l], axis=0)
+                setattr(self, obs_key.name, obs_array)
+
+        # Stack actions over time: (num_steps, num_envs, action_dim)
+        if action_l:
+            for action_key_str in action_l[0].keys():
+                action_array = np.stack(
+                    [act[action_key_str] for act in action_l], axis=0
+                )
+
+                # Try to find matching Actions enum for nice attribute name
+                action_enum = None
+                for a in Actions:
+                    if a.value == action_key_str:
+                        action_enum = a
+                        break
+
+                if action_enum:
+                    # Use enum name: "ACC_BOTH_WHEELS", "VEL_HEAD_PITCH"
+                    setattr(self, action_enum.name, action_array)
+                else:
+                    # Fallback: sanitize string
+                    # "act/accelerate_both_wheels" -> "accelerate_both_wheels"
+                    attr_name = action_key_str.replace("act/", "").replace("/", "_")
+                    setattr(self, attr_name, action_array)
+
+        # Stack reward components over time
+        self.reward_components = {}
+        if rewards_l:
+            for reward_key in rewards_l[0].keys():
+                reward_array = np.stack([r[reward_key] for r in rewards_l], axis=0)
+                self.reward_components[reward_key] = reward_array
+
+            # Store total reward if available
+            if "step_reward" in self.reward_components:
+                self.rewards = self.reward_components["step_reward"]
+
+    def __repr__(self) -> str:
+        """Return string representation listing available attributes."""
+        obs_attrs = [
+            attr for attr in dir(self) if not attr.startswith("_") and attr.isupper()
+        ]
+        action_attrs = [
+            attr
+            for attr in dir(self)
+            if not attr.startswith("_") and attr.isupper() and hasattr(Actions, attr)
+        ]
+
+        return f"Episode(observations={obs_attrs}, actions={action_attrs}, num_steps={getattr(self, obs_attrs[0], np.array([])).shape[0] if obs_attrs else 0})"
