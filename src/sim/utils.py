@@ -188,44 +188,6 @@ def register_and_make_env(
     )
 
 
-class Tape:
-    def __init__(self, idx: int):
-        self.idx = idx
-        self.probs = []
-        self.values = []
-        self.rewards = []
-        self.entropies = []
-        self._is_ready = False
-
-    @property
-    def ep_return(self) -> float:
-        return sum(self.rewards)
-
-    def build(self) -> Tape:
-        self._is_ready = True
-        self.probs = torch.stack(self.probs, dim=0)
-        self.rewards = np.array(self.rewards)
-        self.values = torch.cat(self.values, dim=0)
-        self.entropies = torch.stack(self.entropies, dim=0)
-        return self
-
-    def __len__(self) -> int:
-        return len(self.probs)
-
-
-def dict2tensor(obs_d: dict[str, np.ndarray]) -> torch.Tensor:
-    ndim = list(obs_d.values())[0].ndim
-    if ndim == 1:
-        obs_arr = np.concatenate(list(obs_d.values()), axis=0)
-        obs_arr = obs_arr[np.newaxis, :]  # Add batch dimension
-    elif ndim == 2:
-        obs_arr = np.concatenate(list(obs_d.values()), axis=1)
-    else:
-        raise TypeError()
-
-    return torch.Tensor(obs_arr)
-
-
 class Episode:
     """Episode data container for SINGLE episode with attribute-based access.
 
@@ -253,7 +215,7 @@ class Episode:
     def __init__(
         self,
         obs_l: list[dict[Observables, np.ndarray]],
-        action_l: list[dict[str, np.ndarray]],
+        action_l: list[dict[Actions, np.ndarray]],
         rewards_l: list[dict[str, np.ndarray]],
     ):
         """Initialize episode from rollout data for SINGLE episode.
@@ -270,63 +232,49 @@ class Episode:
             ValueError: If input data contains batch dimension (multiple environments)
         """
         # Check that we have single episode data, not batched
-        if obs_l:
-            first_obs_value = list(obs_l[0].values())[0]
-            if first_obs_value.ndim > 1 and first_obs_value.shape[0] > 1:
-                raise ValueError(
-                    f"Episode expects single episode data, but got batched data with "
-                    f"shape {first_obs_value.shape}. Extract single environment first."
-                )
+        first_obs_value = list(obs_l[0].values())[0]
+        if first_obs_value.shape[0] != 1:
+            raise ValueError(
+                f"Episode expects single episode data, but got batched data with "
+                f"shape {first_obs_value.shape}. Extract single environment first."
+            )
 
         # Stack observations over time: (num_steps, obs_dim)
-        if obs_l:
-            for obs_key in obs_l[0].keys():
-                # obs_key is Observables.ACC, use obs_key.name to get "ACC"
-                obs_array = np.stack([obs[obs_key] for obs in obs_l], axis=0)
-                # Remove batch dim if present (shape (num_steps, 1, dim) -> (num_steps, dim))
-                if obs_array.ndim == 3 and obs_array.shape[1] == 1:
-                    obs_array = obs_array[:, 0, :]
-                setattr(self, obs_key.name, obs_array)
+        for obs_key in obs_l[0].keys():
+            # obs_key is Observables.ACC, use obs_key.name to get "ACC"
+            obs_array = np.concat([obs[obs_key] for obs in obs_l], axis=0)
+
+            setattr(self, f"OBS_{obs_key.name}", obs_array)
 
         # Stack actions over time: (num_steps, action_dim)
-        if action_l:
-            for action_key_str in action_l[0].keys():
-                action_array = np.stack(
-                    [act[action_key_str] for act in action_l], axis=0
-                )
-                # Remove batch dim if present
-                if action_array.ndim == 3 and action_array.shape[1] == 1:
-                    action_array = action_array[:, 0, :]
+        for action_key in action_l[0].keys():
+            action_array = np.concat([act[action_key] for act in action_l], axis=0)
 
-                # Try to find matching Actions enum for nice attribute name
-                action_enum = None
-                for a in Actions:
-                    if a.value == action_key_str:
-                        action_enum = a
-                        break
+            setattr(self, f"ACT_{action_key.name}", action_array)
 
-                if action_enum:
-                    # Use enum name: "ACC_BOTH_WHEELS", "VEL_HEAD_PITCH"
-                    setattr(self, action_enum.name, action_array)
-                else:
-                    # Fallback: sanitize string
-                    # "act/accelerate_both_wheels" -> "accelerate_both_wheels"
-                    attr_name = action_key_str.replace("act/", "").replace("/", "_")
-                    setattr(self, attr_name, action_array)
+        # Stack reward components over time: (num_steps, 1)
+        for reward_key in rewards_l[0].keys():
+            reward_array = np.concat([r[reward_key] for r in rewards_l], axis=0)
 
-        # Stack reward components over time: (num_steps,)
-        self.reward_components = {}
-        if rewards_l:
-            for reward_key in rewards_l[0].keys():
-                reward_array = np.stack([r[reward_key] for r in rewards_l], axis=0)
-                # Remove batch dim if present
-                if reward_array.ndim == 2 and reward_array.shape[1] == 1:
-                    reward_array = reward_array[:, 0]
-                self.reward_components[reward_key] = reward_array
+            setattr(self, f"REWARD_{reward_key}", reward_array)
 
-            # Store total reward if available
-            if "step_reward" in self.reward_components:
-                self.rewards = self.reward_components["step_reward"]
+    def get_data(self, key: Actions | Observables | str) -> np.ndarray:
+        if isinstance(key, Observables):
+            return self.get_observable(key)
+        if isinstance(key, Actions):
+            return self.get_action(key)
+
+        raise ValueError(
+            f"Key must be an instance of Observables or Actions enum, got {type(key)}"
+        )
+
+    def get_observable(self, obs: Observables) -> np.ndarray:
+        """Get observable array by enum key."""
+        return getattr(self, f"OBS_{obs.name}")
+
+    def get_action(self, act: Actions) -> np.ndarray:
+        """Get action array by enum key."""
+        return getattr(self, f"ACT_{act.name}")
 
     def __repr__(self) -> str:
         """Return string representation listing available attributes."""

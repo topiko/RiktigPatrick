@@ -62,6 +62,26 @@ class Actions(str, Enum):
 
     TIME = "act/time"
 
+    @classmethod
+    def from_str(cls, value: str) -> Actions:
+        """Convert string value to Actions enum.
+
+        Args:
+            value: String value
+
+        Returns:
+            Corresponding Observables enum member
+
+        Raises:
+            ValueError: If no matching observable found
+        """
+        for act in cls:
+            if act.value == value:
+                return act
+        raise ValueError(
+            f"Unknown observable: '{value}'. Available: {[a.value for a in cls]}"
+        )
+
 
 class StepAction:
     def __init__(self, action_d: dict[Actions, np.ndarray]):
@@ -116,7 +136,7 @@ class Observables(str, Enum):
     OBS_TIME = "env/obs_time"
 
     @classmethod
-    def from_str(cls, value: str) -> "Observables":
+    def from_str(cls, value: str) -> Observables:
         """Convert string value to Observables enum.
 
         Args:

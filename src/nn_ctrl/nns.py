@@ -111,7 +111,9 @@ class Agent(nn.Module):
             }
         )
 
-    def forward(self, x: dict[Observables, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def forward(
+        self, x: dict[Observables, torch.Tensor]
+    ) -> dict[Actions, torch.Tensor]:
         """Forward pass through the network.
 
         Args:
@@ -133,13 +135,15 @@ class Agent(nn.Module):
         action_logits = {}
         for action_key in self.action_configs.keys():
             head_key = action_key.replace("/", "_")
-            action_logits[action_key] = self.action_heads[head_key](features)
+            action_logits[Actions.from_str(action_key)] = self.action_heads[head_key](
+                features
+            )
 
         return action_logits
 
     def act(
         self, x: dict[Observables, torch.Tensor]
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    ) -> tuple[dict[Actions, torch.Tensor], torch.Tensor]:
         """Sample actions from the policy.
 
         Args:
@@ -185,7 +189,7 @@ class Agent(nn.Module):
 
         # Add observation time to actions for synchronization check
         if Observables.OBS_TIME in x:
-            actions[Actions.TIME.value] = x[Observables.OBS_TIME]
+            actions[Actions.TIME] = x[Observables.OBS_TIME]
 
         # Sum log probabilities across all actions
         logp = torch.cat(logp_l, dim=1).sum(dim=1, keepdim=True)

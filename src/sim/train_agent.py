@@ -183,13 +183,24 @@ def main(cfg: DictConfig):
             eps = Episode(obs_l, action_l, reward_l)
 
             # Generate plot (eps is single episode)
-            fig = plot_episode(eps)
-            if fig and cfg.logging.mlflow.enabled:
-                plot_path = f"./plots/episode_iter_{i:04d}.png"
-                fig.savefig(plot_path, dpi=230, bbox_inches="tight")
+            fig = plot_episode(
+                eps,
+                keys=[
+                    (Observables.OBS_TIME, (Observables.from_str(o),))
+                    for o in cfg.policy.inputs
+                    if o != Observables.OBS_TIME.value
+                ]
+                + [
+                    (Actions.TIME, (Actions.from_str(list(a.keys())[0]),))
+                    for a in cfg.policy.actions
+                ],
+            )
+            plot_path = f"./plots/episode_iter_{i:04d}.png"
+            fig.savefig(plot_path, dpi=230, bbox_inches="tight")
+            if cfg.logging.mlflow.enabled:
                 mlflow.log_artifact(plot_path)
-                plt.close(fig)
-                print(f"  📊 Saved plot: {plot_path}")
+            plt.close(fig)
+            print(f"  📊 Saved plot: {plot_path}")
 
         i += 1
 
