@@ -19,7 +19,7 @@ Example:
 import torch
 from torch import nn
 
-from riktigpatric.patrick import Observables
+from riktigpatric.patrick import Actions, Observables
 
 
 class Agent(nn.Module):
@@ -182,6 +182,10 @@ class Agent(nn.Module):
 
             else:
                 raise ValueError(f"Unknown action type: {action_cfg['type']}")
+
+        # Add observation time to actions for synchronization check
+        if Observables.OBS_TIME in x:
+            actions[Actions.TIME.value] = x[Observables.OBS_TIME]
 
         # Sum log probabilities across all actions
         logp = torch.cat(logp_l, dim=1).sum(dim=1, keepdim=True)

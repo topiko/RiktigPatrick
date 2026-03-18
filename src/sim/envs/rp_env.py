@@ -427,10 +427,11 @@ class GymRP(gymnasium.Env):
             }
         )
 
-    def _get_reward(self) -> tuple[float, dict]:
+    def _get_reward(self) -> tuple[float, dict[str, float]]:
         step_reward = 1
 
-        return step_reward, {"step_reward": step_reward}
+        total = step_reward
+        return total, {"step_reward": step_reward, "time": self.simul_time}
 
     def _get_info(self) -> dict:
         return {}
@@ -460,18 +461,54 @@ class GymRP(gymnasium.Env):
 
     def step(
         self, action_d: dict[Actions, np.ndarray]
-    ) -> tuple[dict, float, bool, bool, dict]:
+    ) -> tuple[dict, dict, bool, bool, dict, dict]:
         """Execute one environment step.
 
         All actions are in SI units:
         - VEL_*_WHEEL: rad/s (wheel target velocities)
         - ACC_*_WHEEL: rad/s² (wheel accelerations)
         - VEL_HEAD_PITCH, VEL_HEAD_TURN: rad/s (head velocities)
+        - TIME: seconds (observation time for sync check, not applied as action)
         """
+        # Check time synchronization if TIME action is present
+        if Actions.TIME in action_d or "act/time" in action_d:
+            action_time = action_d.get(Actions.TIME, action_d.get("act/time"))
+            current_time = self.state.obs.get_observable(Observables.OBS_TIME)
+
+            # Debug: Check shape compatibility
+            if action_time.ndim == 2:
+                action_time_flat = action_time.flatten()
+            else:
+                action_time_flat = action_time
+
+            if current_time.ndim == 2:
+                current_time_flat = current_time.flatten()
+            else:
+                current_time_flat = current_time
+
+            # Check if times are roughly aligned (within half a timestep)
+            time_diff = np.abs(action_time_flat - current_time_flat)
+            max_diff = self.step_time * 0.5  # Half timestep tolerance
+
+            if np.any(time_diff > max_diff):
+                import warnings
+
+                msg = (
+                    f"Action time desync detected! "
+                    f"Max diff: {time_diff.max():.6f}s (allowed: {max_diff:.6f}s)"
+                )
+                print(
+                    f"WARNING: {msg}"
+                )  # Print to ensure visibility in multiprocessing
+                warnings.warn(msg)
+
         rvel = self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL)[0]  # rad/s
         lvel = self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]  # rad/s
         # Apply the actions at time t (all in SI units)
         for a, val in action_d.items():
+            # Skip TIME - it's for sync checking only, not an actuator command
+            if a == Actions.TIME or a == "act/time":
+                continue
             # Head velocity control (rad/s)
             if a == Actions.VEL_HEAD_PITCH:
                 self.dm_env.bind(self.head_pitch_act).ctrl = val[0]  # rad/s
@@ -535,21 +572,13 @@ class GymRP(gymnasium.Env):
         self.state.update_action(t0, action_d)
 
         # The reward is received at time t
-        reward, reward_info = self._get_reward()
-        self.state.update_rewards(reward_info)
+        reward, reward_d = self._get_reward()
+        self.state.update_rewards(reward_d)
 
         # The state needs a step as ewll
         self.state.step()
 
-        info = self._get_info()
-
-        return (
-            self._get_obs(),
-            reward,
-            self.terminated,
-            self.truncated,
-            info,
-        )
+        return self._get_obs(), reward, self.terminated, self.truncated, reward_d
 
 
 def display_video(frames, framerate=30, fname: str = ""):
