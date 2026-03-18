@@ -115,7 +115,32 @@ class Observables(str, Enum):
     TRUE_PITCH = "simul/rp_pitch"
     OBS_TIME = "env/obs_time"
 
+    @classmethod
+    def from_str(cls, value: str) -> "Observables":
+        """Convert string value to Observables enum.
+
+        Args:
+            value: String value (e.g., 'filter/rp_pitch', 'sens/gyro')
+
+        Returns:
+            Corresponding Observables enum member
+
+        Raises:
+            ValueError: If no matching observable found
+        """
+        for obs in cls:
+            if obs.value == value:
+                return obs
+        raise ValueError(
+            f"Unknown observable: '{value}'. Available: {[o.value for o in cls]}"
+        )
+
     def dim(self) -> int:
+        """Return the dimension (number of channels) for this observable.
+
+        Returns:
+            Number of channels (1 for scalars, 3 for vectors)
+        """
         if self in {
             Observables.HEAD_PITCH,
             Observables.HEAD_TURN,

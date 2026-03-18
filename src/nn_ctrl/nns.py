@@ -19,7 +19,7 @@ Example:
 import torch
 from torch import nn
 
-from riktigpatric.patrick import Actions, Observables
+from riktigpatric.patrick import Observables
 
 
 class Agent(nn.Module):
@@ -41,10 +41,10 @@ class Agent(nn.Module):
         """Initialize agent.
 
         Args:
-            inputs: List of input configs, each with 'name' and 'nch' (number of channels)
-                    e.g., [{'name': 'filter/rp_pitch', 'nch': 1}, ...]
+            inputs: List of input observable names (dimensions auto-detected from Observable.dim())
+                    e.g., ['filter/rp_pitch', 'sens/gyro', ...]
             actions: List of action configs, each with action key, 'type', and parameters
-                     e.g., [{'act/accelerate_both_wheels': {'type': 'discrete', 'bins': [-50, 0, 50]}}]
+                     e.g., [{'act/accelerate_both_wheels': {'type': 'discrete', 'bins': [-50, -25, 0, 25, 50]}}]
         """
         super().__init__()
 
@@ -56,18 +56,8 @@ class Agent(nn.Module):
             # Input is just a string key (e.g., 'filter/rp_pitch')
             key_str = str(inp)
 
-            # Convert string to Observables enum
-            # Find the Observable that matches this string value
-            obs_key = None
-            for obs in Observables:
-                if obs.value == key_str:
-                    obs_key = obs
-                    break
-
-            if obs_key is None:
-                raise ValueError(
-                    f"Unknown observable: {key_str}. Available: {[o.value for o in Observables]}"
-                )
+            # Convert string to Observables enum using from_str()
+            obs_key = Observables.from_str(key_str)
 
             # Get dimension from the Observable itself
             obs_dim = obs_key.dim()
