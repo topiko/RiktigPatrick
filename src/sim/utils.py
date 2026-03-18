@@ -157,7 +157,8 @@ def register_and_make_env(
 
     # Extract action keys from new config format
     # Actions are now dicts like: {'act/accelerate_both_wheels': {'type': 'discrete', ...}}
-    action_keys = [list(action_item.keys())[0] for action_item in cfg.policy.actions]
+    action_keys = list(cfg.policy.actions.keys())
+
     env_config["actions"] = action_keys
     env_config["max_wheel_vel"] = cfg.env.max_wheel_vel
     env_config["max_wheel_acc"] = cfg.env.max_wheel_acc

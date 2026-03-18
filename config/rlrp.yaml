@@ -42,13 +42,13 @@ env:
 
 policy:
   actions:
-    - act/accelerate_both_wheels:
-        type: discrete
-        bins: [-50, -25, 0, 25, 50]  # rad/s² - acceleration values for both wheels
+    act/accelerate_both_wheels:
+      type: discrete
+      bins: [-50, -25, 0, 25, 50]  # rad/s² - acceleration values for both wheels
 
-    - act/head_pitch_vel:
-        type: discrete
-        bins: [-0.2, -0.1, 0, 0.1, 0.2]  # rad/s - head pitch velocity
+    act/head_pitch_vel:
+      type: discrete
+      bins: [-0.2, -0.1, 0, 0.1, 0.2]  # rad/s - head pitch velocity
 
   inputs:
     - filter/rp_pitch

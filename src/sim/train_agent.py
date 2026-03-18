@@ -70,11 +70,11 @@ def rollout(
     action_l = []
     rewards_l = []
     logps_l = []
-
+    h = None
     for _ in range(max_steps):
         obs_d_t = np2tensor(obs_d)
 
-        action, logp = agent.act(obs_d_t)
+        action, logp, h = agent.act(obs_d_t, h)
 
         obs_l.append(obs_d)
         action_np = tensor2numpy(action)
@@ -127,8 +127,8 @@ def main(cfg: DictConfig):
 
     # Create agent
     agent = Agent(
-        inputs=list(cfg.policy.inputs),
-        actions=list(cfg.policy.actions),
+        inputs=cfg.policy.inputs,
+        actions=cfg.policy.actions,
     )
 
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
@@ -190,8 +190,8 @@ def main(cfg: DictConfig):
                     if o != Observables.OBS_TIME.value
                 ]
                 + [
-                    (Actions.TIME, (Actions.from_str(list(a.keys())[0]),))
-                    for a in cfg.policy.actions
+                    (Actions.TIME, (Actions.from_str(a),))
+                    for a in cfg.policy.actions.keys()
                 ]
                 + [(Observables.OBS_TIME, (Observables.REWARD_TOTAL,))],
             )

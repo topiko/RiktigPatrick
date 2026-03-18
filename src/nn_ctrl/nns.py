@@ -22,6 +22,24 @@ from torch import nn
 from riktigpatric.patrick import Actions, Observables
 
 
+def _get_obs_decoder(obs: Observables) -> tuple[nn.Module, int]:
+    if obs == Observables.ACC:
+        return nn.Linear(3, 16), 16  # 3D acceleration vector -> 16 features
+    if obs == Observables.GYRO:
+        return nn.Linear(3, 16), 16  # 3D gyro vector -> 16 features
+    if obs in [Observables.HEAD_PITCH, Observables.HEAD_TURN]:
+        return nn.Linear(1, 8), 8  # Single angle -> 8 features
+    if obs in [Observables.LEFT_WHEEL_VEL, Observables.RIGHT_WHEEL_VEL]:
+        return nn.Linear(1, 8), 8  # Single velocity -> 8 features
+    if obs in [Observables.RP_PITCH, Observables.TRUE_PITCH]:
+        return nn.Linear(1, 8), 8  # Single angle -> 8 features
+    if obs == Observables.OBS_TIME:
+        # TODO: sine/cos encoding for time to capture periodicity?
+        return nn.Linear(1, 8), 8  # Single time value -> 8 features
+
+    raise ValueError(f"Unknown observation key: {obs}")
+
+
 class Agent(nn.Module):
     """Neural network policy for robot control.
 
@@ -35,8 +53,9 @@ class Agent(nn.Module):
 
     def __init__(
         self,
-        inputs: list[dict],
-        actions: list[dict],
+        inputs: list[str],
+        actions: dict[str, dict],
+        hsize: int = 64,
     ):
         """Initialize agent.
 
@@ -49,71 +68,55 @@ class Agent(nn.Module):
         super().__init__()
 
         # Parse inputs and convert string keys to Observables
-        self.input_keys = []  # Will store Observables enum values
-        total_input_size = 0
 
+        d = {}  # Temporary dict to store decoders for each input
+        n = 0
         for inp in inputs:
-            # Input is just a string key (e.g., 'filter/rp_pitch')
-            key_str = str(inp)
-
             # Convert string to Observables enum using from_str()
-            obs_key = Observables.from_str(key_str)
+            obs = Observables.from_str(inp)
+            d[obs], n_ = _get_obs_decoder(obs)
+            n += n_
 
-            # Get dimension from the Observable itself
-            obs_dim = obs_key.dim()
-
-            self.input_keys.append(obs_key)
-            total_input_size += obs_dim
+        self.encoders = nn.ModuleDict(d)
 
         # Parse actions
         self.action_configs = {}
-        self.action_bins = {}
-        self.action_sizes = {}
-
-        for action_item in actions:
+        d = {}
+        for act_str, action_d in actions.items():
             # Extract action key and config
-            action_key = list(action_item.keys())[0]
-            action_cfg = action_item[action_key]
 
-            self.action_configs[action_key] = action_cfg
-
-            if action_cfg["type"] == "discrete":
+            action = Actions.from_str(act_str)  # Convert string to Actions enum
+            self.action_configs[action] = {}
+            if action_d["type"] == "discrete":
                 # Store bins as registered buffer (moves with model to GPU/CPU)
-                bins = torch.tensor(action_cfg["bins"], dtype=torch.float32)
-                # Use string key for buffer name (can't use Actions enum)
-                buffer_name = f"bins_{action_key.replace('/', '_')}"
-                self.register_buffer(buffer_name, bins)
-                self.action_bins[action_key] = bins
-                self.action_sizes[action_key] = len(bins)
+                bins = torch.tensor(action_d["bins"], dtype=torch.float32)
+                self.action_configs[action]["type"] = "discrete"
+                self.action_configs[action]["bins"] = bins
 
-            elif action_cfg["type"] == "continuous":
+                d[action] = nn.Linear(hsize, len(bins))  # Output logits for each bin
+
+            elif action_d["type"] == "continuous":
                 # For future: continuous actions with Gaussian distribution
                 raise NotImplementedError("Continuous actions not yet implemented")
 
             else:
-                raise ValueError(f"Unknown action type: {action_cfg['type']}")
+                raise ValueError(f"Unknown action type: {action_d['type']}")
+
+        self.action_heads = nn.ModuleDict(d)
 
         # Network backbone
         self.model = torch.nn.Sequential(
-            torch.nn.Linear(total_input_size, 128),
+            torch.nn.Linear(n, 128),
             torch.nn.ReLU(),
             torch.nn.Linear(128, 64),
             torch.nn.ReLU(),
-            torch.nn.Linear(64, 32),
+            torch.nn.Linear(64, hsize),
             torch.nn.ReLU(),
         )
 
-        # Create action heads based on action sizes
-        self.action_heads = torch.nn.ModuleDict(
-            {
-                action_key.replace("/", "_"): torch.nn.Linear(32, size)
-                for action_key, size in self.action_sizes.items()
-            }
-        )
-
     def forward(
-        self, x: dict[Observables, torch.Tensor]
-    ) -> dict[Actions, torch.Tensor]:
+        self, x: dict[Observables, torch.Tensor], h: torch.Tensor | None = None
+    ) -> tuple[dict[Actions, torch.Tensor], torch.Tensor | None]:
         """Forward pass through the network.
 
         Args:
@@ -124,8 +127,8 @@ class Agent(nn.Module):
         """
         # Concatenate inputs based on input_keys
         input_tensors = []
-        for key in self.input_keys:
-            input_tensors.append(x[key])
+        for key, mod in self.encoders.items():
+            input_tensors.append(mod(x[key]))
         input_tensor = torch.cat(input_tensors, dim=-1)
 
         # Pass through backbone
@@ -133,17 +136,14 @@ class Agent(nn.Module):
 
         # Generate logits for each action
         action_logits = {}
-        for action_key in self.action_configs.keys():
-            head_key = action_key.replace("/", "_")
-            action_logits[Actions.from_str(action_key)] = self.action_heads[head_key](
-                features
-            )
+        for action_key, mod_ in self.action_heads.items():
+            action_logits[action_key] = mod_(features)
 
-        return action_logits
+        return action_logits, h
 
     def act(
-        self, x: dict[Observables, torch.Tensor]
-    ) -> tuple[dict[Actions, torch.Tensor], torch.Tensor]:
+        self, x: dict[Observables, torch.Tensor], h: torch.Tensor | None = None
+    ) -> tuple[dict[Actions, torch.Tensor], torch.Tensor, torch.Tensor | None]:
         """Sample actions from the policy.
 
         Args:
@@ -153,13 +153,13 @@ class Agent(nn.Module):
             actions: Dict of sampled actions in SI units (keys are strings)
             logp: Log probability of the sampled actions
         """
-        action_logits = self.forward(x)
+        action_logits, h = self.forward(x, h)
 
         actions: dict[str, torch.Tensor] = {}
         logp_l = []
 
-        for action_key, logits in action_logits.items():
-            action_cfg = self.action_configs[action_key]
+        for action, logits in action_logits.items():
+            action_cfg = self.action_configs[action]
 
             if action_cfg["type"] == "discrete":
                 # Sample from categorical distribution
@@ -168,10 +168,9 @@ class Agent(nn.Module):
                 logp = dist.log_prob(action_idx)
 
                 # Index directly into bins to get action value (SI units)
-                bins = self.action_bins[action_key]
-                action_value = bins[action_idx]
+                action_value = action_cfg["bins"][action_idx]
 
-                actions[action_key] = action_value.unsqueeze(-1)
+                actions[action] = action_value.unsqueeze(-1)
                 # Note: If this action had multiple components (e.g., separate left/right),
                 # sum their log probs before appending.
                 # Currently each action is single component.
@@ -194,4 +193,4 @@ class Agent(nn.Module):
         # Sum log probabilities across all actions
         logp = torch.cat(logp_l, dim=1).sum(dim=1, keepdim=True)
 
-        return actions, logp
+        return actions, logp, h
