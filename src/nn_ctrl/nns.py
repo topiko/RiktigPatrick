@@ -137,25 +137,34 @@ class Agent(nn.Module):
         # Concatenate inputs based on input_keys
         input_tensors = []
         for key, mod in self.encoders.items():
-            # (B, T, obs_dim) -> (B, T, feature_dim)
+            # (B, obs_dim) -> (B, feature_dim)
             input_tensors.append(mod(x[key]))
 
-        # (B, T, input_size) where input_size = sum of feature_dims from all encoders
+        # (B, input_size) where input_size = sum of feature_dims from all encoders
         input_tensor = torch.cat(input_tensors, dim=1)
 
-        # (B, T, input_size) -> (B, T, hsize)
+        # (B, input_size) -> (B, hsize)
+        if input_tensor.ndim == 2:
+            # (T, 1, input_size), single time step
+            input_tensor = input_tensor.unsqueeze(1)
+        else:
+            raise ValueError("Invalid input dims. we expect (B, nvals).")
+
         x_, h = self.rnn(input_tensor, h)
 
-        # (B, T, hsize) -> (B, T, hsize)
+        # (B, hsize)
+
+        x_ = x_.squeeze(1)
+        # (B, hsize) -> (B, hsize)
         x_ = self.layernorm(x_)
 
         # Generate logits for each action head
         action_logits = {}
         for action_key, mod_ in self.action_heads.items():
-            # (B, T, hsize) -> (B, T, num_bins) for discrete actions
+            # (B, hsize) -> (B, num_bins) for discrete actions
             action_logits[action_key] = mod_(x_)
 
-        # (B, T, hsize) -> (B, T, 1)
+        # (B, hsize) -> (B, 1)
         values = self.value_head(x_)
 
         return action_logits, values, h

@@ -7,8 +7,10 @@ logging:
   mlflow:
     experiment_name: "rp_training"
     enabled: false
+    push_freq: 10
 
-  plot_freq: 10  # Generate plots every N iterations
+  plot_freq: 100  # Generate plots every N iterations
+
 
 rl:
   discount: 0.99
@@ -31,14 +33,14 @@ reward:
   reward/total: 1.0
 
 train:
-  policy_lr: 0.001
+  policy_lr: 0.0005
   value_lr: 0.03
   grad_clip: 10.0
 
 env:
   step_time: 0.01  # seconds
   randomize: false
-  n_parallel: 5
+  n_parallel: 16
   # All units are SI (International System of Units)
   max_wheel_vel: 10.0  # rad/s - maximum wheel velocity
   max_wheel_acc: 500.0  # rad/s² - maximum wheel acceleration
@@ -47,7 +49,7 @@ policy:
   actions:
     act/accelerate_both_wheels:
       type: discrete
-      bins: [-300, -100, -50, 10, 0, 10, 50, 100, 300]  # rad/s² - acceleration values for both wheels
+      bins: [-300, -200, -150, -100, -75, -50, 25, 10, 5, 0, 5, 10, 25, 50, 75, 100, 150, 200, 300]  # rad/s² - acceleration values for both wheels
 
     act/head_pitch_vel:
       type: discrete

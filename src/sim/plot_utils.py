@@ -20,7 +20,6 @@ def plot_stream(
     y = eps.get_data(ykey)
 
     ax.plot(x, y, "-|", lw=1, label=ykey)
-    ax.set_xlabel(xkey.value)
     ax.set_ylabel(ykey.value)
 
     ax.spines.top.set_visible(False)
@@ -34,8 +33,8 @@ def plot_episode(
     keys: list[
         tuple[Observables | Actions, tuple[Observables | Actions | MiscKeys, ...]]
     ],
-    figw: float = 12,
-    rowh: float = 2,
+    figw: float = 22,
+    rowh: float = 3,
     save_path: os.PathLike | None = None,
 ) -> plt.Figure:
     nrows = len(keys)
@@ -58,7 +57,7 @@ def plot_episode(
         )
         ax.legend(frameon=False, loc="upper right", fontsize=8)
 
-    ax.set_xlabel(xkey.value)
+    ax.set_xlabel("Time [s]")
 
     if save_path is not None:
         fig.savefig(save_path, dpi=230, bbox_inches="tight")

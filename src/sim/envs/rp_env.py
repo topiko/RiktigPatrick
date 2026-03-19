@@ -182,10 +182,11 @@ class MujocoRP:
         )
 
         # Sensors:
+        imu_pos = [0, 0, BODY_H / 2]  # IMU at center of body
         imu_site = self.model.worldbody.add(
             "site",
             name="imu_site",
-            pos=[0, 0, 0],
+            pos=imu_pos,
         )
 
         self.body_quat = self.model.sensor.add(
@@ -488,6 +489,7 @@ class GymRP(gymnasium.Env):
 
         self._update_obs(first=True)
 
+        print("called reset")
         return self._get_obs(), {}
 
     @property
@@ -538,7 +540,7 @@ class GymRP(gymnasium.Env):
         # Apply the actions at time t (all in SI units)
         for a, val in action_d.items():
             # Skip TIME - it's for sync checking only, not an actuator command
-            if a == Actions.TIME or a == "act/time":
+            if a == Actions.TIME:
                 continue
             # Head velocity control (rad/s)
             if a == Actions.VEL_HEAD_PITCH:
@@ -605,8 +607,10 @@ class GymRP(gymnasium.Env):
 
         # The reward is received at time t
         reward = self.state.obs.get_observable(Observables.REWARD_TOTAL)
+
         # The state needs a step as well (Mahony)
         self.state.step()
+        print("called step", reward)
 
         return self._get_obs(), reward, self.terminated, self.truncated, {}
 

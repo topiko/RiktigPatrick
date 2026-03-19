@@ -15,12 +15,24 @@ from torch import nn
 from nn_ctrl.nns import Agent
 from riktigpatric.patrick import Actions, Observables
 from sim.plot_utils import plot_episode
-from sim.utils import Episode, SingleEnvWrapper, register_and_make_env
+from sim.utils import Episode, MiscKeys, SingleEnvWrapper, register_and_make_env
 
 dotenv.load_dotenv()  # Load environment variables from .env file
 
 
 HYDRA_CONFIG_DIR = os.getenv("HYDRA_CONFIG_DIR", "config")
+
+PLOTKS = [
+    (Observables.OBS_TIME, (Observables.RP_PITCH, Observables.TRUE_PITCH)),
+    (
+        Observables.OBS_TIME,
+        (Observables.LEFT_WHEEL_VEL, Observables.RIGHT_WHEEL_VEL),
+    ),
+    (
+        Observables.OBS_TIME,
+        (Observables.HEAD_PITCH, Observables.HEAD_TURN),
+    ),
+]
 
 
 def _flatten_dict(d, parent_key="", sep="_"):
@@ -84,17 +96,14 @@ def rollout(
     list[dict[Observables, np.ndarray]],
     list[dict[Actions, np.ndarray]],
 ]:
-    obs_d, _ = rp_env.reset(seed=seed)
-
-    max_steps = 1000
-
     obs_l = []
     action_l = []
     rewards_l = []
     logps_l = []
     values_l = []
     h = None
-    for _ in range(max_steps):
+    obs_d, _ = rp_env.reset(seed=seed)
+    while True:
         obs_d_t = np2tensor(obs_d)
 
         action, logp, value, h = agent.act(obs_d_t, h)
@@ -103,7 +112,7 @@ def rollout(
         action_np = tensor2numpy(action)
         action_l.append(action_np)
 
-        obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
+        obs_d, reward, terminated, truncated, info = rp_env.step(action_np)
 
         done = terminated | truncated.flatten()
 
@@ -112,7 +121,17 @@ def rollout(
         values_l.append(value)
 
         if done.any():
+            #obs_d = {k: v[~done] for k, v in obs_d.items()}
+            # Batch dim is 1 for h.
+            #h = h[:, ~done, :]
+            print(info)
+
+            breakpoint()
+
+        if done.all():
+            # The last obs contains e.g., termination rewards etc.
             obs_l.append(obs_d)
+
             break
 
     logps_t = torch.cat(logps_l, dim=1)
@@ -146,9 +165,9 @@ def main(cfg: DictConfig):
     rp_video_env = SingleEnvWrapper(
         RecordVideo(
             register_and_make_env(cfg, force_single_env=True),
-            "./video",
+            "video/",
             episode_trigger=lambda _: True,
-            name_prefix="try_policy_rp",
+            name_prefix="rp",
         )
     )
 
@@ -175,7 +194,12 @@ def main(cfg: DictConfig):
         values_loss = ((values - G_t) ** 2).mean()
 
         loss = policy_loss + values_loss
+
         loss.backward()
+
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(agent.parameters(), max_norm=cfg.train.grad_clip)
+
         optimizer.step()
 
         mean_return = G.sum(axis=1).mean()
@@ -188,7 +212,7 @@ def main(cfg: DictConfig):
         )
 
         # Log metrics to MLflow
-        if cfg.logging.mlflow.enabled:
+        if cfg.logging.mlflow.enabled and i % cfg.logging.mlflow.push_freq == 0:
             mlflow.log_metrics(
                 {
                     "policy_loss": policy_loss.item(),
@@ -197,6 +221,7 @@ def main(cfg: DictConfig):
                     "mean_return": float(mean_return),
                     "min_episode_length": int(min_ep_len),
                     "max_return": float(G.sum(axis=1).max()),
+                    "min_return": float(G.sum(axis=1).min()),
                     "std_return": float(G.sum(axis=1).std()),
                 },
                 step=i,
@@ -205,11 +230,8 @@ def main(cfg: DictConfig):
         # Logging and visualization
         plot_freq = cfg.logging.plot_freq
 
-        from sim.utils import MiscKeys
-
         # Generate plots periodically
         if i % plot_freq == 0:
-            rp_video_env.name_prefix = f"policy_iter_{i:04d}"
             with torch.no_grad():
                 _, rewards, values, obs_l, action_l = rollout(
                     rp_video_env, agent, cfg, seed=i + 10000
@@ -230,10 +252,13 @@ def main(cfg: DictConfig):
             plot_path = Path(f"./plots/episode_iter_{i:04d}.png")
             fig = plot_episode(
                 eps,
-                keys=[
+                keys=PLOTKS
+                + [
                     (Observables.OBS_TIME, (Observables.from_str(o),))
                     for o in cfg.policy.inputs
-                    if o != Observables.OBS_TIME.value
+                    if o
+                    not in (Observables.OBS_TIME.value,)
+                    + tuple(v_.value for k, v in PLOTKS for v_ in v)
                 ]
                 + [
                     (Actions.TIME, (Actions.from_str(a),))
