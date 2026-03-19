@@ -291,8 +291,11 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
             Observables.RP_PITCH,
             Observables.TRUE_PITCH,
             Observables.REWARD_STEP,
-            Observables.REWARD_TOTAL,
+            Observables.REWARD_FELL,
             Observables.REWARD_RP_PITCH,
+            Observables.REWARD_WHEEL_VEL,
+            Observables.REWARD_HEAD_PITCH,
+            Observables.REWARD_TOTAL,
         ]:
             d_[obs] = gymnasium.spaces.Box(
                 low=-100.0, high=100.0, shape=(1,), dtype=np.float32
@@ -312,12 +315,13 @@ class GymRP(gymnasium.Env):
 
     def __init__(
         self,
+        actions: list[str],
         record: bool = False,
         step_time: float = 0.01,
         randomize: bool = False,
-        actions: list[str] = None,
         max_wheel_vel: float = 10.0,  # rad/s
         max_wheel_acc: float = 50.0,  # rad/s²
+        reward_scales: dict[Observables, float] | None = None,
     ):
         self._randomize = randomize
         self._init_pitch_scale = 2.0
@@ -339,6 +343,7 @@ class GymRP(gymnasium.Env):
             actions, self.max_wheel_vel, self.max_wheel_acc
         )
         self.observation_space = _get_observation_space()
+        self.reward_scales = reward_scales or {}
 
     def _reset_env(self, seed: int | None = 42) -> mjcf.Physics:
         prng = np.random.default_rng(seed)
@@ -392,7 +397,7 @@ class GymRP(gymnasium.Env):
     def simul_time(self) -> float:
         return self.dm_env.data.time
 
-    def _update_obs(self):
+    def _update_obs(self, first: bool = False):
         """Update observations from MuJoCo sensors.
 
         All observations are in SI units:
@@ -425,20 +430,54 @@ class GymRP(gymnasium.Env):
             Observables.RP_PITCH: self.state.euler[1],  # deg (filtered pitch)
         }
 
-        rew_d = self._get_reward()
+        rew_d = self._get_reward(first=first)
         obs_d.update(rew_d)
 
         self.state.update_obs(obs_d)
 
-    def _get_reward(self) -> dict[Observables, float]:
-        step_reward = 1.0
+    def _get_reward(self, first: bool = False) -> dict[Observables, float]:
+        if first:
+            return {k: 0.0 for k in self.reward_scales.keys()}
 
-        total = step_reward
+        step_reward = self.reward_scales[Observables.REWARD_STEP]
+
+        fell_cost = (
+            self.reward_scales[Observables.REWARD_FELL] if self.terminated else 0.0
+        )
+        pitch_reward = self.reward_scales[Observables.REWARD_RP_PITCH] * abs(
+            self.state.obs.get_observable(Observables.RP_PITCH)
+        )
+
+        wheel_vel_reward = (
+            self.reward_scales[Observables.REWARD_WHEEL_VEL]
+            * (
+                abs(self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL))
+                + abs(self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL))
+            )
+            / 2
+        )
+
+        head_pitch_reward = self.reward_scales[Observables.REWARD_HEAD_PITCH] * abs(
+            self.state.obs.get_observable(Observables.HEAD_PITCH)
+        )
+
+        total = (
+            step_reward
+            + fell_cost
+            + pitch_reward
+            + wheel_vel_reward
+            + head_pitch_reward
+        )
+
         # We need to list all obrservable rewards here...
         return {
             Observables.REWARD_STEP: step_reward,
-            Observables.REWARD_RP_PITCH: 0.0,
-            Observables.REWARD_TOTAL: total,
+            Observables.REWARD_RP_PITCH: pitch_reward,
+            Observables.REWARD_TOTAL: total
+            * self.reward_scales[Observables.REWARD_TOTAL],
+            Observables.REWARD_WHEEL_VEL: wheel_vel_reward,
+            Observables.REWARD_HEAD_PITCH: head_pitch_reward,
+            Observables.REWARD_FELL: fell_cost,
         }
 
     def reset(
@@ -447,13 +486,16 @@ class GymRP(gymnasium.Env):
         self.dm_env = self._reset_env(seed)
         self.state.reset()
 
-        self._update_obs()
+        self._update_obs(first=True)
 
         return self._get_obs(), {}
 
     @property
     def terminated(self) -> bool:
-        return abs(self.state.euler[1]) > 20
+        true_pitch = (
+            q2eul(self.dm_env.bind(self.body_quat).sensordata.copy())[1] * RAD2DEG
+        )
+        return abs(true_pitch) > 20
 
     @property
     def truncated(self) -> bool:
@@ -563,8 +605,7 @@ class GymRP(gymnasium.Env):
 
         # The reward is received at time t
         reward = self.state.obs.get_observable(Observables.REWARD_TOTAL)
-
-        # The state needs a step as ewll
+        # The state needs a step as well (Mahony)
         self.state.step()
 
         return self._get_obs(), reward, self.terminated, self.truncated, {}

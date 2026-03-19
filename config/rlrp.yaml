@@ -11,7 +11,7 @@ logging:
   plot_freq: 10  # Generate plots every N iterations
 
 rl:
-  gamma: 0.99
+  discount: 0.99
   entropy_scale: 0.01
   value_loss_scale: 1.0
   normalize_returns: true
@@ -20,12 +20,15 @@ rl:
   load_net: false
   trim_end_steps: 0
 
+
 reward:
-  step: 0.0
-  pitch_coef: 1.0
-  action_coef: 0.0
-  yaw_coef: 0.03
-  termination_penalty: 0.0
+  # These keys need to exactly match the values in patrick/Observables
+  reward/step: 1.0
+  reward/rp_pitch: -0.1
+  reward/fell: 0.0
+  reward/wheel_vel: -0.2
+  reward/head_pitch: -0.5
+  reward/total: 1.0
 
 train:
   policy_lr: 0.001
@@ -38,13 +41,13 @@ env:
   n_parallel: 5
   # All units are SI (International System of Units)
   max_wheel_vel: 10.0  # rad/s - maximum wheel velocity
-  max_wheel_acc: 50.0  # rad/s² - maximum wheel acceleration
+  max_wheel_acc: 500.0  # rad/s² - maximum wheel acceleration
 
 policy:
   actions:
     act/accelerate_both_wheels:
       type: discrete
-      bins: [-50, -25, 0, 25, 50]  # rad/s² - acceleration values for both wheels
+      bins: [-300, -100, -50, 10, 0, 10, 50, 100, 300]  # rad/s² - acceleration values for both wheels
 
     act/head_pitch_vel:
       type: discrete
@@ -54,7 +57,10 @@ policy:
     - filter/rp_pitch
     - sens/left_wheel_vel
     - sens/right_wheel_vel
+    - sens/head_pitch
+    - sens/head_turn
     - env/obs_time
     - sens/gyro
+    - sens/acc
 
 

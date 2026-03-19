@@ -56,6 +56,7 @@ class Agent(nn.Module):
         inputs: list[str],
         actions: dict[str, dict],
         hsize: int = 64,
+        n_rnnlayers: int = 1,
     ):
         """Initialize agent.
 
@@ -79,8 +80,14 @@ class Agent(nn.Module):
 
         self.encoders = nn.ModuleDict(d)
 
+        # Network backbone
+        self.rnn = nn.GRU(
+            input_size=n, hidden_size=hsize, num_layers=n_rnnlayers, batch_first=True
+        )
+        self.layernorm = nn.LayerNorm(hsize)
+
         # Parse actions
-        self.action_configs = {}
+        self.action_configs: dict[Actions, dict] = {}
         d = {}
         for act_str, action_d in actions.items():
             # Extract action key and config
@@ -89,11 +96,16 @@ class Agent(nn.Module):
             self.action_configs[action] = {}
             if action_d["type"] == "discrete":
                 # Store bins as registered buffer (moves with model to GPU/CPU)
-                bins = torch.tensor(action_d["bins"], dtype=torch.float32)
+                bin_name_ = f"{act_str}_bins"
+                self.register_buffer(
+                    bin_name_, torch.tensor(action_d["bins"], dtype=torch.float32)
+                )
                 self.action_configs[action]["type"] = "discrete"
-                self.action_configs[action]["bins"] = bins
+                self.action_configs[action]["bins_name"] = bin_name_
 
-                d[action] = nn.Linear(hsize, len(bins))  # Output logits for each bin
+                d[action] = nn.Linear(
+                    hsize, len(getattr(self, bin_name_))
+                )  # Output logits for each bin
 
             elif action_d["type"] == "continuous":
                 # For future: continuous actions with Gaussian distribution
@@ -104,19 +116,16 @@ class Agent(nn.Module):
 
         self.action_heads = nn.ModuleDict(d)
 
-        # Network backbone
-        self.model = torch.nn.Sequential(
-            torch.nn.Linear(n, 128),
-            torch.nn.ReLU(),
-            torch.nn.Linear(128, 64),
-            torch.nn.ReLU(),
-            torch.nn.Linear(64, hsize),
-            torch.nn.ReLU(),
+        # Value head for critic (if using actor-critic method)
+        self.value_head = nn.Sequential(
+            nn.Linear(hsize, 16),
+            nn.ReLU(),
+            nn.Linear(16, 1),
         )
 
     def forward(
         self, x: dict[Observables, torch.Tensor], h: torch.Tensor | None = None
-    ) -> tuple[dict[Actions, torch.Tensor], torch.Tensor | None]:
+    ) -> tuple[dict[Actions, torch.Tensor], torch.Tensor, torch.Tensor | None]:
         """Forward pass through the network.
 
         Args:
@@ -128,22 +137,34 @@ class Agent(nn.Module):
         # Concatenate inputs based on input_keys
         input_tensors = []
         for key, mod in self.encoders.items():
+            # (B, T, obs_dim) -> (B, T, feature_dim)
             input_tensors.append(mod(x[key]))
-        input_tensor = torch.cat(input_tensors, dim=-1)
 
-        # Pass through backbone
-        features = self.model(input_tensor)
+        # (B, T, input_size) where input_size = sum of feature_dims from all encoders
+        input_tensor = torch.cat(input_tensors, dim=1)
 
-        # Generate logits for each action
+        # (B, T, input_size) -> (B, T, hsize)
+        x_, h = self.rnn(input_tensor, h)
+
+        # (B, T, hsize) -> (B, T, hsize)
+        x_ = self.layernorm(x_)
+
+        # Generate logits for each action head
         action_logits = {}
         for action_key, mod_ in self.action_heads.items():
-            action_logits[action_key] = mod_(features)
+            # (B, T, hsize) -> (B, T, num_bins) for discrete actions
+            action_logits[action_key] = mod_(x_)
 
-        return action_logits, h
+        # (B, T, hsize) -> (B, T, 1)
+        values = self.value_head(x_)
+
+        return action_logits, values, h
 
     def act(
         self, x: dict[Observables, torch.Tensor], h: torch.Tensor | None = None
-    ) -> tuple[dict[Actions, torch.Tensor], torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[
+        dict[Actions, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor | None
+    ]:
         """Sample actions from the policy.
 
         Args:
@@ -153,7 +174,7 @@ class Agent(nn.Module):
             actions: Dict of sampled actions in SI units (keys are strings)
             logp: Log probability of the sampled actions
         """
-        action_logits, h = self.forward(x, h)
+        action_logits, values, h = self.forward(x, h)
 
         actions: dict[str, torch.Tensor] = {}
         logp_l = []
@@ -168,13 +189,13 @@ class Agent(nn.Module):
                 logp = dist.log_prob(action_idx)
 
                 # Index directly into bins to get action value (SI units)
-                action_value = action_cfg["bins"][action_idx]
+                action_value = getattr(self, action_cfg["bins_name"])[action_idx]
 
-                actions[action] = action_value.unsqueeze(-1)
+                actions[action] = action_value.unsqueeze(1)
                 # Note: If this action had multiple components (e.g., separate left/right),
                 # sum their log probs before appending.
                 # Currently each action is single component.
-                logp_l.append(logp.unsqueeze(-1))
+                logp_l.append(logp.unsqueeze(1))
 
             elif action_cfg["type"] == "continuous":
                 # For future: sample from Gaussian distribution
@@ -193,4 +214,4 @@ class Agent(nn.Module):
         # Sum log probabilities across all actions
         logp = torch.cat(logp_l, dim=1).sum(dim=1, keepdim=True)
 
-        return actions, logp, h
+        return actions, logp, values, h

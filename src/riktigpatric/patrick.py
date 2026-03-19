@@ -137,6 +137,9 @@ class Observables(str, Enum):
 
     REWARD_STEP = "reward/step"
     REWARD_RP_PITCH = "reward/rp_pitch"
+    REWARD_FELL = "reward/fell"
+    REWARD_WHEEL_VEL = "reward/wheel_vel"
+    REWARD_HEAD_PITCH = "reward/head_pitch"
     REWARD_TOTAL = "reward/total"
 
     @classmethod

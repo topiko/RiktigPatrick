@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import dotenv
 import gymnasium as gym
@@ -43,6 +44,15 @@ def tensor2numpy(tensor_dict: dict) -> dict:
 
 
 def compute_returns(rewards: np.ndarray, discount: float) -> np.ndarray:
+    if rewards.ndim == 2:
+        returns = np.zeros_like(rewards, dtype=np.float32)
+        for env_idx in range(rewards.shape[0]):
+            returns[env_idx] = compute_returns(rewards[env_idx], discount)
+        return returns
+
+    if rewards.ndim != 1:
+        raise ValueError(f"Expected rewards to be 1D or 2D, got shape {rewards.shape}")
+
     returns = np.zeros_like(rewards, dtype=np.float32)
     running_return = 0
     for i in reversed(range(len(rewards))):
@@ -51,12 +61,24 @@ def compute_returns(rewards: np.ndarray, discount: float) -> np.ndarray:
     return returns
 
 
+def get_advantages(
+    returns: torch.Tensor | np.ndarray, values: torch.Tensor | np.ndarray
+) -> torch.Tensor:
+    if returns.shape != values.shape:
+        raise ValueError(
+            f"Returns and values must have the same shape, got {returns.shape} and {values.shape}"
+        )
+    advantages = returns - values
+    return advantages
+
+
 def rollout(
     rp_env: gym.Env | gym.vector.AsyncVectorEnv,
     agent: nn.Module,
     cfg: DictConfig,
     seed: int = 0,
 ) -> tuple[
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     list[dict[Observables, np.ndarray]],
@@ -70,11 +92,12 @@ def rollout(
     action_l = []
     rewards_l = []
     logps_l = []
+    values_l = []
     h = None
     for _ in range(max_steps):
         obs_d_t = np2tensor(obs_d)
 
-        action, logp, h = agent.act(obs_d_t, h)
+        action, logp, value, h = agent.act(obs_d_t, h)
 
         obs_l.append(obs_d)
         action_np = tensor2numpy(action)
@@ -83,16 +106,20 @@ def rollout(
         obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
 
         done = terminated | truncated.flatten()
-        if done.any():
-            break
 
         logps_l.append(logp)
         rewards_l.append(reward)
+        values_l.append(value)
+
+        if done.any():
+            obs_l.append(obs_d)
+            break
 
     logps_t = torch.cat(logps_l, dim=1)
     rewards = np.concat(rewards_l, axis=1)  # Shape: (num_envs, num_steps)
+    values_t = torch.cat(values_l, dim=1)
 
-    return logps_t, rewards, obs_l, action_l
+    return logps_t, rewards, values_t, obs_l, action_l
 
 
 @hydra.main(config_path=HYDRA_CONFIG_DIR, config_name="rlrp", version_base=None)
@@ -137,26 +164,27 @@ def main(cfg: DictConfig):
     while True:
         optimizer.zero_grad()
 
-        logps, rewards, _, _ = rollout(rp_env, agent, cfg, seed=i)
+        logps, rewards, values, _, _ = rollout(rp_env, agent, cfg, seed=i)
 
-        # Compute returns for each environment separately
-        G = np.zeros_like(rewards)
-        for env_idx in range(rewards.shape[0]):
-            G[env_idx] = compute_returns(rewards[env_idx], discount=0.99)
-
+        G = compute_returns(rewards, discount=cfg.rl.discount)
         G_t = torch.from_numpy(G)
-        advantages = G_t - G_t.mean(dim=1, keepdim=True)
+
+        advantages = get_advantages(G_t, values)
 
         policy_loss = -torch.mean(logps * advantages)
-        policy_loss.backward()
+        values_loss = ((values - G_t) ** 2).mean()
+
+        loss = policy_loss + values_loss
+        loss.backward()
         optimizer.step()
 
         mean_return = G.sum(axis=1).mean()
         min_ep_len = rewards.shape[1]
 
         print(
-            f"Step {i:4d}: policy_loss={policy_loss.item():.4f}, "
-            f"returns={mean_return:.2f}, min_ep_len={min_ep_len}"
+            f"Step {i:4d}: p_l={policy_loss.item():.4f}, "
+            f"v_l={values_loss.item():.4f}, l={loss.item():.4f}, "
+            f"ret={mean_return:.2f}, min_ep_len={min_ep_len}"
         )
 
         # Log metrics to MLflow
@@ -164,6 +192,8 @@ def main(cfg: DictConfig):
             mlflow.log_metrics(
                 {
                     "policy_loss": policy_loss.item(),
+                    "value_loss": values_loss.item(),
+                    "total_loss": loss.item(),
                     "mean_return": float(mean_return),
                     "min_episode_length": int(min_ep_len),
                     "max_return": float(G.sum(axis=1).max()),
@@ -175,13 +205,29 @@ def main(cfg: DictConfig):
         # Logging and visualization
         plot_freq = cfg.logging.plot_freq
 
+        from sim.utils import MiscKeys
+
         # Generate plots periodically
         if i % plot_freq == 0:
             rp_video_env.name_prefix = f"policy_iter_{i:04d}"
-            _, _, obs_l, action_l = rollout(rp_video_env, agent, cfg, seed=i + 10000)
-            eps = Episode(obs_l, action_l)
+            with torch.no_grad():
+                _, rewards, values, obs_l, action_l = rollout(
+                    rp_video_env, agent, cfg, seed=i + 10000
+                )
+
+            values_np = values.cpu().numpy()
+            G = compute_returns(rewards, discount=cfg.rl.discount)
+
+            eps = Episode(
+                obs_l,
+                action_l,
+                value_estimates=values_np,
+                returns=G,
+                advantages=get_advantages(G, values_np),
+            )
 
             # Generate plot (eps is single episode)
+            plot_path = Path(f"./plots/episode_iter_{i:04d}.png")
             fig = plot_episode(
                 eps,
                 keys=[
@@ -193,10 +239,18 @@ def main(cfg: DictConfig):
                     (Actions.TIME, (Actions.from_str(a),))
                     for a in cfg.policy.actions.keys()
                 ]
-                + [(Observables.OBS_TIME, (Observables.REWARD_TOTAL,))],
+                + [
+                    (
+                        Observables.OBS_TIME,
+                        tuple(Observables.from_str(r) for r in cfg.reward.keys()),
+                    ),
+                    (
+                        Actions.TIME,
+                        (MiscKeys.VALUES_ESTIM, MiscKeys.RETURNS, MiscKeys.ADVANTAGES),
+                    ),
+                ],
+                save_path=plot_path,
             )
-            plot_path = f"./plots/episode_iter_{i:04d}.png"
-            fig.savefig(plot_path, dpi=230, bbox_inches="tight")
             if cfg.logging.mlflow.enabled:
                 mlflow.log_artifact(plot_path)
             plt.close(fig)

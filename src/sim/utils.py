@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from enum import Enum
+
 import gymnasium as gym
 import numpy as np
 import torch
@@ -7,6 +9,24 @@ from gymnasium.envs.registration import register
 from omegaconf import DictConfig
 
 from riktigpatric.patrick import Actions, Observables
+
+
+class MiscKeys(str, Enum):
+    """Miscellaneous constants that don't fit into Actions or Observables."""
+
+    # Time step of the environment (seconds)
+    VALUES_ESTIM = "value_estimates"
+    RETURNS = "returns"
+    ADVANTAGES = "advantages"
+
+    @classmethod
+    def from_str(cls, label: str) -> MiscKeys:
+        """Convert string to MiscKeys enum, case-insensitive."""
+        label = label.upper()
+        for key in MiscKeys:
+            if key.value.upper() == label:
+                return key
+        raise ValueError(f"Unknown MiscKeys value: {label}")
 
 
 def _add_batch_dim(
@@ -155,19 +175,19 @@ def register_and_make_env(
     if force_single_env:
         n_parallel = 1
 
-    # Extract action keys from new config format
-    # Actions are now dicts like: {'act/accelerate_both_wheels': {'type': 'discrete', ...}}
-    action_keys = list(cfg.policy.actions.keys())
+    env_config["actions"] = list(cfg.policy.actions.keys())
 
-    env_config["actions"] = action_keys
-    env_config["max_wheel_vel"] = cfg.env.max_wheel_vel
-    env_config["max_wheel_acc"] = cfg.env.max_wheel_acc
+    config_ = env_config.copy()
+    # Map the config str values to Observables enum keys for reward scales
+    config_["reward_scales"] = {
+        Observables.from_str(k): v for k, v in dict(cfg.reward).items()
+    }
 
     register(
         id="RiktigPatrick-v0",
         entry_point="sim.envs.rp_env:GymRP",
         max_episode_steps=2000,
-        kwargs=env_config,
+        kwargs=config_,
     )
 
     if n_parallel > 1:
@@ -176,7 +196,7 @@ def register_and_make_env(
                 lambda: gym.make(
                     "RiktigPatrick-v0",
                     disable_env_checker=True,
-                    **env_config,
+                    **config_,
                 )
                 for _ in range(n_parallel)
             ]
@@ -185,7 +205,7 @@ def register_and_make_env(
     return gym.make(
         "RiktigPatrick-v0",
         disable_env_checker=True,
-        **env_config,
+        **config_,
     )
 
 
@@ -217,6 +237,9 @@ class Episode:
         self,
         obs_l: list[dict[Observables, np.ndarray]],
         action_l: list[dict[Actions, np.ndarray]],
+        value_estimates: np.ndarray | None = None,
+        returns: np.ndarray | None = None,
+        advantages: np.ndarray | None = None,
     ):
         """Initialize episode from rollout data for SINGLE episode.
 
@@ -237,9 +260,9 @@ class Episode:
                 f"shape {first_obs_value.shape}. Extract single environment first."
             )
 
-        # Stack observations over time: (num_steps, obs_dim)
+        # Stack over time: (T, dim_)
         for obs_key in obs_l[0].keys():
-            # obs_key is Observables.ACC, use obs_key.name to get "ACC"
+            # (T, obs_dim)
             obs_array = np.concat([obs[obs_key] for obs in obs_l], axis=0)
 
             setattr(self, f"OBS_{obs_key.name}", obs_array)
@@ -248,13 +271,39 @@ class Episode:
         for action_key in action_l[0].keys():
             action_array = np.concat([act[action_key] for act in action_l], axis=0)
 
+            # (T, action_dim)
             setattr(self, f"ACT_{action_key.name}", action_array)
 
-    def get_data(self, key: Actions | Observables | str) -> np.ndarray:
+        for key, arr in (
+            (MiscKeys.VALUES_ESTIM, value_estimates),
+            (MiscKeys.RETURNS, returns),
+            (MiscKeys.ADVANTAGES, advantages),
+        ):
+            if arr is None:
+                continue
+
+            if arr.shape[0] != 1:
+                raise ValueError(
+                    f"Expected {key} to have batch size 1, got shape {key.shape}"
+                )
+
+            arr = arr.T  # (T, 1)
+
+            if arr.shape[0] != action_array.shape[0]:
+                raise ValueError(
+                    f"{key} length {arr.shape[0]} does not match number of steps {action_array.shape[0]}"
+                )
+
+            # (T, 1)
+            setattr(self, f"MISC_{key.name}", arr)
+
+    def get_data(self, key: Actions | Observables | MiscKeys) -> np.ndarray:
         if isinstance(key, Observables):
             return self.get_observable(key)
         if isinstance(key, Actions):
             return self.get_action(key)
+        if isinstance(key, MiscKeys):
+            return self.get_misc(key)
 
         raise ValueError(
             f"Key must be an instance of Observables or Actions enum, got {type(key)}"
@@ -267,6 +316,10 @@ class Episode:
     def get_action(self, act: Actions) -> np.ndarray:
         """Get action array by enum key."""
         return getattr(self, f"ACT_{act.name}")
+
+    def get_misc(self, misc_key: MiscKeys) -> np.ndarray:
+        """Get miscellaneous data array by enum key."""
+        return getattr(self, f"MISC_{misc_key.name}")
 
     def __repr__(self) -> str:
         """Return string representation listing available attributes."""
