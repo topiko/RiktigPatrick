@@ -204,6 +204,7 @@ def main(cfg: DictConfig):
                 logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(
                     video_buffers
                 )
+                rp_video_env.stop_recording()
 
             returns = get_returns(rewards, discount=cfg.rl.discount)
             advantages = get_advantages(returns, values)
