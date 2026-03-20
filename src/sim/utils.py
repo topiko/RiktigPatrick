@@ -460,7 +460,7 @@ class Episode:
                     f"{key} length {arr.shape[0]} does not match number of steps {epbuffer.seq_len}"
                 )
 
-            # (T, 1)
+            # (T,)
             setattr(self, f"MISC_{key.name}", arr)
 
     def get_data(self, key: Actions | Observables | MiscKeys) -> np.ndarray:
