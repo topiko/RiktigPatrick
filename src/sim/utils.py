@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import wraps
 
 import gymnasium as gym
 import numpy as np
@@ -258,15 +259,27 @@ def get_advantages(returns: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
     return advantages
 
 
-def _verify_len(fun, seq_len):
-    def wrapper(*args, **kwargs):
-        arr = fun(*args, **kwargs)
-        if len(arr) != seq_len:
-            raise ValueError()
+def _verify_len(kind: str, with_key: bool = False, offset: int = 0):
+    def decorator(fun):
+        @wraps(fun)
+        def wrapper(self, *args, **kwargs):
+            arr = fun(self, *args, **kwargs)
+            expected_len = self.seq_len + offset
+            if len(arr) != expected_len:
+                if with_key and args:
+                    key = args[0]
+                    raise ValueError(
+                        f"Expected {kind} {key} length {expected_len}, got {len(arr)}"
+                    )
+                raise ValueError(
+                    f"Expected {kind} length {expected_len}, got {len(arr)}"
+                )
 
-        return fun(*args, **kwargs)
+            return arr
 
-    return wrapper
+        return wrapper
+
+    return decorator
 
 
 @dataclass
@@ -308,24 +321,12 @@ class EpisodeBuffer:
                 f"Expected rewards length {len(self.obs_l) - 1}, got {len(self.rewards_l)}"
             )
 
-        for k, v in self.get_obs_dict().items():
-            if len(v) != self.seq_len + 1:
-                raise ValueError(
-                    f"Expected obs {k} length {self.seq_len + 1}, got {len(v)}"
-                )
-        for k, v in self.get_action_dict().items():
-            if len(v) != self.seq_len:
-                raise ValueError(
-                    f"Expected action {k} length {self.seq_len}, got {len(v)}"
-                )
-        if len(self.logps_l) != self.seq_len:
-            raise ValueError(
-                f"Expected logps length {self.seq_len}, got {len(self.logps_l)}"
-            )
-        if len(self.values_l) != self.seq_len:
-            raise ValueError(
-                f"Expected values length {self.seq_len}, got {len(self.values_l)}"
-            )
+        # Trigger decorated length checks.
+        self.get_obs_dict()
+        self.get_action_dict()
+        self.get_rewards()
+        self.get_logps()
+        self.get_values()
 
     @property
     def seq_len(self) -> int:
@@ -339,6 +340,7 @@ class EpisodeBuffer:
             d[k] = self.get_action(k)
         return d
 
+    @_verify_len(kind="action", with_key=True)
     def get_action(self, key: Actions) -> np.ndarray:
         return np.stack([act_d[key] for act_d in self.action_l], axis=0)
 
@@ -348,15 +350,19 @@ class EpisodeBuffer:
             d[k] = self.get_observable(k)
         return d
 
+    @_verify_len(kind="obs", with_key=True, offset=1)
     def get_observable(self, key: Observables) -> np.ndarray:
         return np.stack([obs_d[key] for obs_d in self.obs_l], axis=0)
 
+    @_verify_len(kind="rewards")
     def get_rewards(self) -> torch.Tensor:
         return torch.tensor(self.rewards_l)
 
+    @_verify_len(kind="logps")
     def get_logps(self) -> torch.Tensor:
         return torch.stack(self.logps_l)
 
+    @_verify_len(kind="values")
     def get_values(self) -> torch.Tensor:
         return torch.stack(self.values_l)
 
@@ -498,4 +504,7 @@ class Episode:
             if not attr.startswith("_") and attr.isupper() and hasattr(Actions, attr)
         ]
 
-        return f"Episode(observations={obs_attrs}, actions={action_attrs}, num_steps={getattr(self, obs_attrs[0], np.array([])).shape[0] if obs_attrs else 0})"
+        return (
+            f"Episode(observations={obs_attrs}, actions={action_attrs}, "
+            f"num_steps={getattr(self, obs_attrs[0], np.array([])).shape[0] if obs_attrs else 0})"
+        )
