@@ -489,7 +489,6 @@ class GymRP(gymnasium.Env):
 
         self._update_obs(first=True)
 
-        print("called reset")
         return self._get_obs(), {}
 
     @property
@@ -606,11 +605,10 @@ class GymRP(gymnasium.Env):
         self.state.update_action(t0, action_d)
 
         # The reward is received at time t
-        reward = self.state.obs.get_observable(Observables.REWARD_TOTAL)
+        reward = self.state.obs.get_observable(Observables.REWARD_TOTAL)[0]
 
         # The state needs a step as well (Mahony)
         self.state.step()
-        print("called step", reward)
 
         return self._get_obs(), reward, self.terminated, self.truncated, {}
 

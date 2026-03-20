@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from enum import Enum
 
 import gymnasium as gym
@@ -14,8 +15,10 @@ from riktigpatric.patrick import Actions, Observables
 class MiscKeys(str, Enum):
     """Miscellaneous constants that don't fit into Actions or Observables."""
 
-    # Time step of the environment (seconds)
-    VALUES_ESTIM = "value_estimates"
+    REWARDS = "rewards"
+    LOGPS = "log_probs"
+
+    VALUE_ESTIM = "value_estimates"
     RETURNS = "returns"
     ADVANTAGES = "advantages"
 
@@ -108,11 +111,12 @@ class SingleEnvWrapper:
         self.env = env
         self.num_envs = 1  # Signal that this provides batched format
 
-    def reset(self, seed=None):
+    def reset(self, seed=None, options=None):
         """Add batch dimension to reset output.
 
         Args:
             seed: Random seed
+            options: Unused, kept for VectorEnv.reset compatibility
 
         Returns:
             Batched obs_d (1, dim) and info
@@ -169,7 +173,7 @@ class SingleEnvWrapper:
 
 def register_and_make_env(
     cfg: DictConfig, force_single_env: bool = False
-) -> gym.Env | gym.vector.AsyncVectorEnv:
+) -> gym.Env | gym.vector.VectorEnv:
     env_config = dict(cfg.env)
     n_parallel = env_config.pop("n_parallel", 1)
     if force_single_env:
@@ -191,7 +195,7 @@ def register_and_make_env(
     )
 
     if n_parallel > 1:
-        return gym.vector.AsyncVectorEnv(
+        return gym.vector.SyncVectorEnv(
             [
                 lambda: gym.make(
                     "RiktigPatrick-v0",
@@ -199,7 +203,8 @@ def register_and_make_env(
                     **config_,
                 )
                 for _ in range(n_parallel)
-            ]
+            ],
+            autoreset_mode=gym.vector.AutoresetMode.DISABLED,
         )
 
     return gym.make(
@@ -209,17 +214,188 @@ def register_and_make_env(
     )
 
 
+def flatten_dict(d, parent_key="", sep="_"):
+    """Flatten nested dict for MLflow params."""
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
+
+
+def npd2tensord(np_dict: dict) -> dict:
+    return {k: torch.from_numpy(v).float() for k, v in np_dict.items()}
+
+
+def tensord2npd(tensor_dict: dict) -> dict:
+    return {k: v.cpu().numpy() for k, v in tensor_dict.items()}
+
+
+def get_returns(rewards: torch.Tensor, discount: float) -> torch.Tensor:
+    if rewards.ndim == 1:
+        return get_returns(rewards.unsqueeze(0), discount)[0]
+
+    if rewards.ndim != 2:
+        raise ValueError(f"Expected 1D or 2D rewards, got shape {rewards.shape}")
+
+    returns = torch.zeros_like(rewards)
+    running_return = torch.zeros(rewards.shape[0], device=rewards.device)
+    for i in reversed(range(rewards.shape[1])):
+        running_return = rewards[:, i] + discount * running_return
+        returns[:, i] = running_return
+    return returns
+
+
+def get_advantages(returns: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+    if returns.shape != values.shape:
+        raise ValueError(
+            f"Returns and values must have the same shape, got {returns.shape} and {values.shape}"
+        )
+    advantages = returns - values
+    return advantages
+
+
+def _verify_len(fun, seq_len):
+    def wrapper(*args, **kwargs):
+        arr = fun(*args, **kwargs)
+        if len(arr) != seq_len:
+            raise ValueError()
+
+        return fun(*args, **kwargs)
+
+    return wrapper
+
+
+@dataclass
+class EpisodeBuffer:
+    """Step-wise storage for one completed episode."""
+
+    obs_l: list[dict[Observables, np.ndarray]] = field(default_factory=list)
+    action_l: list[dict[Actions, np.ndarray]] = field(default_factory=list)
+    rewards_l: list[float] = field(default_factory=list)
+    logps_l: list[torch.Tensor] = field(default_factory=list)
+    values_l: list[torch.Tensor] = field(default_factory=list)
+    finished: bool = False
+
+    def add_step(
+        self,
+        obs_t: dict[Observables, np.ndarray],
+        action_t: dict[Actions, np.ndarray],
+        reward_t: float,
+        logp_t: torch.Tensor,
+        value_t: torch.Tensor,
+    ) -> None:
+        if len(self.obs_l) > 0:
+            # The reward at step t=0 is a dummy
+
+            self.rewards_l.append(reward_t)
+        self.obs_l.append(obs_t)
+        self.action_l.append(action_t)
+        self.logps_l.append(logp_t)
+        self.values_l.append(value_t)
+
+    def finish(self, final_obs: dict[Observables, np.ndarray], reward: float) -> None:
+        self.obs_l.append(final_obs)
+        self.rewards_l.append(reward)
+
+        self.finished = True
+
+        if len(self.rewards_l) != len(self.obs_l) - 1:
+            raise ValueError(
+                f"Expected rewards length {len(self.obs_l) - 1}, got {len(self.rewards_l)}"
+            )
+
+        for k, v in self.get_obs_dict().items():
+            if len(v) != self.seq_len + 1:
+                print(v)
+                raise ValueError(
+                    f"Expected obs {k} length {self.seq_len + 1}, got {len(v)}"
+                )
+        for k, v in self.get_action_dict().items():
+            if len(v) != self.seq_len:
+                raise ValueError(
+                    f"Expected action {k} length {self.seq_len}, got {len(v)}"
+                )
+        if len(self.logps_l) != self.seq_len:
+            raise ValueError(
+                f"Expected logps length {self.seq_len}, got {len(self.logps_l)}"
+            )
+        if len(self.values_l) != self.seq_len:
+            raise ValueError(
+                f"Expected values length {self.seq_len}, got {len(self.values_l)}"
+            )
+
+    @property
+    def seq_len(self) -> int:
+        if not self.finished:
+            raise ValueError("EpisodeBuffer must be finished to get sequence length")
+        return len(self.rewards_l)
+
+    def get_action_dict(self) -> dict[Actions, np.ndarray]:
+        d = {}
+        for k in self.action_l[0].keys():
+            d[k] = self.get_action(k)
+        return d
+
+    def get_action(self, key: Actions) -> np.ndarray:
+        return np.stack([act_d[key] for act_d in self.action_l], axis=0)
+
+    def get_obs_dict(self) -> dict[Observables, np.ndarray]:
+        d = {}
+        for k in self.obs_l[0].keys():
+            d[k] = self.get_observable(k)
+        return d
+
+    def get_observable(self, key: Observables) -> np.ndarray:
+        return np.stack([obs_d[key] for obs_d in self.obs_l], axis=0)
+
+    def get_rewards(self) -> torch.Tensor:
+        return torch.tensor(self.rewards_l)
+
+    def get_logps(self) -> torch.Tensor:
+        return torch.stack(self.logps_l)
+
+    def get_values(self) -> torch.Tensor:
+        return torch.stack(self.values_l)
+
+
+def ebufs2batchd(
+    ebuf_l: list[EpisodeBuffer], device: torch.DeviceObjType = "cpu"
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, torch.Tensor]:
+    maxlen = max(buf.seq_len for buf in ebuf_l)
+    bs = len(ebuf_l)
+
+    values = torch.zeros((bs, maxlen), device=device)
+    logps = torch.zeros((bs, maxlen), device=device)
+    valid_mask = torch.zeros((bs, maxlen), device=device)
+    rewards = torch.zeros((bs, maxlen))
+    seq_lens = np.zeros(bs)
+
+    for i, buf in enumerate(ebuf_l):
+        seq_len = buf.seq_len
+        values[i, :seq_len] = buf.get_values()
+        logps[i, :seq_len] = buf.get_logps().cpu()
+        rewards[i, :seq_len] = buf.get_rewards()
+        seq_lens[i] = seq_len
+        valid_mask[i, :seq_len] = 1.0
+
+    return logps, rewards, values, seq_lens, valid_mask
+
+
 class Episode:
-    """Episode data container for SINGLE episode with attribute-based access.
+    """Episode data container for SINGLE finished episode with attribute access.
 
     Provides direct access to observations, actions, and rewards using enum names.
     All arrays have shape: (num_steps, dim) - NO batch/env dimension!
 
-    IMPORTANT: Episode represents a SINGLE episode. If you have data from multiple
-    environments, create separate Episode objects for each.
+    IMPORTANT: FinishedEpisode represents a SINGLE episode. If you have data from
+    multiple environments, create separate FinishedEpisode objects for each.
 
     Example:
-        eps = Episode(obs_l, action_l, rewards_l)
+        eps = FinishedEpisode(obs_l, action_l, rewards_l)
         pitch = eps.RP_PITCH           # (num_steps, 1)
         gyro = eps.GYRO                # (num_steps, 3)
         wheel_acc = eps.ACC_BOTH_WHEELS  # (num_steps, 1)
@@ -235,8 +411,7 @@ class Episode:
 
     def __init__(
         self,
-        obs_l: list[dict[Observables, np.ndarray]],
-        action_l: list[dict[Actions, np.ndarray]],
+        epbuffer: EpisodeBuffer,
         value_estimates: np.ndarray | None = None,
         returns: np.ndarray | None = None,
         advantages: np.ndarray | None = None,
@@ -253,29 +428,22 @@ class Episode:
             ValueError: If input data contains batch dimension (multiple environments)
         """
         # Check that we have single episode data, not batched
-        first_obs_value = list(obs_l[0].values())[0]
-        if first_obs_value.shape[0] != 1:
-            raise ValueError(
-                f"Episode expects single episode data, but got batched data with "
-                f"shape {first_obs_value.shape}. Extract single environment first."
-            )
+        if not epbuffer.finished:
+            raise ValueError("EpisodeBuffer must be finished to create Episode")
 
         # Stack over time: (T, dim_)
-        for obs_key in obs_l[0].keys():
-            # (T, obs_dim)
-            obs_array = np.concat([obs[obs_key] for obs in obs_l], axis=0)
+        for obs_key, obs_arr in epbuffer.get_obs_dict().items():
+            # (T, obs_dim), (T,) if scalar obs like time
 
-            setattr(self, f"OBS_{obs_key.name}", obs_array)
+            setattr(self, f"OBS_{obs_key.name}", obs_arr)
 
-        # Stack actions over time: (num_steps, action_dim)
-        for action_key in action_l[0].keys():
-            action_array = np.concat([act[action_key] for act in action_l], axis=0)
+        for act_key, act_arr in epbuffer.get_action_dict().items():
+            # (T, action_dim), (T,) if scalar action
 
-            # (T, action_dim)
-            setattr(self, f"ACT_{action_key.name}", action_array)
+            setattr(self, f"ACT_{act_key.name}", act_arr)
 
         for key, arr in (
-            (MiscKeys.VALUES_ESTIM, value_estimates),
+            (MiscKeys.VALUE_ESTIM, value_estimates),
             (MiscKeys.RETURNS, returns),
             (MiscKeys.ADVANTAGES, advantages),
         ):
@@ -284,14 +452,14 @@ class Episode:
 
             if arr.shape[0] != 1:
                 raise ValueError(
-                    f"Expected {key} to have batch size 1, got shape {key.shape}"
+                    f"Expected {key} to have batch size 1, got shape {arr.shape}"
                 )
 
-            arr = arr.T  # (T, 1)
-
-            if arr.shape[0] != action_array.shape[0]:
+            arr = arr[0]  # Remove batch dimension: (1, T) -> (T,)
+            print(arr.shape)
+            if arr.shape[0] != epbuffer.seq_len:
                 raise ValueError(
-                    f"{key} length {arr.shape[0]} does not match number of steps {action_array.shape[0]}"
+                    f"{key} length {arr.shape[0]} does not match number of steps {epbuffer.seq_len}"
                 )
 
             # (T, 1)

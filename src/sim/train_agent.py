@@ -2,25 +2,40 @@ import os
 from pathlib import Path
 
 import dotenv
-import gymnasium as gym
 import hydra
 import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
 import torch
+from gymnasium.vector import VectorEnv
 from gymnasium.wrappers import RecordVideo
 from omegaconf import DictConfig, OmegaConf
-from torch import nn
 
 from nn_ctrl.nns import Agent
 from riktigpatric.patrick import Actions, Observables
 from sim.plot_utils import plot_episode
-from sim.utils import Episode, MiscKeys, SingleEnvWrapper, register_and_make_env
+from sim.utils import (
+    Episode,
+    EpisodeBuffer,
+    MiscKeys,
+    SingleEnvWrapper,
+    ebufs2batchd,
+    flatten_dict,
+    get_advantages,
+    get_returns,
+    npd2tensord,
+    register_and_make_env,
+    tensord2npd,
+)
 
 dotenv.load_dotenv()  # Load environment variables from .env file
 
-
 HYDRA_CONFIG_DIR = os.getenv("HYDRA_CONFIG_DIR", "config")
+
+PlotKey = tuple[
+    Observables | Actions,
+    tuple[Observables | Actions | MiscKeys, ...],
+]
 
 PLOTKS = [
     (Observables.OBS_TIME, (Observables.RP_PITCH, Observables.TRUE_PITCH)),
@@ -35,124 +50,77 @@ PLOTKS = [
 ]
 
 
-def _flatten_dict(d, parent_key="", sep="_"):
-    """Flatten nested dict for MLflow params."""
-    items = []
-    for k, v in d.items():
-        new_key = f"{parent_key}{sep}{k}" if parent_key else k
-        if isinstance(v, dict):
-            items.extend(_flatten_dict(v, new_key, sep=sep).items())
-        else:
-            items.append((new_key, v))
-    return dict(items)
+def _take_idx_from_d(d, idx: int):
+    return {k: v[idx].copy() for k, v in d.items()}
 
 
-def np2tensor(np_dict: dict) -> dict:
-    return {k: torch.from_numpy(v).float() for k, v in np_dict.items()}
-
-
-def tensor2numpy(tensor_dict: dict) -> dict:
-    return {k: v.cpu().numpy() for k, v in tensor_dict.items()}
-
-
-def compute_returns(rewards: np.ndarray, discount: float) -> np.ndarray:
-    if rewards.ndim == 2:
-        returns = np.zeros_like(rewards, dtype=np.float32)
-        for env_idx in range(rewards.shape[0]):
-            returns[env_idx] = compute_returns(rewards[env_idx], discount)
-        return returns
-
-    if rewards.ndim != 1:
-        raise ValueError(f"Expected rewards to be 1D or 2D, got shape {rewards.shape}")
-
-    returns = np.zeros_like(rewards, dtype=np.float32)
-    running_return = 0
-    for i in reversed(range(len(rewards))):
-        running_return = rewards[i] + discount * running_return
-        returns[i] = running_return
-    return returns
-
-
-def get_advantages(
-    returns: torch.Tensor | np.ndarray, values: torch.Tensor | np.ndarray
-) -> torch.Tensor:
-    if returns.shape != values.shape:
-        raise ValueError(
-            f"Returns and values must have the same shape, got {returns.shape} and {values.shape}"
-        )
-    advantages = returns - values
-    return advantages
+def _zero_hidden_state(h: torch.Tensor, done: np.ndarray) -> torch.Tensor:
+    if not done.any():
+        return h
+    done_t = torch.from_numpy(done.astype(bool)).to(device=h.device)
+    return torch.where(done_t.view(1, -1, 1), torch.zeros_like(h), h)
 
 
 def rollout(
-    rp_env: gym.Env | gym.vector.AsyncVectorEnv,
-    agent: nn.Module,
-    cfg: DictConfig,
+    rp_env: SingleEnvWrapper | VectorEnv,
+    agent: Agent,
     seed: int = 0,
-) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    list[dict[Observables, np.ndarray]],
-    list[dict[Actions, np.ndarray]],
-]:
-    obs_l = []
-    action_l = []
-    rewards_l = []
-    logps_l = []
-    values_l = []
+) -> list[EpisodeBuffer]:
+    num_envs = rp_env.num_envs
+    active = np.ones(num_envs, dtype=bool)
+    episode_buffers = [EpisodeBuffer() for _ in range(num_envs)]
+
     h = None
     obs_d, _ = rp_env.reset(seed=seed)
-    while True:
-        obs_d_t = np2tensor(obs_d)
-
+    while active.any():
+        obs_d_t = npd2tensord(obs_d)
         action, logp, value, h = agent.act(obs_d_t, h)
+        action_np = tensord2npd(action)
+        next_obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
 
-        obs_l.append(obs_d)
-        action_np = tensor2numpy(action)
-        action_l.append(action_np)
+        done = terminated | truncated
 
-        obs_d, reward, terminated, truncated, info = rp_env.step(action_np)
+        active = active & ~done
+        for env_idx in np.flatnonzero(active):
+            episode_buffers[env_idx].add_step(
+                obs_t=_take_idx_from_d(obs_d, env_idx),
+                action_t=_take_idx_from_d(action_np, env_idx),
+                reward_t=reward[env_idx],
+                logp_t=logp[env_idx, 0],
+                value_t=value[env_idx, 0],
+            )
 
-        done = terminated | truncated.flatten()
-
-        logps_l.append(logp)
-        rewards_l.append(reward)
-        values_l.append(value)
+        newly_done = done & ~active
+        for env_idx in np.flatnonzero(newly_done):
+            episode_buffers[env_idx].finish(
+                _take_idx_from_d(next_obs_d, env_idx), reward=reward[env_idx]
+            )
 
         if done.any():
-            #obs_d = {k: v[~done] for k, v in obs_d.items()}
-            # Batch dim is 1 for h.
-            #h = h[:, ~done, :]
-            print(info)
+            next_obs_d, _ = rp_env.reset(options={"reset_mask": done})
 
-            breakpoint()
+        h = _zero_hidden_state(h, done)
 
-        if done.all():
-            # The last obs contains e.g., termination rewards etc.
-            obs_l.append(obs_d)
+        obs_d = next_obs_d
 
-            break
-
-    logps_t = torch.cat(logps_l, dim=1)
-    rewards = np.concat(rewards_l, axis=1)  # Shape: (num_envs, num_steps)
-    values_t = torch.cat(values_l, dim=1)
-
-    return logps_t, rewards, values_t, obs_l, action_l
+    return episode_buffers
 
 
 @hydra.main(config_path=HYDRA_CONFIG_DIR, config_name="rlrp", version_base=None)
 def main(cfg: DictConfig):
     # Setup MLflow if enabled
     if cfg.logging.mlflow.enabled:
-        mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI"))
+        tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+        if tracking_uri is None:
+            raise ValueError("MLFLOW_TRACKING_URI is not set")
+        mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(cfg.logging.mlflow.experiment_name)
         mlflow.start_run()
 
         # Log config parameters
         flat_params = OmegaConf.to_container(cfg, resolve=True)
         mlflow.log_params(
-            {str(k): str(v) for k, v in _flatten_dict(flat_params).items()}
+            {str(k): str(v) for k, v in flatten_dict(flat_params).items()}
         )
 
     # Create environment
@@ -183,15 +151,15 @@ def main(cfg: DictConfig):
     while True:
         optimizer.zero_grad()
 
-        logps, rewards, values, _, _ = rollout(rp_env, agent, cfg, seed=i)
+        episode_buf_l = rollout(rp_env, agent, seed=i)
 
-        G = compute_returns(rewards, discount=cfg.rl.discount)
-        G_t = torch.from_numpy(G)
+        logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(episode_buf_l)
 
+        G_t = get_returns(rewards, discount=cfg.rl.discount)
         advantages = get_advantages(G_t, values)
 
-        policy_loss = -torch.mean(logps * advantages)
-        values_loss = ((values - G_t) ** 2).mean()
+        policy_loss = -((logps * advantages) * valid_mask).sum() / valid_mask.sum()
+        values_loss = (((values - G_t) ** 2) * valid_mask).sum() / valid_mask.sum()
 
         loss = policy_loss + values_loss
 
@@ -202,13 +170,13 @@ def main(cfg: DictConfig):
 
         optimizer.step()
 
-        mean_return = G.sum(axis=1).mean()
-        min_ep_len = rewards.shape[1]
+        episode_returns = (rewards * valid_mask).sum(dim=1).cpu().numpy()
+        mean_return = episode_returns.mean()
 
         print(
             f"Step {i:4d}: p_l={policy_loss.item():.4f}, "
             f"v_l={values_loss.item():.4f}, l={loss.item():.4f}, "
-            f"ret={mean_return:.2f}, min_ep_len={min_ep_len}"
+            f"ret={mean_return:.2f}, mean_ep_len={seq_lens.mean():.0f}"
         )
 
         # Log metrics to MLflow
@@ -218,11 +186,13 @@ def main(cfg: DictConfig):
                     "policy_loss": policy_loss.item(),
                     "value_loss": values_loss.item(),
                     "total_loss": loss.item(),
-                    "mean_return": float(mean_return),
-                    "min_episode_length": int(min_ep_len),
-                    "max_return": float(G.sum(axis=1).max()),
-                    "min_return": float(G.sum(axis=1).min()),
-                    "std_return": float(G.sum(axis=1).std()),
+                    "mean_return": mean_return,
+                    "min_episode_length": min(seq_lens),
+                    "max_episode_length": max(seq_lens),
+                    "mean_episode_length": seq_lens.float().mean(),
+                    "max_return": episode_returns.max(),
+                    "min_return": episode_returns.min(),
+                    "std_return": episode_returns.std(),
                 },
                 step=i,
             )
@@ -233,51 +203,53 @@ def main(cfg: DictConfig):
         # Generate plots periodically
         if i % plot_freq == 0:
             with torch.no_grad():
-                _, rewards, values, obs_l, action_l = rollout(
-                    rp_video_env, agent, cfg, seed=i + 10000
+                video_buffers = rollout(rp_video_env, agent, seed=i + 10000)
+                logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(
+                    video_buffers
                 )
 
-            values_np = values.cpu().numpy()
-            G = compute_returns(rewards, discount=cfg.rl.discount)
+            returns = get_returns(rewards, discount=cfg.rl.discount)
+            advantages = get_advantages(returns, values)
 
             eps = Episode(
-                obs_l,
-                action_l,
-                value_estimates=values_np,
-                returns=G,
-                advantages=get_advantages(G, values_np),
+                video_buffers[0],
+                value_estimates=values.cpu().numpy(),
+                returns=returns.cpu().numpy(),
+                advantages=advantages.cpu().numpy(),
+            )
+
+            plot_keys: list[PlotKey] = list(PLOTKS)
+            seen_observables = {
+                Observables.OBS_TIME.value,
+                *[v_.value for _, values in PLOTKS for v_ in values],
+            }
+            for observable in cfg.policy.inputs:
+                if observable not in seen_observables:
+                    plot_keys.append(
+                        (Observables.OBS_TIME, (Observables.from_str(observable),))
+                    )
+
+            for action_name in cfg.policy.actions.keys():
+                plot_keys.append((Actions.TIME, (Actions.from_str(action_name),)))
+
+            reward_keys = tuple(Observables.from_str(r) for r in cfg.reward.keys())
+            plot_keys.append((Observables.OBS_TIME, reward_keys))
+            plot_keys.append(
+                (
+                    Actions.TIME,
+                    (MiscKeys.VALUE_ESTIM, MiscKeys.RETURNS, MiscKeys.ADVANTAGES),
+                )
             )
 
             # Generate plot (eps is single episode)
             plot_path = Path(f"./plots/episode_iter_{i:04d}.png")
             fig = plot_episode(
                 eps,
-                keys=PLOTKS
-                + [
-                    (Observables.OBS_TIME, (Observables.from_str(o),))
-                    for o in cfg.policy.inputs
-                    if o
-                    not in (Observables.OBS_TIME.value,)
-                    + tuple(v_.value for k, v in PLOTKS for v_ in v)
-                ]
-                + [
-                    (Actions.TIME, (Actions.from_str(a),))
-                    for a in cfg.policy.actions.keys()
-                ]
-                + [
-                    (
-                        Observables.OBS_TIME,
-                        tuple(Observables.from_str(r) for r in cfg.reward.keys()),
-                    ),
-                    (
-                        Actions.TIME,
-                        (MiscKeys.VALUES_ESTIM, MiscKeys.RETURNS, MiscKeys.ADVANTAGES),
-                    ),
-                ],
+                keys=plot_keys,
                 save_path=plot_path,
             )
             if cfg.logging.mlflow.enabled:
-                mlflow.log_artifact(plot_path)
+                mlflow.log_artifact(str(plot_path))
             plt.close(fig)
             print(f"  📊 Saved plot: {plot_path}")
 

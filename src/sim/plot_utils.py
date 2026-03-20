@@ -1,8 +1,10 @@
-"""Plotting utilities for Episode data visualization."""
+"""Plotting utilities for FinishedEpisode data visualization."""
 
 import os
 
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 from riktigpatric.patrick import Actions, Observables
 from sim.utils import Episode, MiscKeys
@@ -12,8 +14,8 @@ def plot_stream(
     eps: Episode,
     xkey: Observables | Actions,
     ykey: Observables | Actions | MiscKeys,
-    ax: plt.Axes,
-) -> plt.Axes:
+    ax: Axes,
+) -> Axes:
     """Plot a stream of data from an episode."""
 
     x = eps.get_data(xkey)
@@ -36,7 +38,7 @@ def plot_episode(
     figw: float = 22,
     rowh: float = 3,
     save_path: os.PathLike | None = None,
-) -> plt.Figure:
+) -> Figure:
     nrows = len(keys)
 
     fig, axes = plt.subplots(
@@ -46,6 +48,8 @@ def plot_episode(
         axes = [axes]  # Ensure axes is always a list for consistency
 
     for ax, (xkey, ykeys) in zip(axes, keys):
+        if not ykeys:
+            continue
         for ykey in ykeys:
             plot_stream(eps, xkey, ykey, ax)
 
@@ -57,7 +61,7 @@ def plot_episode(
         )
         ax.legend(frameon=False, loc="upper right", fontsize=8)
 
-    ax.set_xlabel("Time [s]")
+    axes[-1].set_xlabel("Time [s]")
 
     if save_path is not None:
         fig.savefig(save_path, dpi=230, bbox_inches="tight")
