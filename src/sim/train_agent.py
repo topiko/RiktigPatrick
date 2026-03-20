@@ -78,9 +78,8 @@ def rollout(
         action_np = tensord2npd(action)
         next_obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
 
-        done = terminated | truncated
+        done = (terminated | truncated) & active
 
-        active = active & ~done
         for env_idx in np.flatnonzero(active):
             episode_buffers[env_idx].add_step(
                 obs_t=_take_idx_from_d(obs_d, env_idx),
@@ -90,17 +89,16 @@ def rollout(
                 value_t=value[env_idx, 0],
             )
 
-        newly_done = done & ~active
-        for env_idx in np.flatnonzero(newly_done):
+        for env_idx in np.flatnonzero(done):
             episode_buffers[env_idx].finish(
                 _take_idx_from_d(next_obs_d, env_idx), reward=reward[env_idx]
             )
 
-        if done.any():
-            next_obs_d, _ = rp_env.reset(options={"reset_mask": done})
-
+        # If an episode is done, mark it as inactive and zero out its hidden state
+        active = active & ~done
         h = _zero_hidden_state(h, done)
 
+        # Update obs_d for the next step
         obs_d = next_obs_d
 
     return episode_buffers
@@ -110,8 +108,7 @@ def rollout(
 def main(cfg: DictConfig):
     # Setup MLflow if enabled
     if cfg.logging.mlflow.enabled:
-        tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
-        if tracking_uri is None:
+        if (tracking_uri := os.getenv("MLFLOW_TRACKING_URI")) is None:
             raise ValueError("MLFLOW_TRACKING_URI is not set")
         mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(cfg.logging.mlflow.experiment_name)
@@ -189,7 +186,7 @@ def main(cfg: DictConfig):
                     "mean_return": mean_return,
                     "min_episode_length": min(seq_lens),
                     "max_episode_length": max(seq_lens),
-                    "mean_episode_length": seq_lens.float().mean(),
+                    "mean_episode_length": seq_lens.mean(),
                     "max_return": episode_returns.max(),
                     "min_return": episode_returns.min(),
                     "std_return": episode_returns.std(),

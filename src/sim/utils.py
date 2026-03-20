@@ -204,7 +204,7 @@ def register_and_make_env(
                 )
                 for _ in range(n_parallel)
             ],
-            autoreset_mode=gym.vector.AutoresetMode.DISABLED,
+            autoreset_mode=gym.vector.AutoresetMode.NEXT_STEP,
         )
 
     return gym.make(
@@ -310,7 +310,6 @@ class EpisodeBuffer:
 
         for k, v in self.get_obs_dict().items():
             if len(v) != self.seq_len + 1:
-                print(v)
                 raise ValueError(
                     f"Expected obs {k} length {self.seq_len + 1}, got {len(v)}"
                 )
@@ -456,7 +455,6 @@ class Episode:
                 )
 
             arr = arr[0]  # Remove batch dimension: (1, T) -> (T,)
-            print(arr.shape)
             if arr.shape[0] != epbuffer.seq_len:
                 raise ValueError(
                     f"{key} length {arr.shape[0]} does not match number of steps {epbuffer.seq_len}"
