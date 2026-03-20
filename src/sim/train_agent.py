@@ -132,7 +132,6 @@ def main(cfg: DictConfig):
             register_and_make_env(cfg, force_single_env=True),
             "video/",
             episode_trigger=lambda _: True,
-            name_prefix="rp",
         )
     )
 
@@ -200,6 +199,7 @@ def main(cfg: DictConfig):
         # Generate plots periodically
         if i % plot_freq == 0:
             with torch.no_grad():
+                rp_video_env.name_prefix = f"rp_iter_{i // plot_freq:04d}"
                 video_buffers = rollout(rp_video_env, agent, seed=i + 10000)
                 logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(
                     video_buffers
