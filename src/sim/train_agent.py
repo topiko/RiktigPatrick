@@ -136,10 +136,17 @@ def main(cfg: DictConfig):
     )
 
     # Create agent
-    agent = Agent(
-        inputs=cfg.policy.inputs,
-        actions=cfg.policy.actions,
-    )
+    if cfg.policy.restore_id is not None:
+        print(f"Restoring agent from MLflow run ID: {cfg.policy.restore_id}")
+        agent = mlflow.pytorch.load_model(
+            mlflow.get_logged_model(cfg.policy.restore_id).model_uri, map_location="cpu"
+        )
+        inputs = agent.inputs
+        actions = agent.actions
+    else:
+        inputs = cfg.policy.inputs
+        actions = cfg.policy.actions
+        agent = Agent(inputs=inputs, actions=actions)
 
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
 
@@ -221,13 +228,13 @@ def main(cfg: DictConfig):
                 Observables.OBS_TIME.value,
                 *[v_.value for _, values in PLOTKS for v_ in values],
             }
-            for observable in cfg.policy.inputs:
+            for observable in inputs:
                 if observable not in seen_observables:
                     plot_keys.append(
                         (Observables.OBS_TIME, (Observables.from_str(observable),))
                     )
 
-            for action_name in cfg.policy.actions.keys():
+            for action_name in actions.keys():
                 plot_keys.append((Actions.TIME, (Actions.from_str(action_name),)))
 
             reward_keys = tuple(Observables.from_str(r) for r in cfg.reward.keys())
@@ -250,6 +257,10 @@ def main(cfg: DictConfig):
                 mlflow.log_artifact(str(plot_path))
             plt.close(fig)
             print(f"  📊 Saved plot: {plot_path}")
+
+        if cfg.logging.mlflow.enabled and (i % cfg.logging.save_freq == 0):
+            mlflow.pytorch.log_model(agent, name=f"agent_{i:04d}", step=i)
+            print("  💾 Saved model")
 
         i += 1
 

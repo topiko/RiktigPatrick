@@ -67,6 +67,8 @@ class Agent(nn.Module):
                      e.g., [{'act/accelerate_both_wheels': {'type': 'discrete', 'bins': [-50, -25, 0, 25, 50]}}]
         """
         super().__init__()
+        self.inputs = inputs
+        self.actions = actions
 
         # Parse inputs and convert string keys to Observables
 
