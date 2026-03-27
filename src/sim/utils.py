@@ -173,12 +173,14 @@ class SingleEnvWrapper:
 
 
 def register_and_make_env(
-    cfg: DictConfig, force_single_env: bool = False
+    cfg: DictConfig, force_single_env: bool = False, force_non_random: bool = False
 ) -> gym.Env | gym.vector.VectorEnv:
     env_config = dict(cfg.env)
     n_parallel = env_config.pop("n_parallel", 1)
     if force_single_env:
         n_parallel = 1
+    if force_non_random:
+        env_config["randomize"] = False
 
     env_config["actions"] = list(cfg.policy.actions.keys())
 

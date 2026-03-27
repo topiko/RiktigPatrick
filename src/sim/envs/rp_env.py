@@ -53,6 +53,8 @@ class MujocoRP:
         rgba: list[float] = [0.20269912, 0.4307427, 0.33218761, 1.0],
         wheel_markers: bool = True,
         seed: Optional[int] = None,
+        randomize: bool = False,
+        random_scale: float = 0.02,
         max_wheel_vel: float = 10.0,  # rad/s (SI units)
         max_wheel_acc: float = 50.0,  # rad/s² (SI units)
     ):
@@ -70,6 +72,7 @@ class MujocoRP:
 
         """
         # TODO: seed to introduce variance to RP
+        rng = np.random.default_rng(seed)
 
         # Store limits (SI units: rad/s, rad/s²)
         self.max_wheel_vel = max_wheel_vel
@@ -80,6 +83,7 @@ class MujocoRP:
         # Body:
         frame = self.model.worldbody.add("body", name="torso")
 
+        body_m = rng.normal(BODY_M, BODY_M * random_scale) if randomize else BODY_M
         frame.add(
             "geom",
             name="body",
@@ -87,10 +91,11 @@ class MujocoRP:
             size=[BODY_D / 2, BODY_W / 2, BODY_H / 2],
             pos=[0, 0, BODY_H / 2],
             rgba=rgba,
-            mass=BODY_M,
+            mass=body_m,
         )
 
         # Wheels
+        wheel_d = rng.normal(WHEEL_D, WHEEL_D * random_scale) if randomize else WHEEL_D
         kp_wheel = 20.0  # was 1.2
         for diry, key in zip([-1, 1], ["rightwheel", "leftwheel"]):
             y = diry * (BODY_W / 2 + 0.001)
@@ -102,7 +107,7 @@ class MujocoRP:
                 name=key + "_cyl",
                 fromto=[0, 0, 0, 0, diry * 0.02, 0],
                 friction=(2, 0.005, 0.0001),
-                size=[WHEEL_D / 2],
+                size=[wheel_d / 2],
                 mass=0.020,  # kg
             )
             if wheel_markers:
@@ -110,10 +115,10 @@ class MujocoRP:
                     "geom",
                     type="cylinder",
                     name=key + "_marker",
-                    fromto=[0, 0, WHEEL_D / 4, 0, diry * 0.021, WHEEL_D / 4],
+                    fromto=[0, 0, wheel_d / 4, 0, diry * 0.021, wheel_d / 4],
                     friction=(2, 0.005, 0.0001),
                     rgba=[0, 0, 0, 1],
-                    size=[WHEEL_D / 12],
+                    size=[wheel_d / 12],
                 )
 
             # Wheel joint
@@ -156,6 +161,7 @@ class MujocoRP:
             "jointpos", name="headturn_sensor", joint="headturn_joint"
         )
 
+        head_m = rng.normal(HEAD_M, HEAD_M * random_scale) if randomize else HEAD_M
         head.add(
             "geom",
             type="box",
@@ -163,7 +169,7 @@ class MujocoRP:
             size=[HEAD_D / 2, HEAD_W / 2, HEAD_H / 2],
             pos=[0, 0, HEAD_H / 2],
             rgba=rgba,
-            mass=HEAD_M,
+            mass=head_m,
         )
 
         self.model.actuator.add(
@@ -323,11 +329,13 @@ class GymRP(gymnasium.Env):
         max_wheel_vel: float = 10.0,  # rad/s
         max_wheel_acc: float = 50.0,  # rad/s²
         reward_scales: dict[Observables, float] | None = None,
+        random_scale: float = 0.02,
     ):
         self._randomize = randomize
         self._init_pitch_scale = 2.0
         self.max_wheel_vel = max_wheel_vel
         self.max_wheel_acc = max_wheel_acc
+        self.random_scale = random_scale
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
 
@@ -353,6 +361,9 @@ class GymRP(gymnasium.Env):
         rp = MujocoRP(
             max_wheel_vel=self.max_wheel_vel,
             max_wheel_acc=self.max_wheel_acc,
+            seed=seed,
+            randomize=self._randomize,
+            random_scale=self.random_scale,
         )
 
         # Make arena:
