@@ -38,18 +38,18 @@ train:
 
 env:
   step_time: 0.01  # seconds
-  randomize: true
+  randomize: False
   n_parallel: 16
 
   # Currently masses are normal(MASS, scale * MASS)...
-  random_scale: 0.05
+  random_scale: 0.01
 
   # All units are SI (International System of Units)
   max_wheel_vel: 10.0  # rad/s - maximum wheel velocity
   max_wheel_acc: 500.0  # rad/s² - maximum wheel acceleration
 
 policy:
-  restore_id: m-8fa2c04295cb49cfb55dbff83a9116af  # Set to a valid ID to restore a previous policy
+  restore_id: null #m-29426a56db26487faa3adad22b42489a
   actions:
     act/accelerate_both_wheels:
       type: discrete
@@ -68,7 +68,7 @@ policy:
     - env/obs_time
     - sens/gyro
     - sens/acc
-    - derived/pos
     - target/pos
+    - derived/pos
 
 
