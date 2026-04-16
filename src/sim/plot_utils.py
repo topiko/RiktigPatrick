@@ -6,14 +6,14 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-from riktigpatric.patrick import Actions, Observables
+from riktigpatric.patrick import Actions, StateVarKey
 from sim.utils import Episode, MiscKeys
 
 
 def plot_stream(
     eps: Episode,
-    xkey: Observables | Actions,
-    ykey: Observables | Actions | MiscKeys,
+    xkey: StateVarKey | Actions,
+    ykey: StateVarKey | Actions | MiscKeys,
     ax: Axes,
 ) -> Axes:
     """Plot a stream of data from an episode."""
@@ -33,7 +33,7 @@ def plot_stream(
 def plot_episode(
     eps: Episode,
     keys: list[
-        tuple[Observables | Actions, tuple[Observables | Actions | MiscKeys, ...]]
+        tuple[StateVarKey | Actions, tuple[StateVarKey | Actions | MiscKeys, ...]]
     ],
     figw: float = 22,
     rowh: float = 3,

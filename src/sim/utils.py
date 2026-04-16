@@ -10,7 +10,7 @@ import torch
 from gymnasium.envs.registration import register
 from omegaconf import DictConfig
 
-from riktigpatric.patrick import Actions, Observables
+from riktigpatric.patrick import Actions, Observable, StateVarKey
 
 
 class MiscKeys(str, Enum):
@@ -187,7 +187,7 @@ def register_and_make_env(
     config_ = env_config.copy()
     # Map the config str values to Observables enum keys for reward scales
     config_["reward_scales"] = {
-        Observables.from_str(k): v for k, v in dict(cfg.reward).items()
+        Observable.from_str(k): v for k, v in dict(cfg.reward).items()
     }
 
     register(
@@ -288,7 +288,7 @@ def _verify_len(kind: str, with_key: bool = False, offset: int = 0):
 class EpisodeBuffer:
     """Step-wise storage for one completed episode."""
 
-    obs_l: list[dict[Observables, np.ndarray]] = field(default_factory=list)
+    obs_l: list[dict[StateVarKey, np.ndarray]] = field(default_factory=list)
     action_l: list[dict[Actions, np.ndarray]] = field(default_factory=list)
     rewards_l: list[float] = field(default_factory=list)
     logps_l: list[torch.Tensor] = field(default_factory=list)
@@ -297,7 +297,7 @@ class EpisodeBuffer:
 
     def add_step(
         self,
-        obs_t: dict[Observables, np.ndarray],
+        obs_t: dict[StateVarKey, np.ndarray],
         action_t: dict[Actions, np.ndarray],
         reward_t: float,
         logp_t: torch.Tensor,
@@ -312,7 +312,7 @@ class EpisodeBuffer:
         self.logps_l.append(logp_t)
         self.values_l.append(value_t)
 
-    def finish(self, final_obs: dict[Observables, np.ndarray], reward: float) -> None:
+    def finish(self, final_obs: dict[StateVarKey, np.ndarray], reward: float) -> None:
         self.obs_l.append(final_obs)
         self.rewards_l.append(reward)
 
@@ -324,7 +324,7 @@ class EpisodeBuffer:
             )
 
         # Trigger decorated length checks.
-        self.get_obs_dict()
+        self.get_stvar_dict()
         self.get_action_dict()
         self.get_rewards()
         self.get_logps()
@@ -346,14 +346,14 @@ class EpisodeBuffer:
     def get_action(self, key: Actions) -> np.ndarray:
         return np.stack([act_d[key] for act_d in self.action_l], axis=0)
 
-    def get_obs_dict(self) -> dict[Observables, np.ndarray]:
+    def get_stvar_dict(self) -> dict[Observable, np.ndarray]:
         d = {}
         for k in self.obs_l[0].keys():
             d[k] = self.get_observable(k)
         return d
 
-    @_verify_len(kind="obs", with_key=True, offset=1)
-    def get_observable(self, key: Observables) -> np.ndarray:
+    @_verify_len(kind="statevar", with_key=True, offset=1)
+    def get_observable(self, key: StateVarKey) -> np.ndarray:
         return np.stack([obs_d[key] for obs_d in self.obs_l], axis=0)
 
     @_verify_len(kind="rewards")
@@ -439,10 +439,10 @@ class Episode:
             raise ValueError("EpisodeBuffer must be finished to create Episode")
 
         # Stack over time: (T, dim_)
-        for obs_key, obs_arr in epbuffer.get_obs_dict().items():
+        for obs_key, obs_arr in epbuffer.get_stvar_dict().items():
             # (T, obs_dim), (T,) if scalar obs like time
 
-            setattr(self, f"OBS_{obs_key.name}", obs_arr)
+            setattr(self, f"STVAR_{obs_key.name}", obs_arr)
 
         for act_key, act_arr in epbuffer.get_action_dict().items():
             # (T, action_dim), (T,) if scalar action
@@ -471,8 +471,8 @@ class Episode:
             # (T,)
             setattr(self, f"MISC_{key.name}", arr)
 
-    def get_data(self, key: Actions | Observables | MiscKeys) -> np.ndarray:
-        if isinstance(key, Observables):
+    def get_data(self, key: Actions | StateVarKey | MiscKeys) -> np.ndarray:
+        if isinstance(key, StateVarKey):
             return self.get_observable(key)
         if isinstance(key, Actions):
             return self.get_action(key)
@@ -483,9 +483,9 @@ class Episode:
             f"Key must be an instance of Observables or Actions enum, got {type(key)}"
         )
 
-    def get_observable(self, obs: Observables) -> np.ndarray:
+    def get_observable(self, obs: StateVarKey) -> np.ndarray:
         """Get observable array by enum key."""
-        return getattr(self, f"OBS_{obs.name}")
+        return getattr(self, f"STVAR_{obs.name}")
 
     def get_action(self, act: Actions) -> np.ndarray:
         """Get action array by enum key."""

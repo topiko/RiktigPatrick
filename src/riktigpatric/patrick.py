@@ -124,7 +124,75 @@ class StepAction:
         return self
 
 
-class Observables(str, Enum):
+class Target(str, Enum):
+    TARGET_POS = "target/pos"  # target in fore / aft direction
+
+    def dim(self) -> int:
+        """Return the dimension (number of channels) for this target.
+
+        Returns:
+            Number of channels (1 for scalars, 3 for vectors)
+        """
+        if self in {Target.TARGET_POS}:
+            return 1
+        raise ValueError(f"Unknown target {self}!")
+
+    @classmethod
+    def from_str(cls, value: str) -> Target:
+        """Convert string value to Target enum.
+
+        Args:
+            value: String value (e.g., 'target/pos')
+
+        Returns:
+            Corresponding Target enum member
+
+        Raises:
+            ValueError: If no matching target found
+        """
+        for t in cls:
+            if t.value == value:
+                return t
+        raise ValueError(
+            f"Unknown target: '{value}'. Available: {[t.value for t in cls]}"
+        )
+
+
+class DerivedObs(str, Enum):
+    CURRENT_POS = "derived/pos"  # current position in fore / aft direction
+
+    def dim(self) -> int:
+        """Return the dimension (number of channels) for this derived observable.
+
+        Returns:
+            Number of channels (1 for scalars, 3 for vectors)
+        """
+        if self in {DerivedObs.CURRENT_POS}:
+            return 1
+        raise ValueError(f"Unknown derived observable {self}!")
+
+    @classmethod
+    def from_str(cls, value: str) -> DerivedObs:
+        """Convert string value to DerivedObs enum.
+
+        Args:
+            value: String value (e.g., 'derived/current_pos')
+
+        Returns:
+            Corresponding DerivedObs enum member
+
+        Raises:
+            ValueError: If no matching derived observable found
+        """
+        for dobj in cls:
+            if dobj.value == value:
+                return dobj
+        raise ValueError(
+            f"Unknown derived observable: '{value}'. Available: {[d.value for d in cls]}"
+        )
+
+
+class Observable(str, Enum):
     ACC = "sens/acc"
     GYRO = "sens/gyro"
     HEAD_PITCH = "sens/head_pitch"
@@ -143,7 +211,7 @@ class Observables(str, Enum):
     REWARD_TOTAL = "reward/total"
 
     @classmethod
-    def from_str(cls, value: str) -> Observables:
+    def from_str(cls, value: str) -> Observable:
         """Convert string value to Observables enum.
 
         Args:
@@ -169,26 +237,45 @@ class Observables(str, Enum):
             Number of channels (1 for scalars, 3 for vectors)
         """
         if self in {
-            Observables.HEAD_PITCH,
-            Observables.HEAD_TURN,
-            Observables.LEFT_WHEEL_VEL,
-            Observables.RIGHT_WHEEL_VEL,
-            Observables.RP_PITCH,
-            Observables.TRUE_PITCH,
-            Observables.OBS_TIME,
+            Observable.HEAD_PITCH,
+            Observable.HEAD_TURN,
+            Observable.LEFT_WHEEL_VEL,
+            Observable.RIGHT_WHEEL_VEL,
+            Observable.RP_PITCH,
+            Observable.TRUE_PITCH,
+            Observable.OBS_TIME,
         }:
             return 1
-        if self in {Observables.ACC, Observables.GYRO}:
+        if self in {Observable.ACC, Observable.GYRO}:
             return 3
         raise ValueError(f"Unknown observable {self}!")
 
 
+StateVarKey = Observable | DerivedObs | Target
+
+
+# namespace (ergonomic access)
+class StateVar:
+    OBSERVABLE = StateVarKey
+    DERIVED = DerivedObs
+    TARGET = Target
+
+    @staticmethod
+    def from_str(s: str) -> StateVarKey:
+        for cls in (Observable, DerivedObs, Target):
+            try:
+                return cls.from_str(s)
+            except ValueError:
+                pass
+        raise ValueError(f"Unknown state var: {s}")
+
+
 class Obs:
-    def __init__(self, obs_d: dict[Observables, np.ndarray]):
+    def __init__(self, obs_d: dict[Observable, np.ndarray]):
         self.set_observables(obs_d)
 
-    def set_observable(self, obs: Observables, value: np.ndarray | float):
-        if obs not in Observables:
+    def set_observable(self, obs: Observable, value: np.ndarray | float):
+        if obs not in Observable:
             raise ValueError(f"Invalid observable {obs}!")
         if isinstance(value, float):
             value = np.array([value])
@@ -199,8 +286,8 @@ class Obs:
 
         setattr(self, obs, value)
 
-    def get_observable(self, obs: Observables) -> np.ndarray:
-        if obs not in Observables:
+    def get_observable(self, obs: Observable) -> np.ndarray:
+        if obs not in Observable:
             raise ValueError(f"Invalid observable {obs}!")
 
         if (val := getattr(self, obs)) is None:
@@ -211,12 +298,12 @@ class Obs:
 
         return val
 
-    def set_observables(self, obs_d: dict[Observables, np.ndarray]):
+    def set_observables(self, obs_d: dict[Observable, np.ndarray]):
         for obs, value in obs_d.items():
             self.set_observable(obs, value)
 
-    def to_dict(self) -> dict[str | Observables, np.ndarray]:
-        return {obs: self.get_observable(obs) for obs in Observables}
+    def to_dict(self) -> dict[str | Observable, np.ndarray]:
+        return {obs: self.get_observable(obs) for obs in Observable}
 
 
 class State:
@@ -227,15 +314,35 @@ class State:
         self.mahony = Mahony()
         self._record = record
         self._history: list[np.ndarray] = []
+        self.derived_obs: dict[str, np.ndarray] = {
+            DerivedObs.CURRENT_POS: np.array([0.0])
+        }
+        self.targets: dict[str, np.ndarray] = {Target.TARGET_POS: np.array([0.0])}
 
     def step(self):
-        obs_t = self.obs.get_observable(Observables.OBS_TIME)[0]
+        obs_t = self.obs.get_observable(Observable.OBS_TIME)[0]
+        dt = obs_t - self.prev_t
         self.mahony.update(
-            self.obs.get_observable(Observables.ACC),
-            self.obs.get_observable(Observables.GYRO),
-            obs_t - self.prev_t,
+            self.obs.get_observable(Observable.ACC),
+            self.obs.get_observable(Observable.GYRO),
+            dt,
         )
         self.prev_t = obs_t
+
+        # Cur pos:
+        # TODO: What are the wheel vel units!?
+        self.derived_obs[DerivedObs.CURRENT_POS] += (
+            (
+                self.obs.get_observable(Observable.LEFT_WHEEL_VEL)
+                + self.obs.get_observable(Observable.RIGHT_WHEEL_VEL)
+            )
+            / 2
+            * dt
+        )
+
+        self.targets[Target.TARGET_POS] = np.array(
+            [0.0]
+        )  # TODO: update target position based on task
 
         if self._record:
             arr, _ = self.get_state_arr()
@@ -248,13 +355,14 @@ class State:
     def update_rewards(self, reward_dict: dict[str, np.ndarray]):
         self.reward_dict = reward_dict
 
-    def update_obs(self, obs_dict: dict[Observables, np.ndarray]):
+    def update_obs(self, obs_dict: dict[Observable, np.ndarray]):
         self.obs = Obs(obs_dict)
 
     def get_state_dict(self) -> dict[str, np.ndarray]:
         d_ = self.obs.to_dict()
         d_.update(self.action.to_dict())
         d_.update(self.reward_dict)
+        d_.update(self._derived_state)
 
         return d_
 

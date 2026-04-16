@@ -68,5 +68,7 @@ policy:
     - env/obs_time
     - sens/gyro
     - sens/acc
+    - derived/pos
+    - target/pos
 
 

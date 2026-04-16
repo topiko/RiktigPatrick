@@ -26,7 +26,14 @@ import numpy as np
 from dm_control import mjcf
 
 from filters.qutils import q2eul
-from riktigpatric.patrick import Actions, Observables, State, StepAction
+from riktigpatric.patrick import (
+    Actions,
+    DerivedObs,
+    Observable,
+    State,
+    StepAction,
+    Target,
+)
 
 BODY_D = 0.05
 BODY_H = 0.25
@@ -288,31 +295,48 @@ def _get_action_space(
 
 def _get_observation_space() -> gymnasium.spaces.Dict:
     d_ = {}
-    for obs in Observables:
+
+    for obs in Observable:
         if obs in [
-            Observables.OBS_TIME,
-            Observables.HEAD_PITCH,
-            Observables.HEAD_TURN,
-            Observables.LEFT_WHEEL_VEL,
-            Observables.RIGHT_WHEEL_VEL,
-            Observables.RP_PITCH,
-            Observables.TRUE_PITCH,
-            Observables.REWARD_STEP,
-            Observables.REWARD_FELL,
-            Observables.REWARD_RP_PITCH,
-            Observables.REWARD_WHEEL_VEL,
-            Observables.REWARD_HEAD_PITCH,
-            Observables.REWARD_TOTAL,
+            Observable.OBS_TIME,
+            Observable.HEAD_PITCH,
+            Observable.HEAD_TURN,
+            Observable.LEFT_WHEEL_VEL,
+            Observable.RIGHT_WHEEL_VEL,
+            Observable.RP_PITCH,
+            Observable.TRUE_PITCH,
+            Observable.REWARD_STEP,
+            Observable.REWARD_FELL,
+            Observable.REWARD_RP_PITCH,
+            Observable.REWARD_WHEEL_VEL,
+            Observable.REWARD_HEAD_PITCH,
+            Observable.REWARD_TOTAL,
         ]:
             d_[obs] = gymnasium.spaces.Box(
                 low=-100.0, high=100.0, shape=(1,), dtype=np.float32
             )
-        elif obs in [Observables.ACC, Observables.GYRO]:
+        elif obs in [Observable.ACC, Observable.GYRO]:
             d_[obs] = gymnasium.spaces.Box(
                 low=-100.0, high=100.0, shape=(3,), dtype=np.float32
             )
         else:
             raise ValueError(f"Invalid observation key: {obs}")
+
+    for derived_obs in DerivedObs:
+        if derived_obs == DerivedObs.CURRENT_POS:
+            d_[derived_obs] = gymnasium.spaces.Box(
+                low=-100.0, high=100.0, shape=(1,), dtype=np.float32
+            )
+        else:
+            raise ValueError(f"Invalid derived observation key: {derived_obs}")
+
+    for target in Target:
+        if target == Target.TARGET_POS:
+            d_[target] = gymnasium.spaces.Box(
+                low=-100.0, high=100.0, shape=(1,), dtype=np.float32
+            )
+        else:
+            raise ValueError(f"Invalid target key: {target}")
 
     return gymnasium.spaces.Dict(d_)
 
@@ -328,7 +352,7 @@ class GymRP(gymnasium.Env):
         randomize: bool = False,
         max_wheel_vel: float = 10.0,  # rad/s
         max_wheel_acc: float = 50.0,  # rad/s²
-        reward_scales: dict[Observables, float] | None = None,
+        reward_scales: dict[Observable, float] | None = None,
         random_scale: float = 0.02,
     ):
         self._randomize = randomize
@@ -403,7 +427,11 @@ class GymRP(gymnasium.Env):
         return physics
 
     def _get_obs(self) -> dict[str, np.ndarray]:
-        return self.state.obs.to_dict()
+        d = self.state.obs.to_dict()
+        d.update(self.state.derived_obs)
+        d.update(self.state.targets)
+
+        return d
 
     @property
     def simul_time(self) -> float:
@@ -425,21 +453,21 @@ class GymRP(gymnasium.Env):
             return self.dm_env.bind(sens).sensordata.copy()
 
         obs_d = {
-            Observables.OBS_TIME: self.simul_time,  # seconds
-            Observables.ACC: _get_sens(self.acc_sens),  # m/s²
-            Observables.GYRO: _get_sens(self.gyro_sens),  # rad/s
-            Observables.HEAD_PITCH: _get_sens(self.head_pitch_sens)[0],  # rad
-            Observables.HEAD_TURN: _get_sens(self.head_turn_sens)[0],  # rad
-            Observables.LEFT_WHEEL_VEL: _get_sens(self.left_wheel_vel_sens)[0],  # rad/s
-            Observables.RIGHT_WHEEL_VEL: _get_sens(self.right_wheel_vel_sens)[
+            Observable.OBS_TIME: self.simul_time,  # seconds
+            Observable.ACC: _get_sens(self.acc_sens),  # m/s²
+            Observable.GYRO: _get_sens(self.gyro_sens),  # rad/s
+            Observable.HEAD_PITCH: _get_sens(self.head_pitch_sens)[0],  # rad
+            Observable.HEAD_TURN: _get_sens(self.head_turn_sens)[0],  # rad
+            Observable.LEFT_WHEEL_VEL: _get_sens(self.left_wheel_vel_sens)[0],  # rad/s
+            Observable.RIGHT_WHEEL_VEL: _get_sens(self.right_wheel_vel_sens)[
                 0
             ],  # rad/s
-            Observables.TRUE_PITCH: q2eul(
+            Observable.TRUE_PITCH: q2eul(
                 self.dm_env.bind(self.body_quat).sensordata.copy()
             )[1]
             / np.pi
             * 180,  # deg (converted for historical reasons)
-            Observables.RP_PITCH: self.state.euler[1],  # deg (filtered pitch)
+            Observable.RP_PITCH: self.state.euler[1],  # deg (filtered pitch)
         }
 
         rew_d = self._get_reward(first=first)
@@ -447,30 +475,30 @@ class GymRP(gymnasium.Env):
 
         self.state.update_obs(obs_d)
 
-    def _get_reward(self, first: bool = False) -> dict[Observables, float]:
+    def _get_reward(self, first: bool = False) -> dict[Observable, float]:
         if first:
             return {k: 0.0 for k in self.reward_scales.keys()}
 
-        step_reward = self.reward_scales[Observables.REWARD_STEP]
+        step_reward = self.reward_scales[Observable.REWARD_STEP]
 
         fell_cost = (
-            self.reward_scales[Observables.REWARD_FELL] if self.terminated else 0.0
+            self.reward_scales[Observable.REWARD_FELL] if self.terminated else 0.0
         )
-        pitch_reward = self.reward_scales[Observables.REWARD_RP_PITCH] * abs(
-            self.state.obs.get_observable(Observables.RP_PITCH)
+        pitch_reward = self.reward_scales[Observable.REWARD_RP_PITCH] * abs(
+            self.state.obs.get_observable(Observable.RP_PITCH)
         )
 
         wheel_vel_reward = (
-            self.reward_scales[Observables.REWARD_WHEEL_VEL]
+            self.reward_scales[Observable.REWARD_WHEEL_VEL]
             * (
-                abs(self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL))
-                + abs(self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL))
+                abs(self.state.obs.get_observable(Observable.LEFT_WHEEL_VEL))
+                + abs(self.state.obs.get_observable(Observable.RIGHT_WHEEL_VEL))
             )
             / 2
         )
 
-        head_pitch_reward = self.reward_scales[Observables.REWARD_HEAD_PITCH] * abs(
-            self.state.obs.get_observable(Observables.HEAD_PITCH)
+        head_pitch_reward = self.reward_scales[Observable.REWARD_HEAD_PITCH] * abs(
+            self.state.obs.get_observable(Observable.HEAD_PITCH)
         )
 
         total = (
@@ -483,13 +511,13 @@ class GymRP(gymnasium.Env):
 
         # We need to list all obrservable rewards here...
         return {
-            Observables.REWARD_STEP: step_reward,
-            Observables.REWARD_RP_PITCH: pitch_reward,
-            Observables.REWARD_TOTAL: total
-            * self.reward_scales[Observables.REWARD_TOTAL],
-            Observables.REWARD_WHEEL_VEL: wheel_vel_reward,
-            Observables.REWARD_HEAD_PITCH: head_pitch_reward,
-            Observables.REWARD_FELL: fell_cost,
+            Observable.REWARD_STEP: step_reward,
+            Observable.REWARD_RP_PITCH: pitch_reward,
+            Observable.REWARD_TOTAL: total
+            * self.reward_scales[Observable.REWARD_TOTAL],
+            Observable.REWARD_WHEEL_VEL: wheel_vel_reward,
+            Observable.REWARD_HEAD_PITCH: head_pitch_reward,
+            Observable.REWARD_FELL: fell_cost,
         }
 
     def reset(
@@ -511,7 +539,7 @@ class GymRP(gymnasium.Env):
 
     @property
     def truncated(self) -> bool:
-        return self.state.obs.get_observable(Observables.OBS_TIME) > 20
+        return self.state.obs.get_observable(Observable.OBS_TIME) > 20
 
     def render(self):
         if self.render_mode == "rgb_array":
@@ -545,8 +573,8 @@ class GymRP(gymnasium.Env):
                     f"Max diff: {time_diff.max():.6f}s (allowed: {max_diff:.6f}s)"
                 )
 
-        rvel = self.state.obs.get_observable(Observables.RIGHT_WHEEL_VEL)[0]  # rad/s
-        lvel = self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]  # rad/s
+        rvel = self.state.obs.get_observable(Observable.RIGHT_WHEEL_VEL)[0]  # rad/s
+        lvel = self.state.obs.get_observable(Observable.LEFT_WHEEL_VEL)[0]  # rad/s
         # Apply the actions at time t (all in SI units)
         for a, val in action_d.items():
             # Skip TIME - it's for sync checking only, not an actuator command
@@ -567,7 +595,7 @@ class GymRP(gymnasium.Env):
             elif a == Actions.ACC_LEFT_WHEEL:
                 # Acceleration mode: integrate acc (rad/s²) to velocity (rad/s)
                 left_vel = (
-                    self.state.obs.get_observable(Observables.LEFT_WHEEL_VEL)[0]
+                    self.state.obs.get_observable(Observable.LEFT_WHEEL_VEL)[0]
                     + val[0] * self.step_time  # rad/s² * s = rad/s
                 )
                 left_vel = np.clip(left_vel, -self.max_wheel_vel, self.max_wheel_vel)
@@ -604,6 +632,8 @@ class GymRP(gymnasium.Env):
         # Step the MuJoCo environment t -> t + self.step_time.
         t0 = self.dm_env.data.time
         t = t0
+
+        # TODO: add some randomization, the step time in practice is not exact.
         while t < t0 + self.step_time:
             self.dm_env.step()
             t = self.dm_env.data.time
@@ -616,7 +646,7 @@ class GymRP(gymnasium.Env):
         self.state.update_action(t0, action_d)
 
         # The reward is received at time t
-        reward = self.state.obs.get_observable(Observables.REWARD_TOTAL)[0]
+        reward = self.state.obs.get_observable(Observable.REWARD_TOTAL)[0]
 
         # The state needs a step as well (Mahony)
         self.state.step()

@@ -12,7 +12,14 @@ from gymnasium.wrappers import RecordVideo
 from omegaconf import DictConfig, OmegaConf
 
 from nn_ctrl.nns import Agent
-from riktigpatric.patrick import Actions, Observables
+from riktigpatric.patrick import (
+    Actions,
+    DerivedObs,
+    Observable,
+    StateVar,
+    StateVarKey,
+    Target,
+)
 from sim.plot_utils import plot_episode
 from sim.utils import (
     Episode,
@@ -33,19 +40,23 @@ dotenv.load_dotenv()  # Load environment variables from .env file
 HYDRA_CONFIG_DIR = os.getenv("HYDRA_CONFIG_DIR", "config")
 
 PlotKey = tuple[
-    Observables | Actions,
-    tuple[Observables | Actions | MiscKeys, ...],
+    StateVarKey | Actions,
+    tuple[StateVarKey | Actions | MiscKeys, ...],
 ]
 
 PLOTKS = [
-    (Observables.OBS_TIME, (Observables.RP_PITCH, Observables.TRUE_PITCH)),
+    (Observable.OBS_TIME, (Observable.RP_PITCH, Observable.TRUE_PITCH)),
     (
-        Observables.OBS_TIME,
-        (Observables.LEFT_WHEEL_VEL, Observables.RIGHT_WHEEL_VEL),
+        Observable.OBS_TIME,
+        (Observable.LEFT_WHEEL_VEL, Observable.RIGHT_WHEEL_VEL),
     ),
     (
-        Observables.OBS_TIME,
-        (Observables.HEAD_PITCH, Observables.HEAD_TURN),
+        Observable.OBS_TIME,
+        (Observable.HEAD_PITCH, Observable.HEAD_TURN),
+    ),
+    (
+        Observable.OBS_TIME,
+        (Target.TARGET_POS, DerivedObs.CURRENT_POS),
     ),
 ]
 
@@ -61,6 +72,20 @@ def _zero_hidden_state(h: torch.Tensor, done: np.ndarray) -> torch.Tensor:
     return torch.where(done_t.view(1, -1, 1), torch.zeros_like(h), h)
 
 
+def add_targets(
+    obs_d: dict[StateVarKey, np.ndarray], rp_env: SingleEnvWrapper | VectorEnv
+):
+    """Add target observables to the observation dict."""
+    obs_d[Target.TARGET_POS] = 0.0
+
+    if isinstance(rp_env, SingleEnvWrapper):
+        rp_env.set_attr("target_pos", 0.0)
+    elif isinstance(rp_env, VectorEnv):
+        rp_env.set_attr("target_pos", np.zeros(rp_env.num_envs))
+
+    return obs_d
+
+
 def rollout(
     rp_env: SingleEnvWrapper | VectorEnv,
     agent: Agent,
@@ -73,7 +98,9 @@ def rollout(
     h = None
     obs_d, _ = rp_env.reset(seed=seed)
     while active.any():
+        # obs_d = add_targets(obs_d, rp_env)
         obs_d_t = npd2tensord(obs_d)
+
         action, logp, value, h = agent.act(obs_d_t, h)
         action_np = tensord2npd(action)
         next_obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
@@ -129,7 +156,7 @@ def main(cfg: DictConfig):
     # video env: Wrap single env with batch dimension handler for rollout compatibility
     rp_video_env = SingleEnvWrapper(
         RecordVideo(
-            register_and_make_env(cfg, force_single_env=True),
+            register_and_make_env(cfg, force_single_env=True, force_non_random=True),
             "video/",
             episode_trigger=lambda _: True,
         )
@@ -225,20 +252,20 @@ def main(cfg: DictConfig):
 
             plot_keys: list[PlotKey] = list(PLOTKS)
             seen_observables = {
-                Observables.OBS_TIME.value,
+                Observable.OBS_TIME.value,
                 *[v_.value for _, values in PLOTKS for v_ in values],
             }
             for observable in inputs:
                 if observable not in seen_observables:
                     plot_keys.append(
-                        (Observables.OBS_TIME, (Observables.from_str(observable),))
+                        (Observable.OBS_TIME, (StateVar.from_str(observable),))
                     )
 
             for action_name in actions.keys():
                 plot_keys.append((Actions.TIME, (Actions.from_str(action_name),)))
 
-            reward_keys = tuple(Observables.from_str(r) for r in cfg.reward.keys())
-            plot_keys.append((Observables.OBS_TIME, reward_keys))
+            reward_keys = tuple(Observable.from_str(r) for r in cfg.reward.keys())
+            plot_keys.append((Observable.OBS_TIME, reward_keys))
             plot_keys.append(
                 (
                     Actions.TIME,

@@ -19,25 +19,36 @@ Example:
 import torch
 from torch import nn
 
-from riktigpatric.patrick import Actions, Observables
+from riktigpatric.patrick import (
+    Actions,
+    DerivedObs,
+    Observable,
+    StateVar,
+    StateVarKey,
+    Target,
+)
 
 
-def _get_obs_decoder(obs: Observables) -> tuple[nn.Module, int]:
-    if obs == Observables.ACC:
+def _get_obs_decoder(input_: StateVarKey) -> tuple[nn.Module, int]:
+    if input_ == Observable.ACC:
         return nn.Linear(3, 16), 16  # 3D acceleration vector -> 16 features
-    if obs == Observables.GYRO:
+    if input_ == Observable.GYRO:
         return nn.Linear(3, 16), 16  # 3D gyro vector -> 16 features
-    if obs in [Observables.HEAD_PITCH, Observables.HEAD_TURN]:
+    if input_ in [Observable.HEAD_PITCH, Observable.HEAD_TURN]:
         return nn.Linear(1, 8), 8  # Single angle -> 8 features
-    if obs in [Observables.LEFT_WHEEL_VEL, Observables.RIGHT_WHEEL_VEL]:
+    if input_ in [Observable.LEFT_WHEEL_VEL, Observable.RIGHT_WHEEL_VEL]:
         return nn.Linear(1, 8), 8  # Single velocity -> 8 features
-    if obs in [Observables.RP_PITCH, Observables.TRUE_PITCH]:
+    if input_ in [Observable.RP_PITCH, Observable.TRUE_PITCH]:
         return nn.Linear(1, 8), 8  # Single angle -> 8 features
-    if obs == Observables.OBS_TIME:
+    if input_ == Observable.OBS_TIME:
         # TODO: sine/cos encoding for time to capture periodicity?
         return nn.Linear(1, 8), 8  # Single time value -> 8 features
+    if input_ == DerivedObs.CURRENT_POS:
+        return nn.Linear(1, 4), 4
+    if input_ == Target.TARGET_POS:
+        return nn.Linear(1, 4), 4
 
-    raise ValueError(f"Unknown observation key: {obs}")
+    raise ValueError(f"Unknown observation key: {input_}")
 
 
 class Agent(nn.Module):
@@ -76,7 +87,8 @@ class Agent(nn.Module):
         n = 0
         for inp in inputs:
             # Convert string to Observables enum using from_str()
-            obs = Observables.from_str(inp)
+
+            obs = StateVar.from_str(inp)
             d[obs], n_ = _get_obs_decoder(obs)
             n += n_
 
@@ -126,7 +138,7 @@ class Agent(nn.Module):
         )
 
     def forward(
-        self, x: dict[Observables, torch.Tensor], h: torch.Tensor | None = None
+        self, x: dict[StateVarKey, torch.Tensor], h: torch.Tensor | None = None
     ) -> tuple[dict[Actions, torch.Tensor], torch.Tensor, torch.Tensor | None]:
         """Forward pass through the network.
 
@@ -172,7 +184,7 @@ class Agent(nn.Module):
         return action_logits, values, h
 
     def act(
-        self, x: dict[Observables, torch.Tensor], h: torch.Tensor | None = None
+        self, x: dict[StateVarKey, torch.Tensor], h: torch.Tensor | None = None
     ) -> tuple[
         dict[Actions, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor | None
     ]:
@@ -219,8 +231,8 @@ class Agent(nn.Module):
                 raise ValueError(f"Unknown action type: {action_cfg['type']}")
 
         # Add observation time to actions for synchronization check
-        if Observables.OBS_TIME in x:
-            actions[Actions.TIME] = x[Observables.OBS_TIME]
+        if Observable.OBS_TIME in x:
+            actions[Actions.TIME] = x[Observable.OBS_TIME]
 
         # Sum log probabilities across all actions
         logp = torch.cat(logp_l, dim=1).sum(dim=1, keepdim=True)
