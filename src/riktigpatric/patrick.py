@@ -70,16 +70,16 @@ class Actions(str, Enum):
             value: String value
 
         Returns:
-            Corresponding Observables enum member
+            Corresponding Actions enum member
 
         Raises:
-            ValueError: If no matching observable found
+            ValueError: If no matching action found
         """
         for act in cls:
             if act.value == value:
                 return act
         raise ValueError(
-            f"Unknown observable: '{value}'. Available: {[a.value for a in cls]}"
+            f"Unknown action: '{value}'. Available: {[a.value for a in cls]}"
         )
 
 
@@ -256,7 +256,7 @@ StateVarKey = Observable | DerivedObs | Target
 
 # namespace (ergonomic access)
 class StateVar:
-    OBSERVABLE = StateVarKey
+    OBSERVABLE = Observable
     DERIVED = DerivedObs
     TARGET = Target
 

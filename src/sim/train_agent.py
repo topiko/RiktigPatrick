@@ -76,7 +76,7 @@ def add_targets(
     obs_d: dict[StateVarKey, np.ndarray], rp_env: SingleEnvWrapper | VectorEnv
 ):
     """Add target observables to the observation dict."""
-    obs_d[Target.TARGET_POS] = 0.0
+    obs_d[Target.TARGET_POS] = np.array([0.0], dtype=np.float32)
 
     if isinstance(rp_env, SingleEnvWrapper):
         rp_env.set_attr("target_pos", 0.0)
