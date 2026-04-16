@@ -212,13 +212,13 @@ class Observable(str, Enum):
 
     @classmethod
     def from_str(cls, value: str) -> Observable:
-        """Convert string value to Observables enum.
+        """Convert string value to Observable enum.
 
         Args:
             value: String value (e.g., 'filter/rp_pitch', 'sens/gyro')
 
         Returns:
-            Corresponding Observables enum member
+            Corresponding Observable enum member
 
         Raises:
             ValueError: If no matching observable found
@@ -314,10 +314,10 @@ class State:
         self.mahony = Mahony()
         self._record = record
         self._history: list[np.ndarray] = []
-        self.derived_obs: dict[str, np.ndarray] = {
+        self.derived_obs: dict[DerivedObs, np.ndarray] = {
             DerivedObs.CURRENT_POS: np.array([0.0])
         }
-        self.targets: dict[str, np.ndarray] = {Target.TARGET_POS: np.array([0.0])}
+        self.targets: dict[Target, np.ndarray] = {Target.TARGET_POS: np.array([0.0])}
 
     def step(self):
         obs_t = self.obs.get_observable(Observable.OBS_TIME)[0]

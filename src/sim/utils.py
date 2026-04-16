@@ -480,7 +480,7 @@ class Episode:
             return self.get_misc(key)
 
         raise ValueError(
-            f"Key must be an instance of Observables or Actions enum, got {type(key)}"
+            f"Key must be an instance of StateVarKey, Actions, or MiscKeys, got {type(key)}"
         )
 
     def get_observable(self, obs: StateVarKey) -> np.ndarray:
