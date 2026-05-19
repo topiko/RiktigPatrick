@@ -411,6 +411,8 @@ class State:
     def reset(self):
         self.mahony.reset()
         self.prev_t = 0.0
+        self.derived_obs = {DerivedObs.CURRENT_POS: np.array([0.0])}
+
         self._history = []
 
 
