@@ -17,6 +17,7 @@ Actions (wheel accelerations) are in rad/s².
 """
 
 import warnings
+from collections.abc import Sequence
 from typing import Any, Optional
 
 import gymnasium
@@ -24,6 +25,7 @@ import gymnasium.spaces
 import matplotlib.pyplot as plt
 import numpy as np
 from dm_control import mjcf
+from matplotlib import animation
 
 from filters.qutils import q2eul
 from riktigpatric.patrick import (
@@ -31,9 +33,11 @@ from riktigpatric.patrick import (
     DerivedObs,
     Observable,
     State,
+    StateVarKey,
     StepAction,
     Target,
 )
+from riktigpatric.trajectory import PositionTrajectory
 
 BODY_D = 0.05
 BODY_H = 0.25
@@ -73,12 +77,11 @@ class MujocoRP:
         Args:
             rgba: Robot body color
             wheel_markers: Whether to add visual markers to wheels
-            seed: Random seed (NOT IMPLEMENTED)
+            seed: Random seed for physical parameter randomization
             max_wheel_vel: Maximum wheel velocity in rad/s (SI units)
             max_wheel_acc: Maximum wheel acceleration in rad/s² (SI units)
 
         """
-        # TODO: seed to introduce variance to RP
         rng = np.random.default_rng(seed)
 
         # Store limits (SI units: rad/s, rad/s²)
@@ -184,14 +187,18 @@ class MujocoRP:
             name="headpitch_actuator",
             joint=head_pitch,
             kp=kp_servo,
-            actrange=[-1, 1],  # rad/s - velocity control range
+            ctrllimited=True,
+            ctrlrange=[-1, 1],  # rad/s - commanded velocity
+            actrange=[-1, 1],  # rad - integrated position target
         )
         self.model.actuator.add(
             "intvelocity",
             name="headturn_actuator",
             joint=head_lr,
             kp=kp_servo,
-            actrange=[-1, 1],  # rad/s - velocity control range
+            ctrllimited=True,
+            ctrlrange=[-1, 1],  # rad/s - commanded velocity
+            actrange=[-1, 1],  # rad - integrated position target
         )
 
         # Sensors:
@@ -265,7 +272,7 @@ def _get_action_space(
     Returns:
         Dict space with action ranges (all SI units)
     """
-    d_ = {}
+    d_: dict[str, gymnasium.Space] = {}
     for k in actions:
         # Head velocity control (hardcoded ±1 rad/s)
         if k in [Actions.VEL_HEAD_PITCH, Actions.VEL_HEAD_TURN]:
@@ -294,7 +301,7 @@ def _get_action_space(
 
 
 def _get_observation_space() -> gymnasium.spaces.Dict:
-    d_ = {}
+    d_: dict[str, gymnasium.Space] = {}
 
     for obs in Observable:
         if obs in [
@@ -310,14 +317,15 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
             Observable.REWARD_RP_PITCH,
             Observable.REWARD_WHEEL_VEL,
             Observable.REWARD_HEAD_PITCH,
+            Observable.REWARD_POS,
             Observable.REWARD_TOTAL,
         ]:
             d_[obs] = gymnasium.spaces.Box(
-                low=-100.0, high=100.0, shape=(1,), dtype=np.float32
+                low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
             )
         elif obs in [Observable.ACC, Observable.GYRO]:
             d_[obs] = gymnasium.spaces.Box(
-                low=-100.0, high=100.0, shape=(3,), dtype=np.float32
+                low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32
             )
         else:
             raise ValueError(f"Invalid observation key: {obs}")
@@ -325,7 +333,7 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
     for derived_obs in DerivedObs:
         if derived_obs == DerivedObs.CURRENT_POS:
             d_[derived_obs] = gymnasium.spaces.Box(
-                low=-100.0, high=100.0, shape=(1,), dtype=np.float32
+                low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
             )
         else:
             raise ValueError(f"Invalid derived observation key: {derived_obs}")
@@ -333,7 +341,7 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
     for target in Target:
         if target == Target.TARGET_POS:
             d_[target] = gymnasium.spaces.Box(
-                low=-100.0, high=100.0, shape=(1,), dtype=np.float32
+                low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
             )
         else:
             raise ValueError(f"Invalid target key: {target}")
@@ -354,6 +362,8 @@ class GymRP(gymnasium.Env):
         max_wheel_acc: float = 50.0,  # rad/s²
         reward_scales: dict[Observable, float] | None = None,
         random_scale: float = 0.02,
+        target_pos: float = 0.0,
+        target_trajectory: Sequence[Sequence[float]] | None = None,
     ):
         self._randomize = randomize
         self._init_pitch_scale = 2.0
@@ -366,9 +376,16 @@ class GymRP(gymnasium.Env):
         self.simul_timestep = 0.002
         self.dm_env.model.opt.timestep = self.simul_timestep
 
-        self.state = State(record=record)
+        self.state = State(wheel_radius=WHEEL_D / 2, record=record)
+        self.target_pos = target_pos
+        self.target_trajectory = target_trajectory
 
         self.step_time = step_time
+        self._substeps = round(step_time / self.simul_timestep)
+        if self._substeps < 1 or not np.isclose(
+            self._substeps * self.simul_timestep, step_time
+        ):
+            raise ValueError("step_time must be a positive multiple of 0.002 seconds")
         self.render_mode = "rgb_array"
         self.metadata["render_fps"] = int(1 / self.step_time)
 
@@ -376,7 +393,31 @@ class GymRP(gymnasium.Env):
             actions, self.max_wheel_vel, self.max_wheel_acc
         )
         self.observation_space = _get_observation_space()
-        self.reward_scales = reward_scales or {}
+        self.reward_scales = {
+            obs: 0.0 for obs in Observable if obs.value.startswith("reward/")
+        }
+        self.reward_scales.update(reward_scales or {})
+
+    @property
+    def target_pos(self) -> float:
+        """Current fore/aft target in meters."""
+        return self.state.target_pos
+
+    @target_pos.setter
+    def target_pos(self, value: float):
+        self.state.target_pos = value
+
+    @property
+    def target_trajectory(self) -> PositionTrajectory | None:
+        return self.state.target_trajectory
+
+    @target_trajectory.setter
+    def target_trajectory(
+        self, value: PositionTrajectory | Sequence[Sequence[float]] | None
+    ):
+        if value is not None and not isinstance(value, PositionTrajectory):
+            value = PositionTrajectory(value)
+        self.state.target_trajectory = value
 
     def _reset_env(self, seed: int | None = 42) -> mjcf.Physics:
         prng = np.random.default_rng(seed)
@@ -426,12 +467,14 @@ class GymRP(gymnasium.Env):
 
         return physics
 
-    def _get_obs(self) -> dict[str, np.ndarray]:
-        d = self.state.obs.to_dict()
-        d.update(self.state.derived_obs)
-        d.update(self.state.targets)
+    def _get_obs(self) -> dict[StateVarKey, np.ndarray]:
+        d: dict[StateVarKey, np.ndarray] = {
+            **self.state.obs.to_dict(),
+            **self.state.derived_obs,
+            **self.state.targets,
+        }
 
-        return d
+        return {key: value.astype(np.float32, copy=True) for key, value in d.items()}
 
     @property
     def simul_time(self) -> float:
@@ -445,8 +488,7 @@ class GymRP(gymnasium.Env):
         - GYRO: rad/s (gyroscope)
         - HEAD_PITCH, HEAD_TURN: rad (joint angles)
         - LEFT_WHEEL_VEL, RIGHT_WHEEL_VEL: rad/s (from jointvel sensors)
-        - TRUE_PITCH: deg (converted from quaternion for compatibility)
-        - RP_PITCH: deg (filtered pitch, computed in degrees)
+        - TRUE_PITCH, RP_PITCH: rad
         """
 
         def _get_sens(sens):
@@ -464,20 +506,26 @@ class GymRP(gymnasium.Env):
             ],  # rad/s
             Observable.TRUE_PITCH: q2eul(
                 self.dm_env.bind(self.body_quat).sensordata.copy()
-            )[1]
-            / np.pi
-            * 180,  # deg (converted for historical reasons)
-            Observable.RP_PITCH: self.state.euler[1],  # deg (filtered pitch)
+            )[1],  # rad
+            Observable.RP_PITCH: self.state.euler[1],  # rad; updated below
         }
 
-        rew_d = self._get_reward(first=first)
-        obs_d.update(rew_d)
+        self.state.update_obs(
+            {key: np.atleast_1d(value) for key, value in obs_d.items()}
+        )
+        if not first:
+            self.state.step()
 
-        self.state.update_obs(obs_d)
+        # Rewards and filtered pitch must describe the newly observed state.
+        rew_d = self._get_reward(first=first)
+        reward_arrays = {key: np.array([value]) for key, value in rew_d.items()}
+        self.state.obs.set_observables(reward_arrays)
+        if not first:
+            self.state.update_rewards(reward_arrays)
 
     def _get_reward(self, first: bool = False) -> dict[Observable, float]:
         if first:
-            return {k: 0.0 for k in self.reward_scales.keys()}
+            return dict.fromkeys(self.reward_scales, 0.0)
 
         step_reward = self.reward_scales[Observable.REWARD_STEP]
 
@@ -485,20 +533,23 @@ class GymRP(gymnasium.Env):
             self.reward_scales[Observable.REWARD_FELL] if self.terminated else 0.0
         )
         pitch_reward = self.reward_scales[Observable.REWARD_RP_PITCH] * abs(
-            self.state.obs.get_observable(Observable.RP_PITCH)
+            self.state.obs.get_observable(Observable.RP_PITCH)[0]
         )
 
         wheel_vel_reward = (
             self.reward_scales[Observable.REWARD_WHEEL_VEL]
             * (
-                abs(self.state.obs.get_observable(Observable.LEFT_WHEEL_VEL))
-                + abs(self.state.obs.get_observable(Observable.RIGHT_WHEEL_VEL))
+                abs(self.state.obs.get_observable(Observable.LEFT_WHEEL_VEL)[0])
+                + abs(self.state.obs.get_observable(Observable.RIGHT_WHEEL_VEL)[0])
             )
             / 2
         )
 
         head_pitch_reward = self.reward_scales[Observable.REWARD_HEAD_PITCH] * abs(
-            self.state.obs.get_observable(Observable.HEAD_PITCH)
+            self.state.obs.get_observable(Observable.HEAD_PITCH)[0]
+        )
+        position_reward = self.reward_scales[Observable.REWARD_POS] * abs(
+            self.state.derived_obs[DerivedObs.CURRENT_POS][0] - self.target_pos
         )
 
         total = (
@@ -507,6 +558,7 @@ class GymRP(gymnasium.Env):
             + pitch_reward
             + wheel_vel_reward
             + head_pitch_reward
+            + position_reward
         )
 
         # We need to list all obrservable rewards here...
@@ -517,12 +569,14 @@ class GymRP(gymnasium.Env):
             * self.reward_scales[Observable.REWARD_TOTAL],
             Observable.REWARD_WHEEL_VEL: wheel_vel_reward,
             Observable.REWARD_HEAD_PITCH: head_pitch_reward,
+            Observable.REWARD_POS: position_reward,
             Observable.REWARD_FELL: fell_cost,
         }
 
     def reset(
         self, options: Optional[Any] = None, seed: int | None = None
     ) -> tuple[dict, dict]:
+        super().reset(seed=seed)
         self.dm_env = self._reset_env(seed)
         self.state.reset()
 
@@ -532,22 +586,54 @@ class GymRP(gymnasium.Env):
 
     @property
     def terminated(self) -> bool:
-        true_pitch = (
-            q2eul(self.dm_env.bind(self.body_quat).sensordata.copy())[1] * RAD2DEG
-        )
-        return abs(true_pitch) > 20
+        true_pitch = q2eul(self.dm_env.bind(self.body_quat).sensordata.copy())[1]
+        return bool(abs(true_pitch) > np.deg2rad(20))
 
     @property
     def truncated(self) -> bool:
-        return self.state.obs.get_observable(Observable.OBS_TIME) > 20
+        return self.simul_time >= 20.0
 
     def render(self):
         if self.render_mode == "rgb_array":
             return self.dm_env.render(camera_id=0, height=480, width=640)
 
+    def _apply_action(self, action: Actions, value: np.ndarray):
+        if action == Actions.TIME:
+            return
+        velocity_actuators = {
+            Actions.VEL_HEAD_PITCH: self.head_pitch_act,
+            Actions.VEL_HEAD_TURN: self.head_turn_act,
+            Actions.VEL_LEFT_WHEEL: self.left_wheel_act,
+            Actions.VEL_RIGHT_WHEEL: self.right_wheel_act,
+        }
+        if action in velocity_actuators:
+            self.dm_env.bind(velocity_actuators[action]).ctrl = value[0]
+            return
+        if action == Actions.ACC_YAW_TURN:
+            raise NotImplementedError("ACC_YAW_TURN not implemented yet")
+        if action not in {
+            Actions.ACC_LEFT_WHEEL,
+            Actions.ACC_RIGHT_WHEEL,
+            Actions.ACC_BOTH_WHEELS,
+        }:
+            raise ValueError(f"Invalid action key: {action}")
+
+        acceleration = np.clip(value[0], -self.max_wheel_acc, self.max_wheel_acc)
+        for wheel_action, sensor, actuator in (
+            (Actions.ACC_LEFT_WHEEL, Observable.LEFT_WHEEL_VEL, self.left_wheel_act),
+            (Actions.ACC_RIGHT_WHEEL, Observable.RIGHT_WHEEL_VEL, self.right_wheel_act),
+        ):
+            if action in (wheel_action, Actions.ACC_BOTH_WHEELS):
+                velocity = self.state.obs.get_observable(sensor)[0]
+                self.dm_env.bind(actuator).ctrl = np.clip(
+                    velocity + acceleration * self.step_time,
+                    -self.max_wheel_vel,
+                    self.max_wheel_vel,
+                )
+
     def step(
-        self, action_d: dict[Actions, np.ndarray]
-    ) -> tuple[dict, dict, bool, bool, dict, dict]:
+        self, action: dict[Actions, np.ndarray]
+    ) -> tuple[dict, float, bool, bool, dict]:
         """Execute one environment step.
 
         All actions are in SI units:
@@ -558,7 +644,7 @@ class GymRP(gymnasium.Env):
         """
         # Check time synchronization if TIME action is present
         try:
-            action_time = action_d[Actions.TIME]
+            action_time = action[Actions.TIME]
         except KeyError:
             action_time = None
 
@@ -573,83 +659,25 @@ class GymRP(gymnasium.Env):
                     f"Max diff: {time_diff.max():.6f}s (allowed: {max_diff:.6f}s)"
                 )
 
-        rvel = self.state.obs.get_observable(Observable.RIGHT_WHEEL_VEL)[0]  # rad/s
-        lvel = self.state.obs.get_observable(Observable.LEFT_WHEEL_VEL)[0]  # rad/s
         # Apply the actions at time t (all in SI units)
-        for a, val in action_d.items():
-            # Skip TIME - it's for sync checking only, not an actuator command
-            if a == Actions.TIME:
-                continue
-            # Head velocity control (rad/s)
-            if a == Actions.VEL_HEAD_PITCH:
-                self.dm_env.bind(self.head_pitch_act).ctrl = val[0]  # rad/s
-            elif a == Actions.VEL_HEAD_TURN:
-                self.dm_env.bind(self.head_turn_act).ctrl = val[0]  # rad/s
-            # Wheel velocity control (rad/s)
-            elif a == Actions.VEL_LEFT_WHEEL:
-                self.dm_env.bind(self.left_wheel_act).ctrl = val[0]  # rad/s
+        for a, val in action.items():
+            self._apply_action(a, val)
 
-            elif a == Actions.VEL_RIGHT_WHEEL:
-                self.dm_env.bind(self.right_wheel_act).ctrl = val[0]  # rad/s
-
-            elif a == Actions.ACC_LEFT_WHEEL:
-                # Acceleration mode: integrate acc (rad/s²) to velocity (rad/s)
-                left_vel = (
-                    self.state.obs.get_observable(Observable.LEFT_WHEEL_VEL)[0]
-                    + val[0] * self.step_time  # rad/s² * s = rad/s
-                )
-                left_vel = np.clip(left_vel, -self.max_wheel_vel, self.max_wheel_vel)
-                self.dm_env.bind(self.left_wheel_act).ctrl = left_vel
-            elif a == Actions.ACC_RIGHT_WHEEL:
-                # Acceleration mode: integrate acc (rad/s²) to velocity (rad/s)
-                right_vel = rvel + val[0] * self.step_time  # rad/s² * s = rad/s
-                right_vel = np.clip(right_vel, -self.max_wheel_vel, self.max_wheel_vel)
-                self.dm_env.bind(self.right_wheel_act).ctrl = right_vel
-
-            elif a == Actions.ACC_BOTH_WHEELS:
-                # Acceleration mode: integrate acc (rad/s²) to velocity (rad/s)
-                rvel = np.clip(
-                    rvel + val[0] * self.step_time,  # rad/s² * s = rad/s
-                    -self.max_wheel_vel,
-                    self.max_wheel_vel,
-                )
-                lvel = np.clip(
-                    lvel + val[0] * self.step_time,  # rad/s² * s = rad/s
-                    -self.max_wheel_vel,
-                    self.max_wheel_vel,
-                )
-                self.dm_env.bind(self.right_wheel_act).ctrl = rvel
-                self.dm_env.bind(self.left_wheel_act).ctrl = lvel
-
-            elif a == Actions.ACC_YAW_TURN:
-                raise NotImplementedError("ACC_YAW_TURN not implemented yet")
-
-            else:
-                raise ValueError(f"Invalid action key: {a}")
-
-        self._prev_action = StepAction(action_d)
+        self._prev_action = StepAction(action)
 
         # Step the MuJoCo environment t -> t + self.step_time.
         t0 = self.dm_env.data.time
-        t = t0
-
-        # TODO: add some randomization, the step time in practice is not exact.
-        while t < t0 + self.step_time:
+        for _ in range(self._substeps):
             self.dm_env.step()
-            t = self.dm_env.data.time
-
-        # Read the observation at time t + self.step_time.
-        # We also update the reward here.
-        self._update_obs()
 
         # The action was taken at t0
-        self.state.update_action(t0, action_d)
+        self.state.update_action(t0, action)
+
+        # Read sensors, update filter/odometry, then compute the reward at t + dt.
+        self._update_obs()
 
         # The reward is received at time t
         reward = self.state.obs.get_observable(Observable.REWARD_TOTAL)[0]
-
-        # The state needs a step as well (Mahony)
-        self.state.step()
 
         return self._get_obs(), reward, self.terminated, self.truncated, {}
 
@@ -660,7 +688,7 @@ def display_video(frames, framerate=30, fname: str = ""):
     fig, ax = plt.subplots(1, 1, figsize=(width / dpi, height / dpi), dpi=dpi)
     ax.set_axis_off()
     ax.set_aspect("equal")
-    ax.set_position([0, 0, 1, 1])
+    ax.set_position((0, 0, 1, 1))
     im = ax.imshow(frames[0])
 
     def update(frame):

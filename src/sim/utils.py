@@ -117,12 +117,12 @@ class SingleEnvWrapper:
 
         Args:
             seed: Random seed
-            options: Unused, kept for VectorEnv.reset compatibility
+            options: Passed to the underlying environment
 
         Returns:
             Batched obs_d (1, dim) and info
         """
-        obs_d, info = self.env.reset(seed=seed)
+        obs_d, info = self.env.reset(seed=seed, options=options)
         obs_d_batched = _add_batch_dim(obs_d)
         return obs_d_batched, info
 
@@ -133,7 +133,7 @@ class SingleEnvWrapper:
             action_d: Dict with batched actions, shape (1, dim)
 
         Returns:
-            Batched outputs: obs_d (1, dim), reward (1,), terminated (1,), truncated (1, 1), reward_info
+            Batched observations (1, dim), rewards and done flags (1,), and info.
         """
         # Remove batch dimension: (1, dim) -> (dim)
         action_single = _remove_batch_dim(action_d)
@@ -158,12 +158,20 @@ class SingleEnvWrapper:
             reward_info_batched,
         )
 
+    def set_attr(self, name, values):
+        """Match SyncVectorEnv.set_attr for a batch containing one environment."""
+        if isinstance(values, (list, tuple)):
+            if len(values) != 1:
+                raise ValueError("Expected one value for a single environment")
+            values = values[0]
+        self.env.set_wrapper_attr(name, values)
+
     def __getattr__(self, name):
         """Pass through any other attributes/methods to underlying env."""
         return getattr(self.env, name)
 
     def __setattr__(self, name, value):
-        """Set attributes - special handling for 'env' and 'num_envs', pass others through."""
+        """Keep wrapper attributes local and forward other assignments."""
         if name in ("env", "num_envs"):
             # Set on wrapper itself
             object.__setattr__(self, name, value)
@@ -174,9 +182,10 @@ class SingleEnvWrapper:
 
 def register_and_make_env(
     cfg: DictConfig, force_single_env: bool = False, force_non_random: bool = False
-) -> gym.Env | gym.vector.VectorEnv:
+) -> gym.Env | gym.vector.SyncVectorEnv:
     env_config = dict(cfg.env)
     n_parallel = env_config.pop("n_parallel", 1)
+    max_episode_steps = env_config.pop("max_episode_steps", 2000)
     if force_single_env:
         n_parallel = 1
     if force_non_random:
@@ -190,18 +199,15 @@ def register_and_make_env(
         Observable.from_str(k): v for k, v in dict(cfg.reward).items()
     }
 
-    register(
-        id="RiktigPatrick-v0",
-        entry_point="sim.envs.rp_env:GymRP",
-        max_episode_steps=2000,
-        kwargs=config_,
-    )
+    if "RiktigPatrick-v0" not in gym.envs.registry:
+        register(id="RiktigPatrick-v0", entry_point="sim.envs.rp_env:GymRP")
 
     if n_parallel > 1:
         return gym.vector.SyncVectorEnv(
             [
                 lambda: gym.make(
                     "RiktigPatrick-v0",
+                    max_episode_steps=max_episode_steps,
                     disable_env_checker=True,
                     **config_,
                 )
@@ -212,6 +218,7 @@ def register_and_make_env(
 
     return gym.make(
         "RiktigPatrick-v0",
+        max_episode_steps=max_episode_steps,
         disable_env_checker=True,
         **config_,
     )
@@ -253,11 +260,13 @@ def get_returns(rewards: torch.Tensor, discount: float) -> torch.Tensor:
 
 
 def get_advantages(returns: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+    """Policy advantages with a fixed baseline, not a second critic gradient."""
     if returns.shape != values.shape:
         raise ValueError(
-            f"Returns and values must have the same shape, got {returns.shape} and {values.shape}"
+            f"Returns and values must have the same shape, "
+            f"got {returns.shape} and {values.shape}"
         )
-    advantages = returns - values
+    advantages = returns - values.detach()
     return advantages
 
 
@@ -303,24 +312,22 @@ class EpisodeBuffer:
         logp_t: torch.Tensor,
         value_t: torch.Tensor,
     ) -> None:
-        if len(self.obs_l) > 0:
-            # The reward at step t=0 is a dummy
-
-            self.rewards_l.append(reward_t)
+        # reward_t is the reward returned by step(action_t), including the first.
+        self.rewards_l.append(reward_t)
         self.obs_l.append(obs_t)
         self.action_l.append(action_t)
         self.logps_l.append(logp_t)
         self.values_l.append(value_t)
 
-    def finish(self, final_obs: dict[StateVarKey, np.ndarray], reward: float) -> None:
+    def finish(self, final_obs: dict[StateVarKey, np.ndarray]) -> None:
         self.obs_l.append(final_obs)
-        self.rewards_l.append(reward)
 
         self.finished = True
 
         if len(self.rewards_l) != len(self.obs_l) - 1:
             raise ValueError(
-                f"Expected rewards length {len(self.obs_l) - 1}, got {len(self.rewards_l)}"
+                f"Expected rewards length {len(self.obs_l) - 1}, "
+                f"got {len(self.rewards_l)}"
             )
 
         # Trigger decorated length checks.
@@ -346,7 +353,7 @@ class EpisodeBuffer:
     def get_action(self, key: Actions) -> np.ndarray:
         return np.stack([act_d[key] for act_d in self.action_l], axis=0)
 
-    def get_stvar_dict(self) -> dict[Observable, np.ndarray]:
+    def get_stvar_dict(self) -> dict[StateVarKey, np.ndarray]:
         d = {}
         for k in self.obs_l[0].keys():
             d[k] = self.get_observable(k)
@@ -370,7 +377,7 @@ class EpisodeBuffer:
 
 
 def ebufs2batchd(
-    ebuf_l: list[EpisodeBuffer], device: torch.DeviceObjType = "cpu"
+    ebuf_l: list[EpisodeBuffer], device: torch.device | str = "cpu"
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, torch.Tensor]:
     maxlen = max(buf.seq_len for buf in ebuf_l)
     bs = len(ebuf_l)
@@ -378,13 +385,13 @@ def ebufs2batchd(
     values = torch.zeros((bs, maxlen), device=device)
     logps = torch.zeros((bs, maxlen), device=device)
     valid_mask = torch.zeros((bs, maxlen), device=device)
-    rewards = torch.zeros((bs, maxlen))
+    rewards = torch.zeros((bs, maxlen), device=device)
     seq_lens = np.zeros(bs)
 
     for i, buf in enumerate(ebuf_l):
         seq_len = buf.seq_len
         values[i, :seq_len] = buf.get_values()
-        logps[i, :seq_len] = buf.get_logps().cpu()
+        logps[i, :seq_len] = buf.get_logps()
         rewards[i, :seq_len] = buf.get_rewards()
         seq_lens[i] = seq_len
         valid_mask[i, :seq_len] = 1.0
@@ -465,7 +472,8 @@ class Episode:
             arr = arr[0]  # Remove batch dimension: (1, T) -> (T,)
             if arr.shape[0] != epbuffer.seq_len:
                 raise ValueError(
-                    f"{key} length {arr.shape[0]} does not match number of steps {epbuffer.seq_len}"
+                    f"{key} length {arr.shape[0]} does not match "
+                    f"number of steps {epbuffer.seq_len}"
                 )
 
             # (T,)
@@ -480,7 +488,7 @@ class Episode:
             return self.get_misc(key)
 
         raise ValueError(
-            f"Key must be an instance of StateVarKey, Actions, or MiscKeys, got {type(key)}"
+            f"Key must be a StateVarKey, Actions, or MiscKeys, got {type(key)}"
         )
 
     def get_observable(self, obs: StateVarKey) -> np.ndarray:
@@ -506,7 +514,8 @@ class Episode:
             if not attr.startswith("_") and attr.isupper() and hasattr(Actions, attr)
         ]
 
+        num_steps = getattr(self, obs_attrs[0]).shape[0] if obs_attrs else 0
         return (
             f"Episode(observations={obs_attrs}, actions={action_attrs}, "
-            f"num_steps={getattr(self, obs_attrs[0], np.array([])).shape[0] if obs_attrs else 0})"
+            f"num_steps={num_steps})"
         )

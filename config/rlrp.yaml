@@ -9,39 +9,38 @@ logging:
     enabled: false
     push_freq: 10
 
-  plot_freq: 100  # Generate plots every N iterations
+  plot_freq: 100  # Generate plots/videos every N iterations; 0 disables both
   save_freq: 1000
 
 rl:
   discount: 0.99
-  entropy_scale: 0.01
-  value_loss_scale: 1.0
-  normalize_returns: true
-  use_baseline: true
-  init2zeros: false
-  load_net: false
-  trim_end_steps: 0
 
 reward:
   # These keys need to exactly match the values in patrick/Observables
   reward/step: 1.0
-  reward/rp_pitch: -0.1
+  reward/rp_pitch: -5.73  # per radian; approximately the old -0.1 per degree
   reward/fell: 0.0
   reward/wheel_vel: -0.2
   reward/head_pitch: -0.5
+  reward/pos: -1.0  # penalty per meter of absolute position error
   reward/total: 1.0
 
 train:
   policy_lr: 0.0005
-  value_lr: 0.03
   grad_clip: 10.0
+  max_iterations: null  # null trains until interrupted
+  target_positions: null  # optional list of n_parallel fixed targets, in meters
+  target_trajectories: null  # optional per-env lists of [time, position] waypoints
 
 env:
   step_time: 0.01  # seconds
   randomize: False
   n_parallel: 16
+  max_episode_steps: 2000
+  target_pos: 0.0  # default fixed position target, meters from episode origin
+  target_trajectory: null  # optional default trajectory for training and evaluation
 
-  # Currently masses are normal(MASS, scale * MASS)...
+  # Relative standard deviation of body/head masses and wheel diameter
   random_scale: 0.01
 
   # All units are SI (International System of Units)
@@ -70,5 +69,3 @@ policy:
     - sens/acc
     - target/pos
     - derived/pos
-
-

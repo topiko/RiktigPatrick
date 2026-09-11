@@ -14,6 +14,7 @@ import pandas as pd
 from filters.mahony import Mahony
 from relay.conversions import make_ctrl
 from riktigpatric.servo import Servo
+from riktigpatric.trajectory import PositionTrajectory
 
 LOG = logging.getLogger("rp_logger")
 G = 9.81
@@ -94,7 +95,7 @@ class StepAction:
     def ndim(self) -> int:
         return self._ndim
 
-    def to_dict(self) -> dict[str | Actions, np.ndarray]:
+    def to_dict(self) -> dict[Actions, np.ndarray]:
         d_: dict[Actions, np.ndarray] = {}
         for a in self._actions:
             if (a_val := getattr(self, a)) is None:
@@ -125,7 +126,7 @@ class StepAction:
 
 
 class Target(str, Enum):
-    TARGET_POS = "target/pos"  # target in fore / aft direction
+    TARGET_POS = "target/pos"  # fore/aft distance from episode origin, meters
 
     def dim(self) -> int:
         """Return the dimension (number of channels) for this target.
@@ -159,7 +160,7 @@ class Target(str, Enum):
 
 
 class DerivedObs(str, Enum):
-    CURRENT_POS = "derived/pos"  # current position in fore / aft direction
+    CURRENT_POS = "derived/pos"  # fore/aft wheel odometry, meters
 
     def dim(self) -> int:
         """Return the dimension (number of channels) for this derived observable.
@@ -188,7 +189,8 @@ class DerivedObs(str, Enum):
             if dobj.value == value:
                 return dobj
         raise ValueError(
-            f"Unknown derived observable: '{value}'. Available: {[d.value for d in cls]}"
+            f"Unknown derived observable: '{value}'. "
+            f"Available: {[d.value for d in cls]}"
         )
 
 
@@ -208,6 +210,7 @@ class Observable(str, Enum):
     REWARD_FELL = "reward/fell"
     REWARD_WHEEL_VEL = "reward/wheel_vel"
     REWARD_HEAD_PITCH = "reward/head_pitch"
+    REWARD_POS = "reward/pos"
     REWARD_TOTAL = "reward/total"
 
     @classmethod
@@ -302,15 +305,17 @@ class Obs:
         for obs, value in obs_d.items():
             self.set_observable(obs, value)
 
-    def to_dict(self) -> dict[str | Observable, np.ndarray]:
+    def to_dict(self) -> dict[Observable, np.ndarray]:
         return {obs: self.get_observable(obs) for obs in Observable}
 
 
 class State:
     def __init__(
         self,
+        wheel_radius: float,
         record: bool = False,
     ):
+        self.wheel_radius = wheel_radius
         self.mahony = Mahony()
         self._record = record
         self._history: list[np.ndarray] = []
@@ -318,6 +323,36 @@ class State:
             DerivedObs.CURRENT_POS: np.array([0.0])
         }
         self.targets: dict[Target, np.ndarray] = {Target.TARGET_POS: np.array([0.0])}
+        self._target_trajectory: PositionTrajectory | None = None
+        self.prev_t = 0.0
+
+    @property
+    def target_pos(self) -> float:
+        return float(self.targets[Target.TARGET_POS][0])
+
+    @target_pos.setter
+    def target_pos(self, value: float):
+        """Set a fixed target, replacing any active trajectory."""
+        value = float(value)
+        if not np.isfinite(value) or abs(value) > float(np.finfo(np.float32).max):
+            raise ValueError("target_pos must be finite and representable as float32")
+        self._target_trajectory = None
+        self.targets[Target.TARGET_POS] = np.array([value], dtype=np.float32)
+
+    @property
+    def target_trajectory(self) -> PositionTrajectory | None:
+        return self._target_trajectory
+
+    @target_trajectory.setter
+    def target_trajectory(self, trajectory: PositionTrajectory | None):
+        """Replace the trajectory, sampling it at the current episode time."""
+        self._target_trajectory = trajectory
+        self._update_target()
+
+    def _update_target(self):
+        if self._target_trajectory is not None:
+            position = self._target_trajectory.position_at(self.prev_t)
+            self.targets[Target.TARGET_POS] = np.array([position], dtype=np.float32)
 
     def step(self):
         obs_t = self.obs.get_observable(Observable.OBS_TIME)[0]
@@ -328,9 +363,10 @@ class State:
             dt,
         )
         self.prev_t = obs_t
+        self._update_target()
+        self.obs.set_observable(Observable.RP_PITCH, float(self.euler[1]))
 
-        # Cur pos:
-        # TODO: What are the wheel vel units!?
+        # Nominal-radius wheel odometry; does not compensate for slip or yaw.
         self.derived_obs[DerivedObs.CURRENT_POS] += (
             (
                 self.obs.get_observable(Observable.LEFT_WHEEL_VEL)
@@ -338,37 +374,34 @@ class State:
             )
             / 2
             * dt
+            * self.wheel_radius
         )
-
-        self.targets[Target.TARGET_POS] = np.array(
-            [0.0]
-        )  # TODO: update target position based on task
-
-        if self._record:
-            arr, _ = self.get_state_arr()
-            self._history.append(np.copy(arr))
 
     def update_action(self, action_t: float, action_dict: dict[Actions, np.ndarray]):
         action_dict[Actions.TIME] = np.array([action_t])
         self.action = StepAction(action_dict)
 
-    def update_rewards(self, reward_dict: dict[str, np.ndarray]):
+    def update_rewards(self, reward_dict: dict[Observable, np.ndarray]):
         self.reward_dict = reward_dict
+        if self._record:
+            arr, _ = self.get_state_arr()
+            self._history.append(arr.copy())
 
     def update_obs(self, obs_dict: dict[Observable, np.ndarray]):
         self.obs = Obs(obs_dict)
 
-    def get_state_dict(self) -> dict[str, np.ndarray]:
-        d_ = self.obs.to_dict()
-        d_.update(self.action.to_dict())
-        d_.update(self.reward_dict)
-        d_.update(self._derived_state)
-
-        return d_
+    def get_state_dict(self) -> dict[StateVarKey | Actions, np.ndarray]:
+        return {
+            **self.obs.to_dict(),
+            **self.action.to_dict(),
+            **self.reward_dict,
+            **self.derived_obs,
+            **self.targets,
+        }
 
     def get_state_arr(self) -> tuple[np.ndarray, dict[str, int]]:
         d = self.get_state_dict()
-        arr = None
+        arrays = []
         keys = []
         for k in sorted(d.keys()):
             arr_ = d[k]
@@ -386,31 +419,33 @@ class State:
             else:
                 keys_ = [k]
 
-            arr = np.concatenate((arr, arr_), axis=0)
+            arrays.append(arr_)
             keys += keys_
 
         keys_d = {k: i for i, k in enumerate(keys)}
-        return arr, keys_d
+        return np.concatenate(arrays), keys_d
 
     @property
-    def history(self) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    def history(self) -> tuple[np.ndarray, dict[str, int]]:
         if not self._record:
             raise KeyError("You have not recorded history.")
         if not self._history:
             raise KeyError("History is empty.")
 
         history = np.vstack(self._history)
-        idx_d = self.get_state_arr(keys="all", ret_idxs=True)[1]
+        idx_d = self.get_state_arr()[1]
 
         return history, idx_d
 
     @property
     def euler(self) -> np.ndarray:
-        return self.mahony.eul
+        """Filtered Euler angles in radians (Mahony's public API uses degrees)."""
+        return np.deg2rad(self.mahony.eul)
 
     def reset(self):
         self.mahony.reset()
         self.prev_t = 0.0
+        self._update_target()
         self.derived_obs = {DerivedObs.CURRENT_POS: np.array([0.0])}
 
         self._history = []

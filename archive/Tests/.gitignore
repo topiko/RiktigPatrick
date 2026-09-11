@@ -1,0 +1,9 @@
+*
+!*/
+!.gitignore
+!BLESense/**/*.sh
+!BLESense/**/*.ino
+!BLESense/**/readme.md
+!I2C/**/*.sh
+!I2C/**/*.ino
+!I2C/**/*.py

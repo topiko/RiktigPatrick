@@ -11,9 +11,9 @@ ACTION CONFIGURATION:
 Actions are configured with explicit bin values or continuous distributions.
 Example:
   actions:
-    - act/accelerate_both_wheels:
-        type: discrete
-        bins: [-50, -25, 0, 25, 50]  # rad/s²
+    act/accelerate_both_wheels:
+      type: discrete
+      bins: [-50, -25, 0, 25, 50]  # rad/s²
 """
 
 import torch
@@ -72,10 +72,8 @@ class Agent(nn.Module):
         """Initialize agent.
 
         Args:
-            inputs: List of input observable names (dimensions auto-detected from Observable.dim())
-                    e.g., ['filter/rp_pitch', 'sens/gyro', ...]
-            actions: List of action configs, each with action key, 'type', and parameters
-                     e.g., [{'act/accelerate_both_wheels': {'type': 'discrete', 'bins': [-50, -25, 0, 25, 50]}}]
+            inputs: State variable names; dimensions are inferred from their keys.
+            actions: Mapping from action names to type and distribution parameters.
         """
         super().__init__()
         self.inputs = inputs
@@ -83,16 +81,16 @@ class Agent(nn.Module):
 
         # Parse inputs and convert string keys to Observables
 
-        d = {}  # Temporary dict to store decoders for each input
+        encoders: dict[str, nn.Module] = {}
         n = 0
         for inp in inputs:
             # Convert string to Observables enum using from_str()
 
             obs = StateVar.from_str(inp)
-            d[obs], n_ = _get_obs_decoder(obs)
+            encoders[inp], n_ = _get_obs_decoder(obs)
             n += n_
 
-        self.encoders = nn.ModuleDict(d)
+        self.encoders = nn.ModuleDict(encoders)
 
         # Network backbone
         self.rnn = nn.GRU(
@@ -102,7 +100,7 @@ class Agent(nn.Module):
 
         # Parse actions
         self.action_configs: dict[Actions, dict] = {}
-        d = {}
+        heads: dict[str, nn.Module] = {}
         for act_str, action_d in actions.items():
             # Extract action key and config
 
@@ -117,7 +115,7 @@ class Agent(nn.Module):
                 self.action_configs[action]["type"] = "discrete"
                 self.action_configs[action]["bins_name"] = bin_name_
 
-                d[action] = nn.Linear(
+                heads[act_str] = nn.Linear(
                     hsize, len(getattr(self, bin_name_))
                 )  # Output logits for each bin
 
@@ -128,7 +126,7 @@ class Agent(nn.Module):
             else:
                 raise ValueError(f"Unknown action type: {action_d['type']}")
 
-        self.action_heads = nn.ModuleDict(d)
+        self.action_heads = nn.ModuleDict(heads)
 
         # Value head for critic (if using actor-critic method)
         self.value_head = nn.Sequential(
@@ -152,7 +150,7 @@ class Agent(nn.Module):
         input_tensors = []
         for key, mod in self.encoders.items():
             # (B, obs_dim) -> (B, feature_dim)
-            input_tensors.append(mod(x[key]))
+            input_tensors.append(mod(x[StateVar.from_str(key)]))
 
         # (B, input_size) where input_size = sum of feature_dims from all encoders
         input_tensor = torch.cat(input_tensors, dim=1)
@@ -176,7 +174,7 @@ class Agent(nn.Module):
         action_logits = {}
         for action_key, mod_ in self.action_heads.items():
             # (B, hsize) -> (B, num_bins) for discrete actions
-            action_logits[action_key] = mod_(x_)
+            action_logits[Actions.from_str(action_key)] = mod_(x_)
 
         # (B, hsize) -> (B, 1)
         values = self.value_head(x_)
@@ -199,7 +197,7 @@ class Agent(nn.Module):
         """
         action_logits, values, h = self.forward(x, h)
 
-        actions: dict[str, torch.Tensor] = {}
+        actions: dict[Actions, torch.Tensor] = {}
         logp_l = []
 
         for action, logits in action_logits.items():
@@ -215,9 +213,7 @@ class Agent(nn.Module):
                 action_value = getattr(self, action_cfg["bins_name"])[action_idx]
 
                 actions[action] = action_value.unsqueeze(1)
-                # Note: If this action had multiple components (e.g., separate left/right),
-                # sum their log probs before appending.
-                # Currently each action is single component.
+                # Each action currently has a single component.
                 logp_l.append(logp.unsqueeze(1))
 
             elif action_cfg["type"] == "continuous":

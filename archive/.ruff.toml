@@ -1,0 +1,2 @@
+# Historical files are outside the maintained lint scope.
+exclude = ["*"]

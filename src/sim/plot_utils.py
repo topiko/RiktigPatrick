@@ -1,6 +1,7 @@
 """Plotting utilities for FinishedEpisode data visualization."""
 
 import os
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
@@ -64,6 +65,7 @@ def plot_episode(
     axes[-1].set_xlabel("Time [s]")
 
     if save_path is not None:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(save_path, dpi=230, bbox_inches="tight")
 
     return fig

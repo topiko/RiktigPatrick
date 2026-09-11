@@ -1,0 +1,3 @@
+stls/*
+gears/*
+!gears/gears.scad

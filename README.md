@@ -1,213 +1,241 @@
 # RiktigPatrick
 
-Self-balancing robot with a turning head, trained via reinforcement learning in MuJoCo simulation, with a backend-agnostic controller that can be swapped between simulator and physical robot.
+Self-balancing robot with a turning head, trained using reinforcement learning
+in MuJoCo. The goal is a controller usable with both simulation and the physical robot.
 
 ![rp](rp.jpg)
 
-## Goal
+## Project layout
 
-Train a balancing robot using RL to balance upright and respond to disturbances. The controller should be:
-- **Backend-agnostic**: Swappable between MuJoCo simulation and physical robot
-- **Robust**: Handle initial state randomization and perturbations
-
-## Project Structure
-
+```text
+config/                  Training and simulation configuration
+src/
+  riktigpatric/          Shared robot state/actions and hardware head control
+  controller/            Simulator/real-robot adapter interfaces and factory
+  sim/                   Maintained MuJoCo environment and training entry point
+  nn_ctrl/               Neural-network policy
+  filters/               Shared attitude estimation and quaternion math
+  relay/                 Shared hardware wire-format conversions
+tests/                   Current simulation regression checks
+archive/                 Older trainers, tools, firmware, CAD and experiments
+outputs/, plots/, video/ Generated training output
 ```
-RiktigPatrick/
-├── config/
-│   └── rlrp.yaml          # Hydra configuration (SI units)
-├── src/sim/               # RL training in MuJoCo
-│   ├── train_agent.py     # Main training script (uses Hydra config)
-│   ├── rl_rp.py           # Sequential RL training (legacy)
-│   ├── parallel_rl_rp.py  # Parallel RL training (legacy)
-│   ├── try_policy.py      # Test trained policy (legacy)
-│   ├── algos.py           # REINFORCE algorithm (legacy)
-│   ├── nets.py            # Neural network architectures (legacy)
-│   ├── utils.py           # Environment registration
-│   └── envs/rp_env.py     # MuJoCo environment (SI units)
-├── src/nn_ctrl/
-│   └── nns.py             # Neural network agent (SI units)
-├── src/filters/           # Sensor filtering
-│   ├── qutils.py          # Quaternion utilities
-│   └── mahony.py          # AHRS filter
-├── notes/                 # Setup notes
-└── pyproject.toml         # Package config
-```
+
+### One robot interface, interchangeable backends
+
+The intended design is to keep Patrick's state, action definitions and policy
+the same whether observations/actions come from MuJoCo or the physical robot.
+Hardware coupling is part of that design: `riktigpatric/`, `controller/` and the
+wire-format code in `relay/conversions.py` stay in the active source tree.
+
+Currently, training uses `GymRP` and the shared definitions in
+`riktigpatric.patrick` directly. `controller.make_controller()` expresses the
+simulator/real-robot adapter boundary, but its real-robot implementation is a stub
+and these adapters still need alignment with the current training API and SI
+units. The hardware integration remains a future update.
+
+## Maintained path
+
+The active entry point is **`src/sim/train_agent.py`**. Single-environment and
+batched training use this same code path.
+
+| File | Purpose |
+|------|---------|
+| `config/rlrp.yaml` | Hydra configuration, in SI units |
+| `src/sim/train_agent.py` | Rollouts, actor–critic training, evaluation |
+| `src/sim/envs/rp_env.py` | MuJoCo model and Gymnasium environment |
+| `src/sim/utils.py` | Environment creation, batching, episode buffers and returns |
+| `src/sim/plot_utils.py` | Episode plots |
+| `src/nn_ctrl/nns.py` | Recurrent neural-network agent |
+| `src/riktigpatric/patrick.py` | Shared state/action definitions, filter and odometry state |
+| `src/riktigpatric/trajectory.py` | Backend-independent position waypoint interpolation |
+| `src/riktigpatric/servo.py` | Hardware head-servo control |
+| `src/controller/` | Backend interface and adapter scaffolding |
+| `src/relay/conversions.py` | Shared hardware command and sensor packet format |
+| `src/filters/` | Quaternion utilities and Mahony attitude filter |
+| `tests/test_active_sim.py` | Active simulation regression checks |
+
+Superseded trainers (`rl_rp.py`, `parallel_rl_rp.py`, `try_policy.py`, `nets.py`),
+old executables, embedded deployment code, CAD and setup notes now live under
+[`archive/`](archive/README.md), generally preserving their original relative
+paths. Only the current source packages are installed; archived material is
+excluded from normal lint/type-check discovery.
 
 ## Setup
 
-```bash
-cd src/
-uv venv --python 3.10 ../.venv
-source ../.venv/bin/activate
-uv pip install gymnasium mujoco dm-control torch numpy mlflow pandas
-```
-
-## Run Training
-
-### New Training (Recommended - uses Hydra config, SI units)
+Use **Python 3.12 or newer** and [uv](https://docs.astral.sh/uv/).
+Run these commands from the repository root:
 
 ```bash
-cd src/
-export PYTHONPATH="$PWD:$PYTHONPATH"
-
-# Run training with Hydra configuration
-python sim/train_agent.py
+uv sync
 ```
 
-Configuration is in `config/rlrp.yaml`. All values use SI units.
+Dependencies are declared in `pyproject.toml`. uv creates a local `uv.lock`
+when resolving them; the lockfile is not currently tracked in this repository.
 
-### Legacy Training (older scripts)
+## Training
 
 ```bash
-cd src/
-export PYTHONPATH="$PWD:$PYTHONPATH"
+# Default: 16 synchronously stepped environments
+uv run python -m sim.train_agent
 
-# Set mlflow credentials (or source .env file)
-export MLFLOW_TRACKING_URI=https://ml.twohands.dev
-export MLFLOW_TRACKING_USERNAME=topiko
-export MLFLOW_TRACKING_PASSWORD='your-password'
+# One environment, same training loop
+uv run python -m sim.train_agent env.n_parallel=1
 
-# Parallel training
-python sim/parallel_rl_rp.py
-
-# Sequential training
-python sim/rl_rp.py
+# Short run without rendering
+uv run python -m sim.train_agent env.n_parallel=2 \
+  env.max_episode_steps=20 train.max_iterations=2 logging.plot_freq=0
 ```
 
-Note: Legacy scripts use deprecated `sim_config.py` and may need updates.
+The Hydra configuration is located automatically relative to the script.
+`HYDRA_CONFIG_DIR` can override its location. `--cfg job` prints the effective
+configuration, and Hydra command-line overrides select individual parameters.
 
-## Test Policy
+Training runs until interrupted unless `train.max_iterations` is set.
+`seed` initializes PyTorch/NumPy and provides the base seed for episode resets.
+Each iteration collects one episode per environment, with completed episodes
+masked out while the remaining environments finish.
+
+### Position targets
+
+Positions are in meters along the robot's fore/aft travel direction, relative
+to the episode origin. The default target is zero (stay near the starting point).
 
 ```bash
-python try_policy.py --policy REINFORCE
-python try_policy.py --policy pid
+# Same fixed target for all training environments and evaluation
+uv run python -m sim.train_agent env.target_pos=0.2
+
+# Different fixed targets for each training environment
+uv run python -m sim.train_agent env.n_parallel=3 \
+  'train.target_positions=[-0.2,0.0,0.2]'
 ```
 
-## Configuration
+`train.target_positions` must contain exactly one finite value per environment.
+It overrides `env.target_pos` for training; evaluation uses `env.target_pos`.
+The rollout's `add_targets()` helper updates both environment state and batched
+policy observations. Targets persist across steps and resets; odometry resets
+to zero at each episode start.
 
-### New Training Configuration
+### Time-varying position trajectories
 
-Edit `config/rlrp.yaml` (all values in SI units):
+Trajectories are lists of `[time_seconds, position_meters]` waypoints. They start
+at time zero, interpolate linearly between waypoints and hold the final position.
+Times must strictly increase; a single waypoint gives a fixed target.
 
-| Section | Parameter | Description | Units |
-|---------|-----------|-------------|-------|
-| env | step_time | Simulation timestep | seconds |
-| env | randomize | Enable initial state randomization | boolean |
-| env | n_parallel | Number of parallel environments | - |
-| env | max_wheel_vel | Maximum wheel velocity | rad/s |
-| env | max_wheel_acc | Maximum wheel acceleration | rad/s² |
-| train | policy_lr | Policy learning rate | - |
-| policy | actions | List of action types | - |
-| policy | act_map | Action space bins per action | - |
-| reward | pitch_coef | Penalty coefficient for pitch deviation | - |
-| reward | yaw_coef | Penalty coefficient for yaw deviation | - |
+```bash
+# Two environments following different trajectories; evaluation follows the first
+uv run python -m sim.train_agent --config-name trajectory_example
 
-### Legacy Configuration
-
-Edit `src/sim/config.yaml` (for legacy scripts):
-
-| Section | Parameter | Description |
-|---------|-----------|-------------|
-| training | nrollouts | Number of parallel environments |
-| training | max_episodes | Total training episodes |
-| rl | learning_rate | Optimizer learning rate |
-| rl | gamma | Discount factor |
-
-## Reward Function
-
-The reward encourages the robot to balance upright while minimizing energy:
-
-```
-reward = step_reward - pitch_coef * |pitch| - yaw_coef * |yaw| - action_coef * |action|
+# One trajectory shared by all training environments and evaluation
+uv run python -m sim.train_agent \
+  'env.target_trajectory=[[0,0],[2,0.2],[4,0]]'
 ```
 
-The episode terminates when |pitch| > 20 degrees.
+`train.target_trajectories` accepts one waypoint list per training environment.
+Use it instead of `train.target_positions`; supplying both is an error.
+Either training override replaces the environment's default target settings.
+Evaluation uses `env.target_trajectory` when set, otherwise `env.target_pos`.
 
-## State Space
+The shared `State` samples its trajectory from observation time, so the same
+target logic is usable with simulated or hardware observations. On each step,
+the policy sees the target at time *t* and receives a reward for tracking the
+target at *t + dt*. Resetting restarts the trajectory at zero. Replacing a
+trajectory mid-episode samples it at the current episode time; setting a fixed
+target disables it. The batched `add_targets()` helper handles either target form.
 
-### New Training (`train_agent.py`)
-Model input (4 dims, all SI units):
-- `filter/rp_pitch` - Filtered pitch angle (rad)
-- `sens/left_wheel_vel` - Left wheel velocity (rad/s)
-- `sens/right_wheel_vel` - Right wheel velocity (rad/s)
-- `env/obs_time` - Simulation time (s)
+This supplies position references; velocity-target inputs and a policy proven to
+track trajectories still require further work.
 
-### Legacy Training
-Model input (7 dims):
-- Filtered pitch (from AHRS)
-- Gyroscope (3-axis)
-- Left wheel velocity
-- Right wheel velocity
-- Time (normalized)
+### Plots, videos and checkpoints
 
-## Units and Conversions
+- `logging.plot_freq`: evaluate and save plots/videos every N iterations,
+  including iteration zero; `0` disables evaluation rendering.
+- Plots go to `plots/`, videos to `video/`, relative to the run's working directory.
+  Output directories are created automatically.
+- For headless rendering on systems with EGL support, prefix the command with
+  `MUJOCO_GL=egl MPLBACKEND=Agg`.
+- MLflow is disabled by default. Enable it with
+  `logging.mlflow.enabled=true` and set `MLFLOW_TRACKING_URI`; optional credentials
+  can be supplied in the environment or a local `.env` file.
+- With MLflow enabled, metrics are logged every `logging.mlflow.push_freq`
+  iterations and models every `logging.save_freq` iterations. Without MLflow,
+  model checkpoints are not saved.
+- `policy.restore_id` accepts an MLflow **logged model ID** to restore an agent.
+  Optimizer state and iteration count start fresh.
 
-**The system uses SI units (International System of Units) throughout:**
+## Observations, actions and units
 
-### Physical Quantities
-- **Angles**: radians (rad)
-- **Angular velocities**: radians per second (rad/s)
-- **Angular accelerations**: radians per second squared (rad/s²)
-- **Time**: seconds (s)
-- **Linear accelerations**: meters per second squared (m/s²)
+The active simulation and agent use SI units:
 
-### Observations (from MuJoCo sensors)
-All observations are in SI units:
-- `sens/left_wheel_vel`: rad/s (wheel angular velocity)
-- `sens/right_wheel_vel`: rad/s (wheel angular velocity)
-- `sens/gyro`: rad/s (gyroscope, 3-axis)
-- `filter/rp_pitch`: rad (filtered pitch angle)
-- `sens/acc`: m/s² (accelerometer, 3-axis)
-- `env/obs_time`: s (simulation time)
+| State variable | Meaning | Units / channels |
+|----------------|---------|------------------|
+| `filter/rp_pitch` | Filtered body pitch | rad, 1 |
+| `simul/rp_pitch` | Ground-truth body pitch, for diagnostics | rad, 1 |
+| `sens/left_wheel_vel`, `sens/right_wheel_vel` | Wheel angular velocities | rad/s, 1 each |
+| `sens/head_pitch`, `sens/head_turn` | Head joint angles | rad, 1 each |
+| `sens/gyro` | Gyroscope | rad/s, 3 |
+| `sens/acc` | Accelerometer | m/s², 3 |
+| `env/obs_time` | Episode time | s, 1 |
+| `target/pos` | Current position reference | m, 1 |
+| `derived/pos` | Wheel odometry | m, 1 |
 
-### Actions (to MuJoCo actuators)
-All actions are in SI units:
-- `act/accelerate_both_wheels`: rad/s² (wheel acceleration)
-- `act/left_wheel_vel`, `act/right_wheel_vel`: rad/s (wheel target velocity)
-- `act/head_pitch_vel`, `act/head_turn_vel`: rad/s (head velocity, ±1 rad/s max)
+The default policy uses all of the above except ground-truth pitch: **14 scalar
+input channels**. Each input has a learned linear encoder. Their outputs feed
+a shared 64-unit GRU, layer normalization, categorical action heads and a value
+head. Continuous action distributions are not implemented.
 
-**Note**: All actuators use **velocity control** (`intvelocity` type in MuJoCo).
-Wheel accelerations are integrated to velocities before sending to actuators.
+Default policy actions:
+- `act/accelerate_both_wheels`: discrete wheel accelerations in rad/s².
+- `act/head_pitch_vel`: discrete head pitch velocities in rad/s.
 
-### Configuration Parameters
-All parameters in `config/rlrp.yaml` use SI units:
-- `max_wheel_vel: 10.0` - rad/s (maximum wheel velocity)
-- `max_wheel_acc: 50.0` - rad/s² (maximum wheel acceleration)
-- `step_time: 0.01` - seconds (simulation timestep)
+Head turning and individual wheel velocity commands are supported by the
+environment but are not selected in the default policy configuration.
 
-### Normalization Scales
-The `obs_scales` in config are in SI units (placeholders, need tuning):
-- `filter/rp_pitch: 0.35` - rad (~±20° range)
-- `sens/gyro: 10.5` - rad/s (~±600°/s range)
-- `sens/left_wheel_vel: 10.0` - rad/s (max wheel velocity)
-- `sens/right_wheel_vel: 10.0` - rad/s (max wheel velocity)
+MuJoCo `intvelocity` actuators integrate commanded velocity into a position
+setpoint. Head velocity commands are limited to ±1 rad/s, with integrated
+position setpoints limited to ±1 rad. Wheel acceleration commands are converted
+to velocity commands using the measured wheel velocity and `env.step_time`.
 
-### Conversion Constants
-For reference only (defined in `rp_env.py`, not used in main training):
-- `RAD2DEG = 180/π` - Convert rad/s → deg/s (for display)
-- `RAD2REV = 1/(2π)` - Convert rad/s → rev/s (for display)
+Odometry integrates mean wheel angular velocity times the nominal wheel radius
+(0.05 m). It estimates signed travel distance, without correcting for slip or yaw.
 
-**Note**: The new training code (`train_agent.py`) uses only SI units end-to-end. Legacy training scripts may use different unit conventions.
+## Rewards and episode limits
 
-## Randomization
+Rewards are computed from the newly observed state after each action:
 
-When `randomize: true`:
-- Initial pitch: Gaussian (μ=0, σ=2°)
-- Initial wheel velocity: Gaussian (μ=0, σ=1 rad/s) - both wheels same velocity
+```text
+reward = total_scale * (
+    step_scale
+    + fell_scale * fell
+    + pitch_scale * abs(pitch)
+    + wheel_vel_scale * mean(abs(wheel_velocities))
+    + head_pitch_scale * abs(head_pitch)
+    + position_scale * abs(current_pos - target_pos)
+)
+```
 
-This helps the policy generalize to different starting conditions.
+Scales are the corresponding `reward/*` entries in `config/rlrp.yaml`.
+The position penalty is `reward/pos`. Pitch uses radians; its default coefficient
+preserves approximately the former per-degree penalty strength.
 
-## Known Issues
+Episodes terminate beyond **20° absolute body pitch** and truncate at 20 seconds
+or `env.max_episode_steps` (default 2000), whichever limit is reached first.
+The physics timestep is 0.002 s; `env.step_time` must be a positive integer
+multiple of it (default 0.01 s).
 
-- Training tends to plateau around ~50 return - may need hyperparameter tuning
+`env.randomize=true` randomizes initial pitch (standard deviation 2°), body/head
+masses and wheel diameter. `env.random_scale` controls relative physical parameter
+variation. Initial wheel velocity is not randomized.
 
-## Architecture
+Older checkpoints saw degree-valued pitch and incorrectly scaled odometry;
+retrain them for the corrected observations and reward timing.
 
-The network uses **separate encoders** for policy and value (no shared weights):
-- **Policy encoder**: 7 → 32 → 16 (Tanh activations)
-- **Value encoder**: 7 → 64 → 32 → 16 (Tanh activations, larger capacity)
-- **Policy heads**: Mean (Sigmoid) and StdDev (Softplus)
-- **Value head**: 16 → 1 (linear)
+## Checks
 
-This separation prevents the value function from being constrained by the policy's representation needs, which was causing the value head to output constant values with the previous shared encoder architecture.
+```bash
+uv run python -m unittest discover -s tests -v
+```
+
+These checks cover units, current-state rewards, fixed targets, reset behavior,
+trajectory interpolation and timing, unequal episode lengths, reward/return
+alignment and gradient flow (including a detached policy baseline).

@@ -4,11 +4,15 @@ import logging
 
 from typing import Union
 
-from remote.keyboard_remote import depack_KB
-
 LOG = logging.getLogger()
 
 bytes_d = {'h':2, 'f':4}
+
+def depack_KB(bytearray_: bytearray) -> tuple[float, float]:
+    """Decode remote-control values in the shared hardware wire format."""
+    phispeed = struct.unpack('f', bytearray_[0:4])[0]
+    thetaspeed = struct.unpack('f', bytearray_[4:8])[0]
+    return phispeed, thetaspeed
 
 def np2bytes(arr : np.ndarray,
              fmt : Union[str, list[str], tuple[str]]) -> bytearray:
@@ -128,6 +132,5 @@ def make_ctrl(select, val1, val2, val3=0, val4=0):
         return b #i+j+k
 
     return input2bytes(select,val1,val2,val3, val4)
-
 
 

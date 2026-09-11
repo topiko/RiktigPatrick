@@ -1,0 +1,12 @@
+defaults:
+  - rlrp
+  - _self_
+
+env:
+  n_parallel: 2
+  target_trajectory: [[0.0, 0.0], [2.0, 0.2], [4.0, 0.0]]
+
+train:
+  target_trajectories:
+    - [[0.0, 0.0], [2.0, 0.2], [4.0, 0.0]]
+    - [[0.0, 0.0], [2.0, -0.2], [4.0, 0.0]]
