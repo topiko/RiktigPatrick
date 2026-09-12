@@ -34,7 +34,6 @@ from riktigpatric.patrick import (
     Observable,
     State,
     StateVarKey,
-    StepAction,
     Target,
 )
 from riktigpatric.trajectory import PositionTrajectory
@@ -318,6 +317,7 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
             Observable.REWARD_WHEEL_VEL,
             Observable.REWARD_HEAD_PITCH,
             Observable.REWARD_POS,
+            Observable.REWARD_VEL,
             Observable.REWARD_TOTAL,
         ]:
             d_[obs] = gymnasium.spaces.Box(
@@ -331,7 +331,7 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
             raise ValueError(f"Invalid observation key: {obs}")
 
     for derived_obs in DerivedObs:
-        if derived_obs == DerivedObs.CURRENT_POS:
+        if derived_obs in (DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL):
             d_[derived_obs] = gymnasium.spaces.Box(
                 low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
             )
@@ -339,7 +339,7 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
             raise ValueError(f"Invalid derived observation key: {derived_obs}")
 
     for target in Target:
-        if target == Target.TARGET_POS:
+        if target in (Target.TARGET_POS, Target.TARGET_VEL):
             d_[target] = gymnasium.spaces.Box(
                 low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
             )
@@ -364,7 +364,12 @@ class GymRP(gymnasium.Env):
         random_scale: float = 0.02,
         target_pos: float = 0.0,
         target_trajectory: Sequence[Sequence[float]] | None = None,
+        target_vel: float = 0.0,
+        tracking_mode: str = "velocity",
     ):
+        if tracking_mode not in ("position", "velocity", "none"):
+            raise ValueError("tracking_mode must be position, velocity or none")
+        self.tracking_mode = tracking_mode
         self._randomize = randomize
         self._init_pitch_scale = 2.0
         self.max_wheel_vel = max_wheel_vel
@@ -379,6 +384,7 @@ class GymRP(gymnasium.Env):
         self.state = State(wheel_radius=WHEEL_D / 2, record=record)
         self.target_pos = target_pos
         self.target_trajectory = target_trajectory
+        self.target_vel = target_vel
 
         self.step_time = step_time
         self._substeps = round(step_time / self.simul_timestep)
@@ -406,6 +412,14 @@ class GymRP(gymnasium.Env):
     @target_pos.setter
     def target_pos(self, value: float):
         self.state.target_pos = value
+
+    @property
+    def target_vel(self) -> float:
+        return self.state.target_vel
+
+    @target_vel.setter
+    def target_vel(self, value: float):
+        self.state.target_vel = value
 
     @property
     def target_trajectory(self) -> PositionTrajectory | None:
@@ -467,28 +481,31 @@ class GymRP(gymnasium.Env):
 
         return physics
 
-    def _get_obs(self) -> dict[StateVarKey, np.ndarray]:
-        d: dict[StateVarKey, np.ndarray] = {
-            **self.state.obs.to_dict(),
-            **self.state.derived_obs,
-            **self.state.targets,
+    def _get_obs(
+        self, rewards: dict[Observable, float]
+    ) -> dict[StateVarKey, np.ndarray]:
+        """Export shared state plus reward diagnostics; no state updates."""
+        return {
+            **self.state.snapshot(),
+            **{
+                key: np.array([value], dtype=np.float32)
+                for key, value in rewards.items()
+            },
         }
-
-        return {key: value.astype(np.float32, copy=True) for key, value in d.items()}
 
     @property
     def simul_time(self) -> float:
         return self.dm_env.data.time
 
-    def _update_obs(self, first: bool = False):
-        """Update observations from MuJoCo sensors.
+    def _read_sensors(self) -> dict[Observable, np.ndarray]:
+        """Read a timestamped MuJoCo sensor packet without touching shared state.
 
         All observations are in SI units:
         - ACC: m/s² (accelerometer)
         - GYRO: rad/s (gyroscope)
         - HEAD_PITCH, HEAD_TURN: rad (joint angles)
         - LEFT_WHEEL_VEL, RIGHT_WHEEL_VEL: rad/s (from jointvel sensors)
-        - TRUE_PITCH, RP_PITCH: rad
+        - TRUE_PITCH: rad (optional simulation diagnostic for shared State)
         """
 
         def _get_sens(sens):
@@ -507,50 +524,49 @@ class GymRP(gymnasium.Env):
             Observable.TRUE_PITCH: q2eul(
                 self.dm_env.bind(self.body_quat).sensordata.copy()
             )[1],  # rad
-            Observable.RP_PITCH: self.state.euler[1],  # rad; updated below
         }
 
-        self.state.update_obs(
-            {key: np.atleast_1d(value) for key, value in obs_d.items()}
-        )
-        if not first:
-            self.state.step()
+        return {key: np.atleast_1d(value) for key, value in obs_d.items()}
 
-        # Rewards and filtered pitch must describe the newly observed state.
-        rew_d = self._get_reward(first=first)
-        reward_arrays = {key: np.array([value]) for key, value in rew_d.items()}
-        self.state.obs.set_observables(reward_arrays)
-        if not first:
-            self.state.update_rewards(reward_arrays)
-
-    def _get_reward(self, first: bool = False) -> dict[Observable, float]:
-        if first:
-            return dict.fromkeys(self.reward_scales, 0.0)
+    def _calculate_rewards(
+        self, state: State, *, terminated: bool
+    ) -> dict[Observable, float]:
+        """Calculate rewards from an explicitly supplied, already updated state."""
 
         step_reward = self.reward_scales[Observable.REWARD_STEP]
 
         fell_cost = (
-            self.reward_scales[Observable.REWARD_FELL] if self.terminated else 0.0
+            self.reward_scales[Observable.REWARD_FELL] if terminated else 0.0
         )
         pitch_reward = self.reward_scales[Observable.REWARD_RP_PITCH] * abs(
-            self.state.obs.get_observable(Observable.RP_PITCH)[0]
+            state.obs.get_observable(Observable.RP_PITCH)[0]
         )
 
         wheel_vel_reward = (
             self.reward_scales[Observable.REWARD_WHEEL_VEL]
             * (
-                abs(self.state.obs.get_observable(Observable.LEFT_WHEEL_VEL)[0])
-                + abs(self.state.obs.get_observable(Observable.RIGHT_WHEEL_VEL)[0])
+                abs(state.obs.get_observable(Observable.LEFT_WHEEL_VEL)[0])
+                + abs(state.obs.get_observable(Observable.RIGHT_WHEEL_VEL)[0])
             )
             / 2
         )
+        # An absolute-speed penalty would oppose nonzero velocity commands.
+        if self.tracking_mode == "velocity":
+            wheel_vel_reward = 0.0
 
         head_pitch_reward = self.reward_scales[Observable.REWARD_HEAD_PITCH] * abs(
-            self.state.obs.get_observable(Observable.HEAD_PITCH)[0]
+            state.obs.get_observable(Observable.HEAD_PITCH)[0]
         )
-        position_reward = self.reward_scales[Observable.REWARD_POS] * abs(
-            self.state.derived_obs[DerivedObs.CURRENT_POS][0] - self.target_pos
-        )
+        position_reward = 0.0
+        velocity_reward = 0.0
+        if self.tracking_mode == "position":
+            position_reward = self.reward_scales[Observable.REWARD_POS] * abs(
+                state.derived_obs[DerivedObs.CURRENT_POS][0] - state.target_pos
+            )
+        elif self.tracking_mode == "velocity":
+            velocity_reward = self.reward_scales[Observable.REWARD_VEL] * abs(
+                state.derived_obs[DerivedObs.CURRENT_VEL][0] - state.target_vel
+            )
 
         total = (
             step_reward
@@ -559,6 +575,7 @@ class GymRP(gymnasium.Env):
             + wheel_vel_reward
             + head_pitch_reward
             + position_reward
+            + velocity_reward
         )
 
         # We need to list all obrservable rewards here...
@@ -570,6 +587,7 @@ class GymRP(gymnasium.Env):
             Observable.REWARD_WHEEL_VEL: wheel_vel_reward,
             Observable.REWARD_HEAD_PITCH: head_pitch_reward,
             Observable.REWARD_POS: position_reward,
+            Observable.REWARD_VEL: velocity_reward,
             Observable.REWARD_FELL: fell_cost,
         }
 
@@ -578,11 +596,10 @@ class GymRP(gymnasium.Env):
     ) -> tuple[dict, dict]:
         super().reset(seed=seed)
         self.dm_env = self._reset_env(seed)
-        self.state.reset()
-
-        self._update_obs(first=True)
-
-        return self._get_obs(), {}
+        self.state.reset(self._read_sensors())
+        # Reset has an initial observation, but no action or transition reward.
+        initial_rewards = dict.fromkeys(self.reward_scales, 0.0)
+        return self._get_obs(initial_rewards), {}
 
     @property
     def terminated(self) -> bool:
@@ -663,23 +680,20 @@ class GymRP(gymnasium.Env):
         for a, val in action.items():
             self._apply_action(a, val)
 
-        self._prev_action = StepAction(action)
-
         # Step the MuJoCo environment t -> t + self.step_time.
         t0 = self.dm_env.data.time
         for _ in range(self._substeps):
             self.dm_env.step()
 
-        # The action was taken at t0
-        self.state.update_action(t0, action)
+        # Keep acquisition, shared processing, reward and recording explicit.
+        measurements = self._read_sensors()
+        self.state.update(measurements)
+        terminated = self.terminated
+        rewards = self._calculate_rewards(self.state, terminated=terminated)
+        self.state.record_transition(t0, action, rewards)
 
-        # Read sensors, update filter/odometry, then compute the reward at t + dt.
-        self._update_obs()
-
-        # The reward is received at time t
-        reward = self.state.obs.get_observable(Observable.REWARD_TOTAL)[0]
-
-        return self._get_obs(), reward, self.terminated, self.truncated, {}
+        reward = float(rewards[Observable.REWARD_TOTAL])
+        return self._get_obs(rewards), reward, terminated, self.truncated, {}
 
 
 def display_video(frames, framerate=30, fname: str = ""):

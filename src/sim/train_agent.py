@@ -64,7 +64,24 @@ PLOTKS = [
         Observable.OBS_TIME,
         (Target.TARGET_POS, DerivedObs.CURRENT_POS),
     ),
+    (
+        Observable.OBS_TIME,
+        (Target.TARGET_VEL, DerivedObs.CURRENT_VEL),
+    ),
 ]
+
+
+def get_policy_inputs(cfg: DictConfig) -> list[str]:
+    """Append task inputs to the shared sensor inputs, independently of the agent."""
+    tracking_inputs = {
+        "position": (Target.TARGET_POS, DerivedObs.CURRENT_POS),
+        "velocity": (Target.TARGET_VEL, DerivedObs.CURRENT_VEL),
+        "none": (),
+    }
+    return list(dict.fromkeys([
+        *cfg.policy.inputs,
+        *[key.value for key in tracking_inputs[cfg.env.tracking_mode]],
+    ]))
 
 
 def _take_idx_from_d(d, idx: int):
@@ -85,11 +102,14 @@ def add_targets(
     rp_env: SingleEnvWrapper | SyncVectorEnv,
     target_positions: list[float] | np.ndarray | None = None,
     target_trajectories: Sequence[Sequence[Sequence[float]]] | None = None,
+    target_velocities: list[float] | np.ndarray | None = None,
 ):
-    """Set fixed targets or trajectories for a batch and refresh policy inputs."""
+    """Set a batch of position/velocity targets or position trajectories."""
+    if sum(value is not None for value in (
+        target_positions, target_trajectories, target_velocities
+    )) > 1:
+        raise ValueError("Supply only one type of target override per batch")
     if target_trajectories is not None:
-        if target_positions is not None:
-            raise ValueError("Choose target_positions or target_trajectories, not both")
         if len(target_trajectories) != rp_env.num_envs:
             raise ValueError(f"Expected {rp_env.num_envs} target trajectories")
         # Validate the entire batch before changing any environment.
@@ -103,22 +123,27 @@ def add_targets(
             dtype=np.float32,
         )
         return obs_d
-    if target_positions is None:
+    key, attribute, values = (
+        (Target.TARGET_VEL, "target_vel", target_velocities)
+        if target_velocities is not None
+        else (Target.TARGET_POS, "target_pos", target_positions)
+    )
+    if values is None:
         return obs_d
-    targets = np.asarray(target_positions, dtype=np.float64)
+    targets = np.asarray(values, dtype=np.float64)
     if (
         targets.shape != (rp_env.num_envs,)
         or not np.isfinite(targets).all()
         or np.any(np.abs(targets) > float(np.finfo(np.float32).max))
     ):
         raise ValueError(
-            f"Expected {rp_env.num_envs} finite float32 position targets with shape "
+            f"Expected {rp_env.num_envs} finite float32 {key.value} targets with shape "
             f"({rp_env.num_envs},), got {targets}"
         )
     targets = targets.astype(np.float32)
     # Gymnasium distributes lists/tuples; an ndarray would be broadcast whole.
-    rp_env.set_attr("target_pos", targets.tolist())
-    obs_d[Target.TARGET_POS] = targets[:, None].copy()
+    rp_env.set_attr(attribute, targets.tolist())
+    obs_d[key] = targets[:, None].copy()
     return obs_d
 
 
@@ -128,6 +153,7 @@ def rollout(
     seed: int = 0,
     target_positions: list[float] | np.ndarray | None = None,
     target_trajectories: Sequence[Sequence[Sequence[float]]] | None = None,
+    target_velocities: list[float] | np.ndarray | None = None,
 ) -> list[EpisodeBuffer]:
     num_envs = rp_env.num_envs
     active = np.ones(num_envs, dtype=bool)
@@ -135,7 +161,9 @@ def rollout(
 
     h = None
     obs_d, _ = rp_env.reset(seed=seed)
-    obs_d = add_targets(obs_d, rp_env, target_positions, target_trajectories)
+    obs_d = add_targets(
+        obs_d, rp_env, target_positions, target_trajectories, target_velocities
+    )
     while active.any():
         obs_d_t = npd2tensord(obs_d)
 
@@ -205,8 +233,10 @@ def train(cfg: DictConfig, resources: ExitStack):
         agent = mlflow.pytorch.load_model(
             mlflow.get_logged_model(cfg.policy.restore_id).model_uri, map_location="cpu"
         )
+        if set(agent.inputs) != set(get_policy_inputs(cfg)):
+            raise ValueError("Restored policy inputs do not match this tracking task")
     else:
-        agent = Agent(inputs=cfg.policy.inputs, actions=cfg.policy.actions)
+        agent = Agent(inputs=get_policy_inputs(cfg), actions=cfg.policy.actions)
 
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
 
@@ -220,6 +250,7 @@ def train(cfg: DictConfig, resources: ExitStack):
             seed=cfg.seed + i,
             target_positions=cfg.train.target_positions,
             target_trajectories=cfg.train.target_trajectories,
+            target_velocities=cfg.train.target_velocities,
         )
 
         logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(episode_buf_l)

@@ -23,6 +23,7 @@ reward:
   reward/wheel_vel: -0.2
   reward/head_pitch: -0.5
   reward/pos: -1.0  # penalty per meter of absolute position error
+  reward/vel: -4.0  # penalty per m/s of absolute velocity error
   reward/total: 1.0
 
 train:
@@ -31,14 +32,17 @@ train:
   max_iterations: null  # null trains until interrupted
   target_positions: null  # optional list of n_parallel fixed targets, in meters
   target_trajectories: null  # optional per-env lists of [time, position] waypoints
+  target_velocities: null  # optional list of n_parallel velocity commands, in m/s
 
 env:
   step_time: 0.01  # seconds
   randomize: False
   n_parallel: 16
   max_episode_steps: 2000
+  tracking_mode: velocity  # velocity (low-level control), position, or none
   target_pos: 0.0  # default fixed position target, meters from episode origin
   target_trajectory: null  # optional default trajectory for training and evaluation
+  target_vel: 0.0  # default low-level command: balance and stop, m/s
 
   # Relative standard deviation of body/head masses and wheel diameter
   random_scale: 0.01
@@ -58,6 +62,7 @@ policy:
       type: discrete
       bins: [-0.2, -0.1, 0, 0.1, 0.2]  # rad/s - head pitch velocity
 
+  # Shared sensor inputs; the trainer appends the selected tracking-mode inputs.
   inputs:
     - filter/rp_pitch
     - sens/left_wheel_vel
@@ -67,5 +72,3 @@ policy:
     - env/obs_time
     - sens/gyro
     - sens/acc
-    - target/pos
-    - derived/pos

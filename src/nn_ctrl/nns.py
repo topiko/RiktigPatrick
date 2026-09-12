@@ -43,9 +43,10 @@ def _get_obs_decoder(input_: StateVarKey) -> tuple[nn.Module, int]:
     if input_ == Observable.OBS_TIME:
         # TODO: sine/cos encoding for time to capture periodicity?
         return nn.Linear(1, 8), 8  # Single time value -> 8 features
-    if input_ == DerivedObs.CURRENT_POS:
-        return nn.Linear(1, 4), 4
-    if input_ == Target.TARGET_POS:
+    if input_ in (
+        DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL,
+        Target.TARGET_POS, Target.TARGET_VEL,
+    ):
         return nn.Linear(1, 4), 4
 
     raise ValueError(f"Unknown observation key: {input_}")

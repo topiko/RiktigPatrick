@@ -1,0 +1,8 @@
+defaults:
+  - rlrp
+  - _self_
+
+env:
+  tracking_mode: position
+  target_pos: 0.0
+  target_trajectory: null

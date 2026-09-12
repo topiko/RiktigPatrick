@@ -1,0 +1,10 @@
+defaults:
+  - rlrp
+  - _self_
+
+env:
+  tracking_mode: velocity
+  n_parallel: 3
+
+train:
+  target_velocities: [-0.1, 0.0, 0.1]

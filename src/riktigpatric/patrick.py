@@ -127,6 +127,7 @@ class StepAction:
 
 class Target(str, Enum):
     TARGET_POS = "target/pos"  # fore/aft distance from episode origin, meters
+    TARGET_VEL = "target/vel"  # signed fore/aft velocity, m/s
 
     def dim(self) -> int:
         """Return the dimension (number of channels) for this target.
@@ -134,7 +135,7 @@ class Target(str, Enum):
         Returns:
             Number of channels (1 for scalars, 3 for vectors)
         """
-        if self in {Target.TARGET_POS}:
+        if self in {Target.TARGET_POS, Target.TARGET_VEL}:
             return 1
         raise ValueError(f"Unknown target {self}!")
 
@@ -161,6 +162,7 @@ class Target(str, Enum):
 
 class DerivedObs(str, Enum):
     CURRENT_POS = "derived/pos"  # fore/aft wheel odometry, meters
+    CURRENT_VEL = "derived/vel"  # signed wheel-odometry velocity, m/s
 
     def dim(self) -> int:
         """Return the dimension (number of channels) for this derived observable.
@@ -168,7 +170,7 @@ class DerivedObs(str, Enum):
         Returns:
             Number of channels (1 for scalars, 3 for vectors)
         """
-        if self in {DerivedObs.CURRENT_POS}:
+        if self in {DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL}:
             return 1
         raise ValueError(f"Unknown derived observable {self}!")
 
@@ -211,6 +213,7 @@ class Observable(str, Enum):
     REWARD_WHEEL_VEL = "reward/wheel_vel"
     REWARD_HEAD_PITCH = "reward/head_pitch"
     REWARD_POS = "reward/pos"
+    REWARD_VEL = "reward/vel"
     REWARD_TOTAL = "reward/total"
 
     @classmethod
@@ -275,6 +278,7 @@ class StateVar:
 
 class Obs:
     def __init__(self, obs_d: dict[Observable, np.ndarray]):
+        self._values: dict[Observable, np.ndarray] = {}
         self.set_observables(obs_d)
 
     def set_observable(self, obs: Observable, value: np.ndarray | float):
@@ -287,29 +291,30 @@ class Obs:
         else:
             raise ValueError(f"Invalid type for observable {obs} : {type(value)}")
 
-        setattr(self, obs, value)
+        self._values[obs] = value.copy()
 
     def get_observable(self, obs: Observable) -> np.ndarray:
         if obs not in Observable:
             raise ValueError(f"Invalid observable {obs}!")
 
-        if (val := getattr(self, obs)) is None:
-            raise ValueError(f"Observable {obs} is not set!")
-
-        if not isinstance(val, np.ndarray):
-            raise ValueError(f"Invalid type for observable {obs} : {type(val)}")
-
-        return val
+        return self._values[obs]
 
     def set_observables(self, obs_d: dict[Observable, np.ndarray]):
         for obs, value in obs_d.items():
             self.set_observable(obs, value)
 
     def to_dict(self) -> dict[Observable, np.ndarray]:
-        return {obs: self.get_observable(obs) for obs in Observable}
+        return dict(self._values)
 
 
 class State:
+    """Shared sensor processing, independent of physics and reward calculation.
+
+    Supply one timestamped measurement packet to update(). The resulting state
+    is ready for policy observations and rewards. Recording is an explicit,
+    separate operation after the transition reward has been calculated.
+    """
+
     def __init__(
         self,
         wheel_radius: float,
@@ -319,10 +324,16 @@ class State:
         self.mahony = Mahony()
         self._record = record
         self._history: list[np.ndarray] = []
+        self._history_indices: dict[str, int] = {}
+        self.obs = Obs({Observable.RP_PITCH: np.array([0.0])})
         self.derived_obs: dict[DerivedObs, np.ndarray] = {
-            DerivedObs.CURRENT_POS: np.array([0.0])
+            DerivedObs.CURRENT_POS: np.array([0.0]),
+            DerivedObs.CURRENT_VEL: np.array([0.0]),
         }
-        self.targets: dict[Target, np.ndarray] = {Target.TARGET_POS: np.array([0.0])}
+        self.targets: dict[Target, np.ndarray] = {
+            Target.TARGET_POS: np.array([0.0]),
+            Target.TARGET_VEL: np.array([0.0]),
+        }
         self._target_trajectory: PositionTrajectory | None = None
         self.prev_t = 0.0
 
@@ -333,11 +344,23 @@ class State:
     @target_pos.setter
     def target_pos(self, value: float):
         """Set a fixed target, replacing any active trajectory."""
+        self._set_target(Target.TARGET_POS, value)
+        self._target_trajectory = None
+
+    @property
+    def target_vel(self) -> float:
+        return float(self.targets[Target.TARGET_VEL][0])
+
+    @target_vel.setter
+    def target_vel(self, value: float):
+        """Update the signed forward-velocity command without resetting state."""
+        self._set_target(Target.TARGET_VEL, value)
+
+    def _set_target(self, key: Target, value: float):
         value = float(value)
         if not np.isfinite(value) or abs(value) > float(np.finfo(np.float32).max):
-            raise ValueError("target_pos must be finite and representable as float32")
-        self._target_trajectory = None
-        self.targets[Target.TARGET_POS] = np.array([value], dtype=np.float32)
+            raise ValueError(f"{key.value} must be finite and representable as float32")
+        self.targets[key] = np.array([value], dtype=np.float32)
 
     @property
     def target_trajectory(self) -> PositionTrajectory | None:
@@ -354,57 +377,73 @@ class State:
             position = self._target_trajectory.position_at(self.prev_t)
             self.targets[Target.TARGET_POS] = np.array([position], dtype=np.float32)
 
-    def step(self):
-        obs_t = self.obs.get_observable(Observable.OBS_TIME)[0]
-        dt = obs_t - self.prev_t
-        self.mahony.update(
-            self.obs.get_observable(Observable.ACC),
-            self.obs.get_observable(Observable.GYRO),
-            dt,
+    def _wheel_velocity(self, obs: Obs) -> np.ndarray:
+        """Signed linear velocity from mean wheel angular velocity, in m/s."""
+        return (
+            (obs.get_observable(Observable.LEFT_WHEEL_VEL)
+             + obs.get_observable(Observable.RIGHT_WHEEL_VEL))
+            / 2 * self.wheel_radius
         )
+
+    def update(self, measurements: dict[Observable, np.ndarray]) -> None:
+        """Process a new SI sensor packet, with time in episode-relative seconds.
+
+        Own a copy of the packet so a backend can reuse its sensor buffers.
+        Filtered pitch, odometry and targets advance together; rewards and
+        recording are not part of this operation.
+        """
+        obs = Obs(measurements)
+        obs_t = float(obs.get_observable(Observable.OBS_TIME)[0])
+        dt = obs_t - self.prev_t
+        if not np.isfinite(dt) or dt <= 0:
+            raise ValueError("Measurement time must be finite and strictly increasing")
+        acc = obs.get_observable(Observable.ACC)
+        gyro = obs.get_observable(Observable.GYRO)
+        wheel_velocity = self._wheel_velocity(obs)
+
+        self.mahony.update(acc, gyro, dt)
+        obs.set_observable(Observable.RP_PITCH, float(self.euler[1]))
+        # Nominal-radius wheel odometry; does not compensate for slip or yaw.
+        self.derived_obs[DerivedObs.CURRENT_VEL] = wheel_velocity
+        self.derived_obs[DerivedObs.CURRENT_POS] += wheel_velocity * dt
+        self.obs = obs
         self.prev_t = obs_t
         self._update_target()
-        self.obs.set_observable(Observable.RP_PITCH, float(self.euler[1]))
 
-        # Nominal-radius wheel odometry; does not compensate for slip or yaw.
-        self.derived_obs[DerivedObs.CURRENT_POS] += (
-            (
-                self.obs.get_observable(Observable.LEFT_WHEEL_VEL)
-                + self.obs.get_observable(Observable.RIGHT_WHEEL_VEL)
-            )
-            / 2
-            * dt
-            * self.wheel_radius
-        )
-
-    def update_action(self, action_t: float, action_dict: dict[Actions, np.ndarray]):
-        action_dict[Actions.TIME] = np.array([action_t])
-        self.action = StepAction(action_dict)
-
-    def update_rewards(self, reward_dict: dict[Observable, np.ndarray]):
-        self.reward_dict = reward_dict
-        if self._record:
-            arr, _ = self.get_state_arr()
-            self._history.append(arr.copy())
-
-    def update_obs(self, obs_dict: dict[Observable, np.ndarray]):
-        self.obs = Obs(obs_dict)
-
-    def get_state_dict(self) -> dict[StateVarKey | Actions, np.ndarray]:
-        return {
+    def snapshot(self) -> dict[StateVarKey, np.ndarray]:
+        """Return owned policy-state arrays, without action/reward bookkeeping."""
+        data: dict[StateVarKey, np.ndarray] = {
             **self.obs.to_dict(),
-            **self.action.to_dict(),
-            **self.reward_dict,
             **self.derived_obs,
             **self.targets,
         }
+        return {key: value.astype(np.float32, copy=True) for key, value in data.items()}
 
-    def get_state_arr(self) -> tuple[np.ndarray, dict[str, int]]:
-        d = self.get_state_dict()
+    def record_transition(
+        self,
+        action_t: float,
+        action: dict[Actions, np.ndarray],
+        rewards: dict[Observable, float],
+    ) -> None:
+        """Record the current post-action state and its incoming action/reward.
+
+        This does not advance state or mutate the caller's action dictionary.
+        No transition is recorded for reset().
+        """
+        if not self._record:
+            return
+        data: dict[StateVarKey | Actions, np.ndarray] = {
+            **self.obs.to_dict(),
+            **self.derived_obs,
+            **self.targets,
+            **action,
+            Actions.TIME: np.array([action_t]),
+            **{key: np.array([value]) for key, value in rewards.items()},
+        }
         arrays = []
         keys = []
-        for k in sorted(d.keys()):
-            arr_ = d[k]
+        for k in sorted(data.keys()):
+            arr_ = data[k]
             if not isinstance(arr_, np.ndarray):
                 raise ValueError(f"Invalid type for state variable {k} : {type(arr_)}")
 
@@ -423,7 +462,10 @@ class State:
             keys += keys_
 
         keys_d = {k: i for i, k in enumerate(keys)}
-        return np.concatenate(arrays), keys_d
+        if self._history and keys_d != self._history_indices:
+            raise ValueError("Recorded fields must stay consistent within an episode")
+        self._history_indices = keys_d
+        self._history.append(np.concatenate(arrays))
 
     @property
     def history(self) -> tuple[np.ndarray, dict[str, int]]:
@@ -432,23 +474,35 @@ class State:
         if not self._history:
             raise KeyError("History is empty.")
 
-        history = np.vstack(self._history)
-        idx_d = self.get_state_arr()[1]
-
-        return history, idx_d
+        return np.vstack(self._history), self._history_indices.copy()
 
     @property
     def euler(self) -> np.ndarray:
         """Filtered Euler angles in radians (Mahony's public API uses degrees)."""
         return np.deg2rad(self.mahony.eul)
 
-    def reset(self):
+    def reset(self, measurements: dict[Observable, np.ndarray] | None = None):
+        """Initialize from a sensor packet, without integrating a time interval."""
+        obs = Obs(measurements or {})
+        initial_time = (
+            float(obs.get_observable(Observable.OBS_TIME)[0]) if measurements else 0.0
+        )
+        if not np.isfinite(initial_time) or initial_time < 0:
+            raise ValueError("Initial measurement time must be finite and nonnegative")
         self.mahony.reset()
-        self.prev_t = 0.0
+        obs.set_observable(Observable.RP_PITCH, float(self.euler[1]))
+        self.obs = obs
+        self.prev_t = initial_time
         self._update_target()
-        self.derived_obs = {DerivedObs.CURRENT_POS: np.array([0.0])}
+        self.derived_obs = {
+            DerivedObs.CURRENT_POS: np.array([0.0]),
+            DerivedObs.CURRENT_VEL: (
+                self._wheel_velocity(obs) if measurements else np.array([0.0])
+            ),
+        }
 
         self._history = []
+        self._history_indices = {}
 
 
 class RPHead:
