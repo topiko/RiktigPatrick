@@ -34,10 +34,40 @@ simulator/real-robot adapter boundary, but its real-robot implementation is a st
 and these adapters still need alignment with the current training API and SI
 units. The hardware integration remains a future update.
 
+### State-update flow
+
+The simulator owns one shared `State` object. Sensor acquisition returns a
+dictionary of SI measurement arrays, including `env/obs_time` in episode-relative
+seconds. `State` keeps its filter, odometry and targets internally.
+
+The simulation step explicitly performs:
+
+```python
+# After applying the action and advancing physics:
+measurements = self._read_sensors()             # Acquisition only
+self.state.update(measurements)                # Filter, odometry, targets
+terminated = self.terminated
+rewards = self._calculate_rewards(self.state, terminated=terminated)
+self.state.record_transition(action_time, action, rewards)
+observation = self._get_obs(rewards)            # Snapshot plus reward diagnostics
+```
+
+`State.update()` copies the measurements and processes them together. There is
+no separate "store sensors, then remember to update the filter" call sequence.
+It requires a strictly newer timestamp. `State.reset(initial_measurements)`
+initializes the state without advancing the filter or recording a transition.
+
+`State.snapshot()` returns owned arrays for policy input. Rewards are added by
+the Gymnasium adapter for diagnostics; they are not stored as sensor readings.
+Hardware can feed its measurements to the same `State.update()` API, without
+providing simulation-only ground-truth pitch or training rewards.
+
 ## Maintained path
 
 The active entry point is **`src/sim/train_agent.py`**. Single-environment and
 batched training use this same code path.
+
+See [fixes.md](fixes.md) for the cleanup findings and before/after pseudocode.
 
 | File | Purpose |
 |------|---------|
@@ -76,7 +106,7 @@ when resolving them; the lockfile is not currently tracked in this repository.
 ## Training
 
 ```bash
-# Default: 16 synchronously stepped environments
+# Default: balance at zero forward velocity, 16 synchronously stepped environments
 uv run python -m sim.train_agent
 
 # One environment, same training loop
@@ -96,25 +126,96 @@ Training runs until interrupted unless `train.max_iterations` is set.
 Each iteration collects one episode per environment, with completed episodes
 masked out while the remaining environments finish.
 
-### Position targets
+### Tracking tasks
 
-Positions are in meters along the robot's fore/aft travel direction, relative
-to the episode origin. The default target is zero (stay near the starting point).
+The default task is **zero forward velocity**: balance and stop moving, without
+requiring a return to the episode's starting position. Select the objective with
+`env.tracking_mode`:
+
+| Mode | Policy tracking inputs | Tracking reward |
+|------|------------------------|-----------------|
+| `velocity` (default) | `target/vel`, `derived/vel` | Absolute velocity error in m/s |
+| `position` | `target/pos`, `derived/pos` | Absolute position error in meters |
+| `none` | No tracking inputs | No position/velocity-reference penalty |
+
+All modes retain the balancing and head-pitch terms. Position and `none` modes
+also retain the configured absolute wheel-speed penalty. Velocity mode disables
+that penalty, since penalizing motion itself would oppose a nonzero command.
+
+```bash
+# Zero-velocity balancing (the default)
+uv run python -m sim.train_agent
+
+# Zero-position holding: also return toward the episode's starting position
+uv run python -m sim.train_agent --config-name position_hold
+
+# Disable setpoint tracking; retain the other balancing/motion penalties
+uv run python -m sim.train_agent env.tracking_mode=none
+
+# Request 0.1 m/s forward in all environments and evaluation
+uv run python -m sim.train_agent env.target_vel=0.1
+
+# Three constant training commands: -0.1, 0.0, +0.1 m/s; evaluate at zero velocity
+uv run python -m sim.train_agent --config-name velocity_example
+```
+
+`train.target_velocities` accepts one signed forward-velocity command per training
+environment. `env.target_vel` is the default command and is used for evaluation.
+The values persist across steps and resets and may be changed while running.
+
+Positions use signed fore/aft travel distance relative to the episode origin.
+The fixed position target remains zero unless overridden:
 
 ```bash
 # Same fixed target for all training environments and evaluation
-uv run python -m sim.train_agent env.target_pos=0.2
+uv run python -m sim.train_agent env.tracking_mode=position env.target_pos=0.2
 
 # Different fixed targets for each training environment
-uv run python -m sim.train_agent env.n_parallel=3 \
+uv run python -m sim.train_agent env.tracking_mode=position env.n_parallel=3 \
   'train.target_positions=[-0.2,0.0,0.2]'
 ```
 
 `train.target_positions` must contain exactly one finite value per environment.
-It overrides `env.target_pos` for training; evaluation uses `env.target_pos`.
+In position mode it overrides `env.target_pos` for training; evaluation uses the
+environment's default position/trajectory settings.
 The rollout's `add_targets()` helper updates both environment state and batched
 policy observations. Targets persist across steps and resets; odometry resets
 to zero at each episode start.
+
+### Low-level velocity control and an outer controller
+
+The intended control hierarchy is:
+
+```text
+position controller or RC command
+    -> desired forward velocity in m/s
+    -> balancing policy
+    -> wheel/head actuator commands
+```
+
+For example, an outer position controller could start with:
+
+```text
+velocity_command = clamp(Kp * (desired_position - measured_position), speed_limits)
+state.target_vel = velocity_command
+action = policy(state.snapshot())
+```
+
+The low-level velocity policy has no position-target or odometry-position inputs
+by default. An RC source can supply the velocity command directly. For batched
+simulations, `add_targets(obs, env, target_velocities=[...])` updates both the
+shared states and the already-returned policy observation dictionary, without
+resetting filters or episode clocks.
+
+Training only at zero velocity establishes balancing/stopping. General command
+following needs varied commands and command changes during training. The example
+configuration varies constant commands across environments; it does not yet
+schedule velocity-command changes within episodes. RC transport and the outer
+controller are not implemented here. Turning would need a separate yaw-rate or
+heading command.
+
+Changing tracking mode changes the policy input fields, so train a matching
+policy. Restoring a model with incompatible inputs raises an error.
 
 ### Time-varying position trajectories
 
@@ -128,12 +229,14 @@ uv run python -m sim.train_agent --config-name trajectory_example
 
 # One trajectory shared by all training environments and evaluation
 uv run python -m sim.train_agent \
-  'env.target_trajectory=[[0,0],[2,0.2],[4,0]]'
+  env.tracking_mode=position 'env.target_trajectory=[[0,0],[2,0.2],[4,0]]'
 ```
 
 `train.target_trajectories` accepts one waypoint list per training environment.
-Use it instead of `train.target_positions`; supplying both is an error.
-Either training override replaces the environment's default target settings.
+Select position mode for position targets/trajectories, and velocity mode for
+velocity targets. Choose one of `train.target_positions`,
+`train.target_trajectories`, or `train.target_velocities`; combining batch
+override types is an error. Each override replaces the corresponding default.
 Evaluation uses `env.target_trajectory` when set, otherwise `env.target_pos`.
 
 The shared `State` samples its trajectory from observation time, so the same
@@ -143,8 +246,8 @@ target at *t + dt*. Resetting restarts the trajectory at zero. Replacing a
 trajectory mid-episode samples it at the current episode time; setting a fixed
 target disables it. The batched `add_targets()` helper handles either target form.
 
-This supplies position references; velocity-target inputs and a policy proven to
-track trajectories still require further work.
+This supplies position references; a policy proven to track trajectories still
+requires further work.
 
 ### Plots, videos and checkpoints
 
@@ -178,9 +281,14 @@ The active simulation and agent use SI units:
 | `env/obs_time` | Episode time | s, 1 |
 | `target/pos` | Current position reference | m, 1 |
 | `derived/pos` | Wheel odometry | m, 1 |
+| `target/vel` | Desired signed forward velocity | m/s, 1 |
+| `derived/vel` | Signed forward velocity from wheel odometry | m/s, 1 |
 
-The default policy uses all of the above except ground-truth pitch: **14 scalar
-input channels**. Each input has a learned linear encoder. Their outputs feed
+`policy.inputs` lists eight common sensor/time fields (12 scalar channels).
+`get_policy_inputs()` appends the selected task's two fields: velocity or position
+tracking therefore uses **14 scalar input channels**, while `none` uses 12.
+Unused target/state fields remain available in environment observations and plots.
+Each policy input has a learned linear encoder. Their outputs feed
 a shared 64-unit GRU, layer normalization, categorical action heads and a value
 head. Continuous action distributions are not implemented.
 
@@ -196,26 +304,36 @@ setpoint. Head velocity commands are limited to ±1 rad/s, with integrated
 position setpoints limited to ±1 rad. Wheel acceleration commands are converted
 to velocity commands using the measured wheel velocity and `env.step_time`.
 
-Odometry integrates mean wheel angular velocity times the nominal wheel radius
-(0.05 m). It estimates signed travel distance, without correcting for slip or yaw.
+Odometry velocity is mean wheel angular velocity times the nominal wheel radius
+(0.05 m), in m/s. Integrating it gives signed travel distance. Neither estimate
+corrects for slip or yaw.
 
 ## Rewards and episode limits
 
 Rewards are computed from the newly observed state after each action:
 
 ```text
-reward = total_scale * (
+balancing_terms = (
     step_scale
     + fell_scale * fell
     + pitch_scale * abs(pitch)
-    + wheel_vel_scale * mean(abs(wheel_velocities))
     + head_pitch_scale * abs(head_pitch)
-    + position_scale * abs(current_pos - target_pos)
 )
+wheel_penalty = wheel_vel_scale * mean(abs(wheel_velocities))
+
+velocity mode: tracking_terms = velocity_scale * abs(current_vel - target_vel)
+position mode: tracking_terms = position_scale * abs(current_pos - target_pos)
+                               + wheel_penalty
+none mode:     tracking_terms = wheel_penalty
+
+reward = total_scale * (balancing_terms + tracking_terms)
 ```
 
 Scales are the corresponding `reward/*` entries in `config/rlrp.yaml`.
-The position penalty is `reward/pos`. Pitch uses radians; its default coefficient
+The position and velocity penalties are `reward/pos` and `reward/vel`; only the
+selected mode's error term is active. The default velocity coefficient is -4 per
+m/s, matching approximately the former zero-speed penalty for straight travel
+with a 0.05 m wheel radius. Pitch uses radians; its default coefficient
 preserves approximately the former per-degree penalty strength.
 
 Episodes terminate beyond **20° absolute body pitch** and truncate at 20 seconds
@@ -238,4 +356,8 @@ uv run python -m unittest discover -s tests -v
 
 These checks cover units, current-state rewards, fixed targets, reset behavior,
 trajectory interpolation and timing, unequal episode lengths, reward/return
-alignment and gradient flow (including a detached policy baseline).
+alignment and gradient flow (including a detached policy baseline). They also
+check sensor-packet replay through shared State, acquisition/reward side effects,
+explicit recording, and measurement-buffer ownership.
+Tracking checks cover task-specific policy inputs, live batched velocity commands,
+disabled tracking, and the absence of a conflicting motion penalty in velocity mode.
