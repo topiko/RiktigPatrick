@@ -22,6 +22,8 @@ reward:
   reward/fell: 0.0
   reward/wheel_vel: -0.2
   reward/head_pitch: -0.5
+  reward/camera_pitch: -0.5  # true world elevation error, active with head_tracking
+  reward/head_yaw: -0.25  # neck-relative yaw error
   reward/pos: -1.0  # penalty per meter of absolute position error
   reward/vel: -4.0  # penalty per m/s of absolute velocity error
   reward/total: 1.0
@@ -33,6 +35,8 @@ train:
   target_positions: null  # optional list of n_parallel fixed targets, in meters
   target_trajectories: null  # optional per-env lists of [time, position] waypoints
   target_velocities: null  # optional list of n_parallel velocity commands, in m/s
+  head_targets: null  # optional per-env [world camera elevation, neck yaw], rad
+  head_trajectories: null  # optional per-env [time, elevation, yaw] waypoints
 
 env:
   step_time: 0.01  # seconds
@@ -43,6 +47,10 @@ env:
   target_pos: 0.0  # default fixed position target, meters from episode origin
   target_trajectory: null  # optional default trajectory for training and evaluation
   target_vel: 0.0  # default low-level command: balance and stop, m/s
+  head_tracking: true
+  head_target: [0.0, 0.0]  # horizontal gaze, forward neck-relative yaw, radians
+  head_trajectory: null
+  camera_view: both  # external, head, or both (overview left, head camera right)
 
   # Relative standard deviation of body/head masses and wheel diameter
   random_scale: 0.01
@@ -50,6 +58,7 @@ env:
   # All units are SI (International System of Units)
   max_wheel_vel: 10.0  # rad/s - maximum wheel velocity
   max_wheel_acc: 500.0  # rad/s² - maximum wheel acceleration
+  max_head_vel: 1.0  # rad/s; prototype hardware speed has not been measured
 
 policy:
   restore_id: null #m-29426a56db26487faa3adad22b42489a
@@ -60,7 +69,11 @@ policy:
 
     act/head_pitch_vel:
       type: discrete
-      bins: [-0.2, -0.1, 0, 0.1, 0.2]  # rad/s - head pitch velocity
+      bins: [-1.0, -0.5, -0.2, 0, 0.2, 0.5, 1.0]  # positive looks up, rad/s
+
+    act/head_turn_vel:
+      type: discrete
+      bins: [-1.0, -0.5, -0.2, 0, 0.2, 0.5, 1.0]  # positive turns left, rad/s
 
   # Shared sensor inputs; the trainer appends the selected tracking-mode inputs.
   inputs:

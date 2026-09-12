@@ -1,0 +1,20 @@
+defaults:
+  - rlrp
+  - _self_
+
+env:
+  n_parallel: 2
+  head_tracking: true
+  camera_view: both
+  # [time (s), world camera elevation (rad), neck yaw (rad)]
+  head_trajectory:
+    - [0.0, 0.0, 0.0]
+    - [2.0, 0.0872664626, 0.1745329252]
+    - [4.0, -0.0872664626, -0.1745329252]
+    - [6.0, 0.0, 0.0]
+
+train:
+  # Independent head references while both environments target zero forward speed.
+  head_trajectories:
+    - [[0, 0, 0], [2, 0.0872664626, 0.1745329252], [4, 0, 0]]
+    - [[0, 0, 0], [2, -0.0872664626, -0.1745329252], [4, 0, 0]]

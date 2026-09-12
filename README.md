@@ -79,6 +79,7 @@ See [fixes.md](fixes.md) for the cleanup findings and before/after pseudocode.
 | `src/nn_ctrl/nns.py` | Recurrent neural-network agent |
 | `src/riktigpatric/patrick.py` | Shared state/action definitions, filter and odometry state |
 | `src/riktigpatric/trajectory.py` | Backend-independent position waypoint interpolation |
+| `src/riktigpatric/geometry.py` | CAD dimensions and shared camera forward kinematics |
 | `src/riktigpatric/servo.py` | Hardware head-servo control |
 | `src/controller/` | Backend interface and adapter scaffolding |
 | `src/relay/conversions.py` | Shared hardware command and sensor packet format |
@@ -128,7 +129,8 @@ masked out while the remaining environments finish.
 
 ### Tracking tasks
 
-The default task is **zero forward velocity**: balance and stop moving, without
+The default task is **zero forward velocity with horizontal, forward-facing gaze**:
+balance and stop moving, without
 requiring a return to the episode's starting position. Select the objective with
 `env.tracking_mode`:
 
@@ -138,7 +140,7 @@ requiring a return to the episode's starting position. Select the objective with
 | `position` | `target/pos`, `derived/pos` | Absolute position error in meters |
 | `none` | No tracking inputs | No position/velocity-reference penalty |
 
-All modes retain the balancing and head-pitch terms. Position and `none` modes
+All locomotion modes retain balancing and the selected head objective. Position and `none` modes
 also retain the configured absolute wheel-speed penalty. Velocity mode disables
 that penalty, since penalizing motion itself would oppose a nonzero command.
 
@@ -249,6 +251,60 @@ target disables it. The batched `add_targets()` helper handles either target for
 This supplies position references; a policy proven to track trajectories still
 requires further work.
 
+### Head/camera tracking
+
+Head tracking is independent of the locomotion mode and enabled by default:
+
+- `env.head_target: [0, 0]` requests **world camera elevation** and **neck-relative
+  yaw**, in radians. Zero means horizontal gaze and forward yaw. Positive elevation
+  looks up; positive yaw turns left.
+- `env.head_trajectory` supplies `[time_seconds, camera_elevation, neck_yaw]`
+  waypoints for the default training/evaluation reference.
+- `train.head_targets` supplies one fixed angle pair per training environment;
+  `train.head_trajectories` supplies one waypoint list per environment. Choose one
+  of these two overrides. They coexist with position/velocity overrides.
+- `env.head_tracking=false` disables head-reference policy inputs/rewards and
+  restores the older neutral-joint-pitch penalty. Configured head action heads
+  remain available to the policy.
+
+```bash
+# Default: balance at zero speed, camera horizontal, neck yaw forward
+uv run python -m sim.train_agent
+
+# Slow, opposite head trajectories in two environments
+uv run python -m sim.train_agent --config-name head_tracking
+
+# Fixed camera elevation 0.1 rad and neck yaw 0.2 rad
+uv run python -m sim.train_agent 'env.head_target=[0.1,0.2]'
+
+# Locomotion-only reference tracking
+uv run python -m sim.train_agent env.head_tracking=false
+```
+
+The shared `State` computes estimated camera elevation from the body attitude
+estimate and measured head joints. The rotation chain includes the tilted neck
+yaw axis; it does not simply add pitch angles. **The NN chooses all wheel and head
+commands.** There is no inverse-kinematics controller or body-pitch compensation
+command applied outside the NN.
+
+With head tracking enabled, the old `abs(head_joint_pitch)` penalty is disabled.
+Instead, `reward/camera_pitch` penalizes actual MuJoCo camera elevation error and
+`reward/head_yaw` penalizes neck-joint yaw error. The actual camera pose is used
+for scoring and plots; the NN receives the estimated pose, not simulation truth.
+
+Head references are sampled at each observation time and restart on episode reset.
+`add_head_targets()` refreshes batched references without resetting filters or
+changing locomotion targets. Fixed references replace head trajectories. Yaw
+interpolation does not wrap because the joint is mechanically limited.
+
+Camera elevation references must be within ±90° and yaw within ±40°; a valid
+reference is not necessarily reachable at every body orientation. Start with
+level gaze and slow trajectories. Joint/rate limits constrain actuator commands;
+the learned policy must coordinate head motion with balancing.
+
+See [geometry and frame conventions](docs/geometry.md) for CAD-derived dimensions,
+the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assumptions.
+
 ### Plots, videos and checkpoints
 
 - `logging.plot_freq`: evaluate and save plots/videos every N iterations,
@@ -260,6 +316,9 @@ requires further work.
 - Tracking plots follow the selected mode: position, velocity, or no tracking
   plot for `none`. Inactive reward terms are omitted from plots; CSV traces keep
   all observation and reward fields.
+- Head tracking adds target/estimated/actual camera elevation and target/measured
+  neck-yaw plots. `env.camera_view` selects `external`, `head`, or `both` (default:
+  overview left, head camera right). Paired views use 320×240 pixels each.
 - For headless rendering on systems with EGL support, prefix the command with
   `MUJOCO_GL=egl MPLBACKEND=Agg`.
 - MLflow is disabled by default. Enable it with
@@ -270,6 +329,8 @@ requires further work.
   model checkpoints are not saved.
 - Training metric names are grouped by prefix: `losses/{policy,value,total}`,
   `returns/{mean,min,max,std}`, and `episodes/length/{mean,min,max}`.
+- Head evaluations also log `evaluation/head/{camera_pitch_mae,neck_yaw_mae,
+  camera_estimation_mae}` in radians, over the post-action observations.
 - `policy.restore_id` accepts an MLflow **logged model ID** to restore an agent.
   Optimizer state and iteration count start fresh.
 
@@ -300,9 +361,11 @@ The active simulation and agent use SI units:
 | State variable | Meaning | Units / channels |
 |----------------|---------|------------------|
 | `filter/rp_pitch` | Filtered body pitch | rad, 1 |
+| `filter/rp_roll` | Filtered body roll | rad, 1 |
 | `simul/rp_pitch` | Ground-truth body pitch, for diagnostics | rad, 1 |
 | `sens/left_wheel_vel`, `sens/right_wheel_vel` | Wheel angular velocities | rad/s, 1 each |
 | `sens/head_pitch`, `sens/head_turn` | Head joint angles | rad, 1 each |
+| `sens/head_pitch_vel`, `sens/head_turn_vel` | Head joint angular velocities | rad/s, 1 each |
 | `sens/gyro` | Gyroscope | rad/s, 3 |
 | `sens/acc` | Accelerometer | m/s², 3 |
 | `env/obs_time` | Episode time | s, 1 |
@@ -310,10 +373,16 @@ The active simulation and agent use SI units:
 | `derived/pos` | Wheel odometry | m, 1 |
 | `target/vel` | Desired signed forward velocity | m/s, 1 |
 | `derived/vel` | Signed forward velocity from wheel odometry | m/s, 1 |
+| `target/camera_pitch_world` | Desired optical-axis elevation above horizon | rad, 1 |
+| `target/head_yaw_neck` | Desired neck-relative yaw | rad, 1 |
+| `derived/camera_pitch_world` | Camera elevation from estimated body attitude + joints | rad, 1 |
+| `simul/camera_pitch_world` | Actual camera elevation, scoring/diagnostics only | rad, 1 |
 
 `policy.inputs` lists eight common sensor/time fields (12 scalar channels).
 `get_policy_inputs()` appends the selected task's two fields: velocity or position
-tracking therefore uses **14 scalar input channels**, while `none` uses 12.
+tracking uses 14 scalar input channels, while `none` uses 12. Head tracking adds
+six channels (two targets, estimated camera elevation, roll, two joint rates),
+giving **20 default input channels**. Simulation truth is not added to the NN.
 Unused target/state fields remain available in environment observations and plots.
 Each policy input has a learned linear encoder. Their outputs feed
 a shared 64-unit GRU, layer normalization, categorical action heads and a value
@@ -322,13 +391,14 @@ head. Continuous action distributions are not implemented.
 Default policy actions:
 - `act/accelerate_both_wheels`: discrete wheel accelerations in rad/s².
 - `act/head_pitch_vel`: discrete head pitch velocities in rad/s.
+- `act/head_turn_vel`: discrete neck-relative yaw velocities in rad/s.
 
-Head turning and individual wheel velocity commands are supported by the
-environment but are not selected in the default policy configuration.
+Individual wheel velocity commands are also supported by the environment.
 
 MuJoCo `intvelocity` actuators integrate commanded velocity into a position
-setpoint. Head velocity commands are limited to ±1 rad/s, with integrated
-position setpoints limited to ±1 rad. Wheel acceleration commands are converted
+setpoint. Head velocity commands are limited by `env.max_head_vel` (default ±1 rad/s).
+Integrated position setpoints and joint bounds use −28°/+50° pitch and ±40° yaw.
+Wheel acceleration commands are converted
 to velocity commands using the measured wheel velocity and `env.step_time`.
 
 Odometry velocity is mean wheel angular velocity times the nominal wheel radius
@@ -344,7 +414,6 @@ balancing_terms = (
     step_scale
     + fell_scale * fell
     + pitch_scale * abs(pitch)
-    + head_pitch_scale * abs(head_pitch)
 )
 wheel_penalty = wheel_vel_scale * mean(abs(wheel_velocities))
 
@@ -353,7 +422,11 @@ position mode: tracking_terms = position_scale * abs(current_pos - target_pos)
                                + wheel_penalty
 none mode:     tracking_terms = wheel_penalty
 
-reward = total_scale * (balancing_terms + tracking_terms)
+head tracking: head_terms = camera_pitch_scale * abs(true_camera_pitch - target_pitch)
+                           + head_yaw_scale * abs(neck_yaw - target_neck_yaw)
+otherwise:     head_terms = head_pitch_scale * abs(head_joint_pitch)
+
+reward = total_scale * (balancing_terms + tracking_terms + head_terms)
 ```
 
 Scales are the corresponding `reward/*` entries in `config/rlrp.yaml`.
@@ -374,6 +447,8 @@ variation. Initial wheel velocity is not randomized.
 
 Older checkpoints saw degree-valued pitch and incorrectly scaled odometry;
 retrain them for the corrected observations and reward timing.
+The CAD-derived model also changes body/head proportions, neck-pitch sign and
+head action/input fields. The current camera-tracking setup needs a fresh policy.
 
 ## Checks
 
@@ -388,3 +463,5 @@ check sensor-packet replay through shared State, acquisition/reward side effects
 explicit recording, and measurement-buffer ownership.
 Tracking checks cover task-specific policy inputs, live batched velocity commands,
 disabled tracking, and the absence of a conflicting motion penalty in velocity mode.
+Head checks compare shared rotations with MuJoCo, test neck-yaw coupling, ensure
+only the NN commands actuators, and verify head-reference timing and reward inputs.

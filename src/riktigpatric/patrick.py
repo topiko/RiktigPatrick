@@ -12,9 +12,15 @@ import numpy as np
 import pandas as pd
 
 from filters.mahony import Mahony
+from filters.qutils import as_rotation_matrix
 from relay.conversions import make_ctrl
+from riktigpatric.geometry import camera_elevation, camera_rotation
 from riktigpatric.servo import Servo
-from riktigpatric.trajectory import PositionTrajectory
+from riktigpatric.trajectory import (
+    HeadTrajectory,
+    PositionTrajectory,
+    validate_head_target,
+)
 
 LOG = logging.getLogger("rp_logger")
 G = 9.81
@@ -128,6 +134,8 @@ class StepAction:
 class Target(str, Enum):
     TARGET_POS = "target/pos"  # fore/aft distance from episode origin, meters
     TARGET_VEL = "target/vel"  # signed fore/aft velocity, m/s
+    CAMERA_PITCH_WORLD = "target/camera_pitch_world"  # elevation, positive up, rad
+    HEAD_YAW_NECK = "target/head_yaw_neck"  # local joint angle, positive left, rad
 
     def dim(self) -> int:
         """Return the dimension (number of channels) for this target.
@@ -135,7 +143,10 @@ class Target(str, Enum):
         Returns:
             Number of channels (1 for scalars, 3 for vectors)
         """
-        if self in {Target.TARGET_POS, Target.TARGET_VEL}:
+        if self in {
+            Target.TARGET_POS, Target.TARGET_VEL,
+            Target.CAMERA_PITCH_WORLD, Target.HEAD_YAW_NECK,
+        }:
             return 1
         raise ValueError(f"Unknown target {self}!")
 
@@ -163,6 +174,7 @@ class Target(str, Enum):
 class DerivedObs(str, Enum):
     CURRENT_POS = "derived/pos"  # fore/aft wheel odometry, meters
     CURRENT_VEL = "derived/vel"  # signed wheel-odometry velocity, m/s
+    CAMERA_PITCH_WORLD = "derived/camera_pitch_world"  # estimated elevation, rad
 
     def dim(self) -> int:
         """Return the dimension (number of channels) for this derived observable.
@@ -170,7 +182,11 @@ class DerivedObs(str, Enum):
         Returns:
             Number of channels (1 for scalars, 3 for vectors)
         """
-        if self in {DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL}:
+        if self in {
+            DerivedObs.CURRENT_POS,
+            DerivedObs.CURRENT_VEL,
+            DerivedObs.CAMERA_PITCH_WORLD,
+        }:
             return 1
         raise ValueError(f"Unknown derived observable {self}!")
 
@@ -201,10 +217,14 @@ class Observable(str, Enum):
     GYRO = "sens/gyro"
     HEAD_PITCH = "sens/head_pitch"
     HEAD_TURN = "sens/head_turn"
+    HEAD_PITCH_VEL = "sens/head_pitch_vel"
+    HEAD_TURN_VEL = "sens/head_turn_vel"
     LEFT_WHEEL_VEL = "sens/left_wheel_vel"
     RIGHT_WHEEL_VEL = "sens/right_wheel_vel"
     RP_PITCH = "filter/rp_pitch"
+    RP_ROLL = "filter/rp_roll"
     TRUE_PITCH = "simul/rp_pitch"
+    TRUE_CAMERA_PITCH = "simul/camera_pitch_world"
     OBS_TIME = "env/obs_time"
 
     REWARD_STEP = "reward/step"
@@ -212,6 +232,8 @@ class Observable(str, Enum):
     REWARD_FELL = "reward/fell"
     REWARD_WHEEL_VEL = "reward/wheel_vel"
     REWARD_HEAD_PITCH = "reward/head_pitch"
+    REWARD_CAMERA_PITCH = "reward/camera_pitch"
+    REWARD_HEAD_YAW = "reward/head_yaw"
     REWARD_POS = "reward/pos"
     REWARD_VEL = "reward/vel"
     REWARD_TOTAL = "reward/total"
@@ -242,13 +264,19 @@ class Observable(str, Enum):
         Returns:
             Number of channels (1 for scalars, 3 for vectors)
         """
+        if self.value.startswith("reward/"):
+            return 1
         if self in {
             Observable.HEAD_PITCH,
             Observable.HEAD_TURN,
+            Observable.HEAD_PITCH_VEL,
+            Observable.HEAD_TURN_VEL,
             Observable.LEFT_WHEEL_VEL,
             Observable.RIGHT_WHEEL_VEL,
             Observable.RP_PITCH,
+            Observable.RP_ROLL,
             Observable.TRUE_PITCH,
+            Observable.TRUE_CAMERA_PITCH,
             Observable.OBS_TIME,
         }:
             return 1
@@ -325,7 +353,9 @@ class State:
         self._record = record
         self._history: list[np.ndarray] = []
         self._history_indices: dict[str, int] = {}
-        self.obs = Obs({Observable.RP_PITCH: np.array([0.0])})
+        self.obs = Obs({
+            Observable.RP_PITCH: np.array([0.0]), Observable.RP_ROLL: np.array([0.0])
+        })
         self.derived_obs: dict[DerivedObs, np.ndarray] = {
             DerivedObs.CURRENT_POS: np.array([0.0]),
             DerivedObs.CURRENT_VEL: np.array([0.0]),
@@ -333,8 +363,11 @@ class State:
         self.targets: dict[Target, np.ndarray] = {
             Target.TARGET_POS: np.array([0.0]),
             Target.TARGET_VEL: np.array([0.0]),
+            Target.CAMERA_PITCH_WORLD: np.array([0.0]),
+            Target.HEAD_YAW_NECK: np.array([0.0]),
         }
         self._target_trajectory: PositionTrajectory | None = None
+        self._head_trajectory: HeadTrajectory | None = None
         self.prev_t = 0.0
 
     @property
@@ -372,10 +405,54 @@ class State:
         self._target_trajectory = trajectory
         self._update_target()
 
+    @property
+    def head_target(self) -> np.ndarray:
+        """[world camera elevation, neck yaw], in radians; never actuator commands."""
+        return np.array([
+            self.targets[Target.CAMERA_PITCH_WORLD][0],
+            self.targets[Target.HEAD_YAW_NECK][0],
+        ], dtype=np.float32)
+
+    @head_target.setter
+    def head_target(self, angles):
+        values = validate_head_target(angles)
+        self._head_trajectory = None
+        self._store_head_target(values)
+
+    def _store_head_target(self, angles: np.ndarray):
+        keys = (Target.CAMERA_PITCH_WORLD, Target.HEAD_YAW_NECK)
+        for key, value in zip(keys, angles):
+            self.targets[key] = np.array([value], dtype=np.float32)
+
+    @property
+    def head_trajectory(self) -> HeadTrajectory | None:
+        return self._head_trajectory
+
+    @head_trajectory.setter
+    def head_trajectory(self, trajectory: HeadTrajectory | None):
+        self._head_trajectory = trajectory
+        self._update_target()
+
     def _update_target(self):
         if self._target_trajectory is not None:
             position = self._target_trajectory.position_at(self.prev_t)
             self.targets[Target.TARGET_POS] = np.array([position], dtype=np.float32)
+        if self._head_trajectory is not None:
+            self._store_head_target(self._head_trajectory.angles_at(self.prev_t))
+
+    def _update_camera_pose(self):
+        measurements = self.obs.to_dict()
+        if not {Observable.HEAD_PITCH, Observable.HEAD_TURN} <= measurements.keys():
+            self.derived_obs.pop(DerivedObs.CAMERA_PITCH_WORLD, None)
+            return
+        rotation = camera_rotation(
+            as_rotation_matrix(self.mahony.qhat),
+            float(measurements[Observable.HEAD_PITCH][0]),
+            float(measurements[Observable.HEAD_TURN][0]),
+        )
+        self.derived_obs[DerivedObs.CAMERA_PITCH_WORLD] = np.array([
+            camera_elevation(rotation)
+        ])
 
     def _wheel_velocity(self, obs: Obs) -> np.ndarray:
         """Signed linear velocity from mean wheel angular velocity, in m/s."""
@@ -403,10 +480,12 @@ class State:
 
         self.mahony.update(acc, gyro, dt)
         obs.set_observable(Observable.RP_PITCH, float(self.euler[1]))
+        obs.set_observable(Observable.RP_ROLL, float(self.euler[0]))
         # Nominal-radius wheel odometry; does not compensate for slip or yaw.
         self.derived_obs[DerivedObs.CURRENT_VEL] = wheel_velocity
         self.derived_obs[DerivedObs.CURRENT_POS] += wheel_velocity * dt
         self.obs = obs
+        self._update_camera_pose()
         self.prev_t = obs_t
         self._update_target()
 
@@ -491,6 +570,7 @@ class State:
             raise ValueError("Initial measurement time must be finite and nonnegative")
         self.mahony.reset()
         obs.set_observable(Observable.RP_PITCH, float(self.euler[1]))
+        obs.set_observable(Observable.RP_ROLL, float(self.euler[0]))
         self.obs = obs
         self.prev_t = initial_time
         self._update_target()
@@ -500,6 +580,7 @@ class State:
                 self._wheel_velocity(obs) if measurements else np.array([0.0])
             ),
         }
+        self._update_camera_pose()
 
         self._history = []
         self._history_indices = {}

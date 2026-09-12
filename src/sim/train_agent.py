@@ -23,7 +23,11 @@ from riktigpatric.patrick import (
     StateVarKey,
     Target,
 )
-from riktigpatric.trajectory import PositionTrajectory
+from riktigpatric.trajectory import (
+    HeadTrajectory,
+    PositionTrajectory,
+    validate_head_target,
+)
 from sim.episode_io import save_episode_csv
 from sim.plot_utils import plot_episode
 from sim.utils import (
@@ -69,12 +73,18 @@ TRACKING_INPUTS = {
     "none": (),
 }
 
+HEAD_INPUTS = (
+    Target.CAMERA_PITCH_WORLD, Target.HEAD_YAW_NECK, DerivedObs.CAMERA_PITCH_WORLD,
+    Observable.RP_ROLL, Observable.HEAD_PITCH_VEL, Observable.HEAD_TURN_VEL,
+)
+
 
 def get_policy_inputs(cfg: DictConfig) -> list[str]:
     """Append task inputs to the shared sensor inputs, independently of the agent."""
     return list(dict.fromkeys([
         *cfg.policy.inputs,
         *[key.value for key in TRACKING_INPUTS[cfg.env.tracking_mode]],
+        *[key.value for key in HEAD_INPUTS if cfg.env.head_tracking],
     ]))
 
 
@@ -141,6 +151,36 @@ def add_targets(
     return obs_d
 
 
+def add_head_targets(
+    obs_d: dict[StateVarKey, np.ndarray],
+    rp_env: SingleEnvWrapper | SyncVectorEnv,
+    head_targets: Sequence[Sequence[float]] | np.ndarray | None = None,
+    head_trajectories: Sequence[Sequence[Sequence[float]]] | None = None,
+):
+    """Set head references independently of the locomotion task; no actuation."""
+    if head_targets is not None and head_trajectories is not None:
+        raise ValueError("Choose fixed head targets or head trajectories, not both")
+    if head_trajectories is not None:
+        if len(head_trajectories) != rp_env.num_envs:
+            raise ValueError(f"Expected {rp_env.num_envs} head trajectories")
+        trajectories = [HeadTrajectory(points) for points in head_trajectories]
+        values = np.stack([
+            trajectory.angles_at(float(time[0]))
+            for trajectory, time in zip(trajectories, obs_d[Observable.OBS_TIME])
+        ])
+        rp_env.set_attr("head_trajectory", trajectories)
+    elif head_targets is not None:
+        if np.asarray(head_targets).shape != (rp_env.num_envs, 2):
+            raise ValueError(f"Expected head target shape ({rp_env.num_envs}, 2)")
+        values = np.stack([validate_head_target(angles) for angles in head_targets])
+        rp_env.set_attr("head_target", values.tolist())
+    else:
+        return obs_d
+    for column, key in enumerate((Target.CAMERA_PITCH_WORLD, Target.HEAD_YAW_NECK)):
+        obs_d[key] = values[:, column:column + 1].copy()
+    return obs_d
+
+
 def rollout(
     rp_env: SingleEnvWrapper | SyncVectorEnv,
     agent: Agent,
@@ -148,6 +188,8 @@ def rollout(
     target_positions: list[float] | np.ndarray | None = None,
     target_trajectories: Sequence[Sequence[Sequence[float]]] | None = None,
     target_velocities: list[float] | np.ndarray | None = None,
+    head_targets: Sequence[Sequence[float]] | np.ndarray | None = None,
+    head_trajectories: Sequence[Sequence[Sequence[float]]] | None = None,
 ) -> list[EpisodeBuffer]:
     num_envs = rp_env.num_envs
     active = np.ones(num_envs, dtype=bool)
@@ -158,6 +200,7 @@ def rollout(
     obs_d = add_targets(
         obs_d, rp_env, target_positions, target_trajectories, target_velocities
     )
+    obs_d = add_head_targets(obs_d, rp_env, head_targets, head_trajectories)
     while active.any():
         obs_d_t = npd2tensord(obs_d)
 
@@ -227,8 +270,11 @@ def train(cfg: DictConfig, resources: ExitStack):
         agent = mlflow.pytorch.load_model(
             mlflow.get_logged_model(cfg.policy.restore_id).model_uri, map_location="cpu"
         )
-        if set(agent.inputs) != set(get_policy_inputs(cfg)):
-            raise ValueError("Restored policy inputs do not match this tracking task")
+        if (
+            set(agent.inputs) != set(get_policy_inputs(cfg))
+            or set(agent.actions) != set(cfg.policy.actions)
+        ):
+            raise ValueError("Restored policy inputs/actions do not match this task")
     else:
         agent = Agent(inputs=get_policy_inputs(cfg), actions=cfg.policy.actions)
 
@@ -245,6 +291,8 @@ def train(cfg: DictConfig, resources: ExitStack):
             target_positions=cfg.train.target_positions,
             target_trajectories=cfg.train.target_trajectories,
             target_velocities=cfg.train.target_velocities,
+            head_targets=cfg.train.head_targets,
+            head_trajectories=cfg.train.head_trajectories,
         )
 
         logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(episode_buf_l)
@@ -345,6 +393,24 @@ def evaluate_and_plot(cfg: DictConfig, env: SingleEnvWrapper, agent: Agent, i: i
     if cfg.logging.mlflow.enabled:
         for artifact in (plot_path, trace_path, video_path):
             mlflow.log_artifact(str(artifact))
+        if cfg.env.head_tracking:
+            errors = {
+                "evaluation/head/camera_pitch_mae": (
+                    Observable.TRUE_CAMERA_PITCH, Target.CAMERA_PITCH_WORLD
+                ),
+                "evaluation/head/neck_yaw_mae": (
+                    Observable.HEAD_TURN, Target.HEAD_YAW_NECK
+                ),
+                "evaluation/head/camera_estimation_mae": (
+                    DerivedObs.CAMERA_PITCH_WORLD, Observable.TRUE_CAMERA_PITCH
+                ),
+            }
+            mlflow.log_metrics({
+                name: float(
+                    np.abs(eps.get_data(actual)[1:] - eps.get_data(target)[1:]).mean()
+                )
+                for name, (actual, target) in errors.items()
+            }, step=i)
     print(f"  📊 Saved plot: {plot_path}")
     print(f"  Saved episode trace: {trace_path}")
 
@@ -355,6 +421,14 @@ def get_plot_keys(cfg: DictConfig, agent: Agent) -> list[PlotKey]:
     mode = cfg.env.tracking_mode
     if tracking_keys := TRACKING_INPUTS[mode]:
         plot_keys.append((Observable.OBS_TIME, tracking_keys))
+    if cfg.env.head_tracking:
+        plot_keys.extend([
+            (Observable.OBS_TIME, (
+                Target.CAMERA_PITCH_WORLD, DerivedObs.CAMERA_PITCH_WORLD,
+                Observable.TRUE_CAMERA_PITCH,
+            )),
+            (Observable.OBS_TIME, (Target.HEAD_YAW_NECK, Observable.HEAD_TURN)),
+        ])
     seen_observables = {
         Observable.OBS_TIME.value,
         *[key.value for _, keys in plot_keys for key in keys],
@@ -369,6 +443,12 @@ def get_plot_keys(cfg: DictConfig, agent: Agent) -> list[PlotKey]:
         "velocity": {Observable.REWARD_POS, Observable.REWARD_WHEEL_VEL},
         "none": {Observable.REWARD_POS, Observable.REWARD_VEL},
     }[mode]
+    if cfg.env.head_tracking:
+        inactive_rewards.add(Observable.REWARD_HEAD_PITCH)
+    else:
+        inactive_rewards.update({
+            Observable.REWARD_CAMERA_PITCH, Observable.REWARD_HEAD_YAW
+        })
     reward_keys = tuple(
         Observable.from_str(key) for key in cfg.reward if key not in inactive_rewards
     )

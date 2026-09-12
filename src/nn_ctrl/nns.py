@@ -36,9 +36,12 @@ def _get_obs_decoder(input_: StateVarKey) -> tuple[nn.Module, int]:
         return nn.Linear(3, 16), 16  # 3D gyro vector -> 16 features
     if input_ in [Observable.HEAD_PITCH, Observable.HEAD_TURN]:
         return nn.Linear(1, 8), 8  # Single angle -> 8 features
-    if input_ in [Observable.LEFT_WHEEL_VEL, Observable.RIGHT_WHEEL_VEL]:
+    if input_ in [
+        Observable.LEFT_WHEEL_VEL, Observable.RIGHT_WHEEL_VEL,
+        Observable.HEAD_PITCH_VEL, Observable.HEAD_TURN_VEL,
+    ]:
         return nn.Linear(1, 8), 8  # Single velocity -> 8 features
-    if input_ in [Observable.RP_PITCH, Observable.TRUE_PITCH]:
+    if input_ in [Observable.RP_PITCH, Observable.RP_ROLL, Observable.TRUE_PITCH]:
         return nn.Linear(1, 8), 8  # Single angle -> 8 features
     if input_ == Observable.OBS_TIME:
         # TODO: sine/cos encoding for time to capture periodicity?
@@ -46,6 +49,7 @@ def _get_obs_decoder(input_: StateVarKey) -> tuple[nn.Module, int]:
     if input_ in (
         DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL,
         Target.TARGET_POS, Target.TARGET_VEL,
+        DerivedObs.CAMERA_PITCH_WORLD, Target.CAMERA_PITCH_WORLD, Target.HEAD_YAW_NECK,
     ):
         return nn.Linear(1, 4), 4
 

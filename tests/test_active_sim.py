@@ -142,6 +142,7 @@ class ActiveSimulationTests(unittest.TestCase):
                 actions = {
                     Actions.ACC_BOTH_WHEELS: np.zeros((count, 1), dtype=np.float32),
                     Actions.VEL_HEAD_PITCH: np.zeros((count, 1), dtype=np.float32),
+                    Actions.VEL_HEAD_TURN: np.zeros((count, 1), dtype=np.float32),
                 }
                 obs, _, _, _, _ = env.step(actions)
                 np.testing.assert_allclose(obs[Target.TARGET_POS][:, 0], targets)
@@ -409,6 +410,7 @@ class ActiveSimulationTests(unittest.TestCase):
 
     def test_zero_velocity_is_default_and_policy_inputs_follow_the_task(self):
         cfg = config()
+        cfg.env.head_tracking = False  # Isolate the locomotion input selection.
         self.assertEqual(cfg.env.tracking_mode, "velocity")
         self.assertEqual(cfg.env.target_vel, 0.0)
         self.assertIsNone(cfg.train.target_velocities)
@@ -475,6 +477,7 @@ class ActiveSimulationTests(unittest.TestCase):
             actions = {
                 Actions.ACC_BOTH_WHEELS: np.zeros((count, 1), dtype=np.float32),
                 Actions.VEL_HEAD_PITCH: np.zeros((count, 1), dtype=np.float32),
+                Actions.VEL_HEAD_TURN: np.zeros((count, 1), dtype=np.float32),
             }
             obs, _, _, _, _ = env.step(actions)
             np.testing.assert_allclose(

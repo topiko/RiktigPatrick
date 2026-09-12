@@ -27,7 +27,35 @@ import numpy as np
 from dm_control import mjcf
 from matplotlib import animation
 
-from filters.qutils import q2eul
+from filters.qutils import as_rotation_matrix, q2eul
+from riktigpatric.geometry import (
+    BODY_BOTTOM_WIDTH,
+    BODY_DEPTH,
+    BODY_TAPER,
+    CAMERA_BASE,
+    CAMERA_MOUNT_ROTATION,
+    CAMERA_RADIUS,
+    CAMERA_TIP,
+    FRAME_HEIGHT,
+    HEAD_BACK,
+    HEAD_BOTTOM_WIDTH,
+    HEAD_FRONT,
+    HEAD_HEIGHT,
+    HEAD_OFFSET,
+    HEAD_PITCH_AXIS,
+    HEAD_PITCH_LIMITS,
+    HEAD_SLOPE,
+    HEAD_YAW_AXIS,
+    HEAD_YAW_LIMITS,
+    MOTOR_FORWARD,
+    MOTOR_HALF_SPACING,
+    MOTOR_HEIGHT,
+    NECK_PIVOT,
+    WHEEL_CLEARANCE,
+    WHEEL_D,
+    WHEEL_WIDTH,
+    camera_elevation,
+)
 from riktigpatric.patrick import (
     Actions,
     DerivedObs,
@@ -36,18 +64,9 @@ from riktigpatric.patrick import (
     StateVarKey,
     Target,
 )
-from riktigpatric.trajectory import PositionTrajectory
+from riktigpatric.trajectory import HeadTrajectory, PositionTrajectory
 
-BODY_D = 0.05
-BODY_H = 0.25
-BODY_W = 0.1
 BODY_M = 0.4
-
-WHEEL_D = BODY_D * 2
-
-HEAD_D = 0.03
-HEAD_H = 0.1
-HEAD_W = 0.1
 HEAD_M = 0.2
 
 FORCERANGE = 15
@@ -55,6 +74,17 @@ FORCERANGE = 15
 # Unit conversion constants (for display/debugging only - not used in main code path)
 RAD2REV = 1.0 / (2 * np.pi)  # rad/s → rev/s (revolutions per second)
 RAD2DEG = 180.0 / np.pi  # rad/s → deg/s (degrees per second)
+
+
+def _profile_mesh(model, name, profile, width, origin=(0.0, 0.0)):
+    """Convex tapered proxy from a CAD forward/height profile, in meters."""
+    vertices = [
+        (forward - origin[0],
+         side * (width / 2 - max(height, 0) * np.tan(BODY_TAPER)),
+         height - origin[1])
+        for forward, height in profile for side in (-1, 1)
+    ]
+    return model.asset.add("mesh", name=name, vertex=np.asarray(vertices).ravel())
 
 
 class MujocoRP:
@@ -67,6 +97,7 @@ class MujocoRP:
         random_scale: float = 0.02,
         max_wheel_vel: float = 10.0,  # rad/s (SI units)
         max_wheel_acc: float = 50.0,  # rad/s² (SI units)
+        max_head_vel: float = 1.0,  # rad/s; hardware speed remains to be measured
     ):
         """
         Initialize MuJoCo robot model.
@@ -93,30 +124,41 @@ class MujocoRP:
         frame = self.model.worldbody.add("body", name="torso")
 
         body_m = rng.normal(BODY_M, BODY_M * random_scale) if randomize else BODY_M
+        body_mesh = _profile_mesh(
+            self.model, "body_mesh",
+            [(-0.011, -0.002), (0.026, -0.002), (BODY_DEPTH - 0.007, 0.030),
+             (0.011, FRAME_HEIGHT), (0.0, FRAME_HEIGHT + 0.011),
+             (-0.011, FRAME_HEIGHT)],
+            BODY_BOTTOM_WIDTH, origin=(MOTOR_FORWARD, MOTOR_HEIGHT),
+        )
         frame.add(
             "geom",
             name="body",
-            type="box",
-            size=[BODY_D / 2, BODY_W / 2, BODY_H / 2],
-            pos=[0, 0, BODY_H / 2],
+            type="mesh",
+            mesh=body_mesh,
             rgba=rgba,
             mass=body_m,
         )
 
         # Wheels
         wheel_d = rng.normal(WHEEL_D, WHEEL_D * random_scale) if randomize else WHEEL_D
+        self.spawn_height = (
+            wheel_d / 2 * np.cos(BODY_TAPER) - WHEEL_CLEARANCE * np.sin(BODY_TAPER)
+        )
         kp_wheel = 20.0  # was 1.2
         for diry, key in zip([-1, 1], ["rightwheel", "leftwheel"]):
-            y = diry * (BODY_W / 2 + 0.001)
+            outward = np.array([0.0, diry * np.cos(BODY_TAPER), np.sin(BODY_TAPER)])
+            center = np.array([0.0, diry * MOTOR_HALF_SPACING, 0.0])
+            center += outward * (WHEEL_CLEARANCE + WHEEL_WIDTH / 2)
             # Wheel
-            wheel = frame.add("body", name=key, pos=[-0.001, y, 0])
+            wheel = frame.add("body", name=key, pos=center)
             wheel.add(
                 "geom",
                 type="cylinder",
                 name=key + "_cyl",
-                fromto=[0, 0, 0, 0, diry * 0.02, 0],
+                zaxis=outward,
                 friction=(2, 0.005, 0.0001),
-                size=[wheel_d / 2],
+                size=[wheel_d / 2, WHEEL_WIDTH / 2],
                 mass=0.020,  # kg
             )
             if wheel_markers:
@@ -124,14 +166,18 @@ class MujocoRP:
                     "geom",
                     type="cylinder",
                     name=key + "_marker",
-                    fromto=[0, 0, wheel_d / 4, 0, diry * 0.021, wheel_d / 4],
-                    friction=(2, 0.005, 0.0001),
+                    zaxis=outward,
+                    pos=[0, -diry * np.sin(BODY_TAPER) * wheel_d / 4,
+                         np.cos(BODY_TAPER) * wheel_d / 4],
+                    mass=0, contype=0, conaffinity=0,
                     rgba=[0, 0, 0, 1],
-                    size=[wheel_d / 12],
+                    size=[wheel_d / 12, WHEEL_WIDTH / 2 + 0.0005],
                 )
 
             # Wheel joint
-            wheel = wheel.add("joint", name=key + "_joint", axis=[0, 1, 0], damping=0.1)
+            wheel = wheel.add(
+                "joint", name=key + "_joint", axis=outward * diry, damping=0.1
+            )
 
             # Wheel actuator
             self.model.actuator.add(
@@ -153,32 +199,68 @@ class MujocoRP:
         # Head:
         kp_servo = 1.500
 
-        head = self.model.worldbody.add(
-            "body", name="head", pos=[BODY_D / 2, 0, BODY_H]
-        )
+        neck = frame.add("body", name="neck", pos=NECK_PIVOT)
+        head = neck.add("body", name="head", pos=HEAD_OFFSET)
 
         # Joints
-        head_pitch = head.add(
-            "joint", name="headpitch_joint", axis=[0, 1, 0], damping=0.1
+        head_pitch = neck.add(
+            "joint", name="headpitch_joint", axis=HEAD_PITCH_AXIS, damping=0.1,
+            limited=True, range=np.rad2deg(HEAD_PITCH_LIMITS),
         )
         self.model.sensor.add(
             "jointpos", name="headpitch_sensor", joint="headpitch_joint"
         )
+        self.model.sensor.add(
+            "jointvel", name="headpitch_vel_sensor", joint="headpitch_joint"
+        )
 
-        head_lr = head.add("joint", name="headturn_joint", axis=[0, 0, 1], damping=0.1)
+        head_lr = head.add(
+            "joint", name="headturn_joint", axis=HEAD_YAW_AXIS, damping=0.1,
+            limited=True, range=np.rad2deg(HEAD_YAW_LIMITS),
+        )
         self.model.sensor.add(
             "jointpos", name="headturn_sensor", joint="headturn_joint"
         )
+        self.model.sensor.add(
+            "jointvel", name="headturn_vel_sensor", joint="headturn_joint"
+        )
 
         head_m = rng.normal(HEAD_M, HEAD_M * random_scale) if randomize else HEAD_M
+        # Split the combined head/neck mass budget; the visual camera adds none.
+        neck.add(
+            "geom", name="neckgeom", type="cylinder", size=[0.011],
+            fromto=[0, 0, 0, *HEAD_OFFSET], mass=head_m * 0.05, rgba=rgba,
+        )
+        head_mesh = _profile_mesh(
+            self.model, "head_mesh",
+            [(HEAD_BACK, 0), (HEAD_FRONT, 0),
+             (HEAD_FRONT - HEAD_HEIGHT * np.tan(HEAD_SLOPE), HEAD_HEIGHT),
+             (HEAD_BACK, HEAD_HEIGHT)], HEAD_BOTTOM_WIDTH,
+        )
         head.add(
             "geom",
-            type="box",
+            type="mesh", mesh=head_mesh,
             name="headgeom",
-            size=[HEAD_D / 2, HEAD_W / 2, HEAD_H / 2],
-            pos=[0, 0, HEAD_H / 2],
             rgba=rgba,
-            mass=head_m,
+            mass=head_m * 0.95,
+        )
+        head.add(
+            "geom", name="camera_cylinder", type="cylinder",
+            fromto=[*CAMERA_BASE, *CAMERA_TIP], size=[CAMERA_RADIUS],
+            rgba=[0.08, 0.08, 0.08, 1], mass=0, contype=0, conaffinity=0,
+        )
+        camera_axes = np.concatenate((CAMERA_MOUNT_ROTATION[:, 0],
+                                      CAMERA_MOUNT_ROTATION[:, 1]))
+        camera_site = head.add(
+            "site", name="head_camera_site", pos=CAMERA_TIP, xyaxes=camera_axes,
+            size=[0.001], rgba=[0, 0, 0, 0],
+        )
+        head.add(
+            "camera", name="head_camera", pos=CAMERA_TIP, xyaxes=camera_axes, fovy=60
+        )
+        self.model.sensor.add(
+            "framequat", name="camera_framequat_sensor",
+            objtype="site", objname=camera_site,
         )
 
         self.model.actuator.add(
@@ -187,8 +269,8 @@ class MujocoRP:
             joint=head_pitch,
             kp=kp_servo,
             ctrllimited=True,
-            ctrlrange=[-1, 1],  # rad/s - commanded velocity
-            actrange=[-1, 1],  # rad - integrated position target
+            ctrlrange=[-max_head_vel, max_head_vel],
+            actrange=HEAD_PITCH_LIMITS,  # rad; joint ranges above use MJCF degrees
         )
         self.model.actuator.add(
             "intvelocity",
@@ -196,13 +278,13 @@ class MujocoRP:
             joint=head_lr,
             kp=kp_servo,
             ctrllimited=True,
-            ctrlrange=[-1, 1],  # rad/s - commanded velocity
-            actrange=[-1, 1],  # rad - integrated position target
+            ctrlrange=[-max_head_vel, max_head_vel],
+            actrange=HEAD_YAW_LIMITS,
         )
 
         # Sensors:
-        imu_pos = [0, 0, BODY_H / 2]  # IMU at center of body
-        imu_site = self.model.worldbody.add(
+        imu_pos = [0, 0, FRAME_HEIGHT / 2 - MOTOR_HEIGHT]  # approximate IMU location
+        imu_site = frame.add(
             "site",
             name="imu_site",
             pos=imu_pos,
@@ -247,19 +329,18 @@ def make_arena() -> mjcf.RootElement:
             "light", name="light_{}".format(x), pos=[x, -1, 3], dir=[-x, 1, -2]
         )
 
-    # TODO: use quat for better camera angle
-    camera_site = arena.worldbody.add(
-        "site", name="camerasite", pos=[0.1, -3, 2.5], euler=[50, 0, 0]
+    # Close three-quarter view of the robot, with world-up as the image vertical.
+    arena.worldbody.add(
+        "camera", name="overview", pos=[0.45, -0.85, 0.4],
+        xyaxes=[0.85, 0.45, 0, -0.1035, 0.1955, 0.925],
     )
-    camera = mjcf.RootElement("camera")
-    camera.worldbody.add("camera", name="camera", mode="trackcom")
-    camera_site.attach(camera)
 
     return arena
 
 
 def _get_action_space(
-    actions: list[str], max_wheel_vel: float, max_wheel_acc: float
+    actions: list[str], max_wheel_vel: float, max_wheel_acc: float,
+    max_head_vel: float = 1.0,
 ) -> gymnasium.spaces.Dict:
     """Define action space for the robot.
 
@@ -273,11 +354,11 @@ def _get_action_space(
     """
     d_: dict[str, gymnasium.Space] = {}
     for k in actions:
-        # Head velocity control (hardcoded ±1 rad/s)
+        # Head velocity commands (rad/s), independently of joint angle limits.
         if k in [Actions.VEL_HEAD_PITCH, Actions.VEL_HEAD_TURN]:
             d_[k] = gymnasium.spaces.Box(
-                low=-1.0,
-                high=1.0,
+                low=-max_head_vel,
+                high=max_head_vel,
                 shape=(1,),
                 dtype=np.float32,  # rad/s
             )
@@ -300,53 +381,13 @@ def _get_action_space(
 
 
 def _get_observation_space() -> gymnasium.spaces.Dict:
-    d_: dict[str, gymnasium.Space] = {}
-
-    for obs in Observable:
-        if obs in [
-            Observable.OBS_TIME,
-            Observable.HEAD_PITCH,
-            Observable.HEAD_TURN,
-            Observable.LEFT_WHEEL_VEL,
-            Observable.RIGHT_WHEEL_VEL,
-            Observable.RP_PITCH,
-            Observable.TRUE_PITCH,
-            Observable.REWARD_STEP,
-            Observable.REWARD_FELL,
-            Observable.REWARD_RP_PITCH,
-            Observable.REWARD_WHEEL_VEL,
-            Observable.REWARD_HEAD_PITCH,
-            Observable.REWARD_POS,
-            Observable.REWARD_VEL,
-            Observable.REWARD_TOTAL,
-        ]:
-            d_[obs] = gymnasium.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-            )
-        elif obs in [Observable.ACC, Observable.GYRO]:
-            d_[obs] = gymnasium.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32
-            )
-        else:
-            raise ValueError(f"Invalid observation key: {obs}")
-
-    for derived_obs in DerivedObs:
-        if derived_obs in (DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL):
-            d_[derived_obs] = gymnasium.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-            )
-        else:
-            raise ValueError(f"Invalid derived observation key: {derived_obs}")
-
-    for target in Target:
-        if target in (Target.TARGET_POS, Target.TARGET_VEL):
-            d_[target] = gymnasium.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32
-            )
-        else:
-            raise ValueError(f"Invalid target key: {target}")
-
-    return gymnasium.spaces.Dict(d_)
+    spaces: dict[str, gymnasium.Space] = {
+        key: gymnasium.spaces.Box(
+            low=-np.inf, high=np.inf, shape=(key.dim(),), dtype=np.float32
+        )
+        for key in (*Observable, *DerivedObs, *Target)
+    }
+    return gymnasium.spaces.Dict(spaces)
 
 
 class GymRP(gymnasium.Env):
@@ -366,10 +407,26 @@ class GymRP(gymnasium.Env):
         target_trajectory: Sequence[Sequence[float]] | None = None,
         target_vel: float = 0.0,
         tracking_mode: str = "velocity",
+        head_tracking: bool = False,
+        head_target: Sequence[float] = (0.0, 0.0),
+        head_trajectory: Sequence[Sequence[float]] | None = None,
+        max_head_vel: float = 1.0,
+        camera_view: str = "external",
     ):
         if tracking_mode not in ("position", "velocity", "none"):
             raise ValueError("tracking_mode must be position, velocity or none")
         self.tracking_mode = tracking_mode
+        if camera_view not in ("external", "head", "both"):
+            raise ValueError("camera_view must be external, head or both")
+        if not np.isfinite(max_head_vel) or max_head_vel <= 0:
+            raise ValueError("max_head_vel must be positive and finite")
+        if head_tracking and not {
+            Actions.VEL_HEAD_PITCH, Actions.VEL_HEAD_TURN
+        } <= set(actions):
+            raise ValueError("Head tracking requires pitch and yaw velocity actions")
+        self.head_tracking = head_tracking
+        self.camera_view = camera_view
+        self.max_head_vel = max_head_vel
         self._randomize = randomize
         self._init_pitch_scale = 2.0
         self.max_wheel_vel = max_wheel_vel
@@ -385,6 +442,8 @@ class GymRP(gymnasium.Env):
         self.target_pos = target_pos
         self.target_trajectory = target_trajectory
         self.target_vel = target_vel
+        self.head_target = head_target
+        self.head_trajectory = head_trajectory
 
         self.step_time = step_time
         self._substeps = round(step_time / self.simul_timestep)
@@ -396,7 +455,7 @@ class GymRP(gymnasium.Env):
         self.metadata["render_fps"] = int(1 / self.step_time)
 
         self.action_space = _get_action_space(
-            actions, self.max_wheel_vel, self.max_wheel_acc
+            actions, self.max_wheel_vel, self.max_wheel_acc, self.max_head_vel
         )
         self.observation_space = _get_observation_space()
         self.reward_scales = {
@@ -433,6 +492,24 @@ class GymRP(gymnasium.Env):
             value = PositionTrajectory(value)
         self.state.target_trajectory = value
 
+    @property
+    def head_target(self) -> np.ndarray:
+        return self.state.head_target
+
+    @head_target.setter
+    def head_target(self, value: Sequence[float]):
+        self.state.head_target = value
+
+    @property
+    def head_trajectory(self) -> HeadTrajectory | None:
+        return self.state.head_trajectory
+
+    @head_trajectory.setter
+    def head_trajectory(self, value: HeadTrajectory | Sequence[Sequence[float]] | None):
+        if value is not None and not isinstance(value, HeadTrajectory):
+            value = HeadTrajectory(value)
+        self.state.head_trajectory = value
+
     def _reset_env(self, seed: int | None = 42) -> mjcf.Physics:
         prng = np.random.default_rng(seed)
 
@@ -443,6 +520,7 @@ class GymRP(gymnasium.Env):
             seed=seed,
             randomize=self._randomize,
             random_scale=self.random_scale,
+            max_head_vel=self.max_head_vel,
         )
 
         # Make arena:
@@ -451,7 +529,7 @@ class GymRP(gymnasium.Env):
         init_pitch = prng.normal(0, self._init_pitch_scale) if self._randomize else 0.0
 
         # Spawn rp at arena:
-        xpos, ypos, zpos = 0.0, 0.0, WHEEL_D / 2
+        xpos, ypos, zpos = 0.0, 0.0, rp.spawn_height
         spawn_site = arena.worldbody.add(
             "site",
             name="rp_site",
@@ -460,6 +538,9 @@ class GymRP(gymnasium.Env):
             group=3,
         )
         spawn_site.attach(rp.model).add("freejoint")
+        overview = arena.find("camera", "overview")
+        overview.mode = "targetbodycom"
+        overview.target = rp.model.find("body", "torso")
 
         # Actuators:
         self.left_wheel_act = rp.model.find("actuator", "leftwheel_actuator")
@@ -472,6 +553,10 @@ class GymRP(gymnasium.Env):
         self.acc_sens = rp.model.find("sensor", "accelerometer")
         self.head_pitch_sens = rp.model.find("sensor", "headpitch_sensor")
         self.head_turn_sens = rp.model.find("sensor", "headturn_sensor")
+        self.head_pitch_vel_sens = rp.model.find("sensor", "headpitch_vel_sensor")
+        self.head_turn_vel_sens = rp.model.find("sensor", "headturn_vel_sensor")
+        self.camera_quat_sens = rp.model.find("sensor", "camera_framequat_sensor")
+        self.head_camera_name = rp.model.find("camera", "head_camera").full_identifier
         self.body_quat = rp.model.find("sensor", "framequat_sensor")
         self.left_wheel_vel_sens = rp.model.find("sensor", "leftwheel_vel_sensor")
         self.right_wheel_vel_sens = rp.model.find("sensor", "rightwheel_vel_sensor")
@@ -517,6 +602,8 @@ class GymRP(gymnasium.Env):
             Observable.GYRO: _get_sens(self.gyro_sens),  # rad/s
             Observable.HEAD_PITCH: _get_sens(self.head_pitch_sens)[0],  # rad
             Observable.HEAD_TURN: _get_sens(self.head_turn_sens)[0],  # rad
+            Observable.HEAD_PITCH_VEL: _get_sens(self.head_pitch_vel_sens)[0],
+            Observable.HEAD_TURN_VEL: _get_sens(self.head_turn_vel_sens)[0],
             Observable.LEFT_WHEEL_VEL: _get_sens(self.left_wheel_vel_sens)[0],  # rad/s
             Observable.RIGHT_WHEEL_VEL: _get_sens(self.right_wheel_vel_sens)[
                 0
@@ -524,6 +611,9 @@ class GymRP(gymnasium.Env):
             Observable.TRUE_PITCH: q2eul(
                 self.dm_env.bind(self.body_quat).sensordata.copy()
             )[1],  # rad
+            Observable.TRUE_CAMERA_PITCH: camera_elevation(
+                as_rotation_matrix(_get_sens(self.camera_quat_sens))
+            ),
         }
 
         return {key: np.atleast_1d(value) for key, value in obs_d.items()}
@@ -554,9 +644,6 @@ class GymRP(gymnasium.Env):
         if self.tracking_mode == "velocity":
             wheel_vel_reward = 0.0
 
-        head_pitch_reward = self.reward_scales[Observable.REWARD_HEAD_PITCH] * abs(
-            state.obs.get_observable(Observable.HEAD_PITCH)[0]
-        )
         position_reward = 0.0
         velocity_reward = 0.0
         if self.tracking_mode == "position":
@@ -568,27 +655,40 @@ class GymRP(gymnasium.Env):
                 state.derived_obs[DerivedObs.CURRENT_VEL][0] - state.target_vel
             )
 
-        total = (
-            step_reward
-            + fell_cost
-            + pitch_reward
-            + wheel_vel_reward
-            + head_pitch_reward
-            + position_reward
-            + velocity_reward
-        )
-
-        # We need to list all obrservable rewards here...
-        return {
+        components = {
             Observable.REWARD_STEP: step_reward,
             Observable.REWARD_RP_PITCH: pitch_reward,
-            Observable.REWARD_TOTAL: total
-            * self.reward_scales[Observable.REWARD_TOTAL],
             Observable.REWARD_WHEEL_VEL: wheel_vel_reward,
-            Observable.REWARD_HEAD_PITCH: head_pitch_reward,
             Observable.REWARD_POS: position_reward,
             Observable.REWARD_VEL: velocity_reward,
             Observable.REWARD_FELL: fell_cost,
+            **self._head_rewards(state),
+        }
+        components[Observable.REWARD_TOTAL] = (
+            sum(components.values()) * self.reward_scales[Observable.REWARD_TOTAL]
+        )
+        return components
+
+    def _head_rewards(self, state: State) -> dict[Observable, float]:
+        neutral = camera = yaw = 0.0
+        if self.head_tracking:
+            # Score actual camera pose, never an estimator's belief about its pose.
+            camera = self.reward_scales[Observable.REWARD_CAMERA_PITCH] * abs(
+                state.obs.get_observable(Observable.TRUE_CAMERA_PITCH)[0]
+                - state.targets[Target.CAMERA_PITCH_WORLD][0]
+            )
+            yaw = self.reward_scales[Observable.REWARD_HEAD_YAW] * abs(
+                state.obs.get_observable(Observable.HEAD_TURN)[0]
+                - state.targets[Target.HEAD_YAW_NECK][0]
+            )
+        else:
+            neutral = self.reward_scales[Observable.REWARD_HEAD_PITCH] * abs(
+                state.obs.get_observable(Observable.HEAD_PITCH)[0]
+            )
+        return {
+            Observable.REWARD_HEAD_PITCH: neutral,
+            Observable.REWARD_CAMERA_PITCH: camera,
+            Observable.REWARD_HEAD_YAW: yaw,
         }
 
     def reset(
@@ -611,8 +711,16 @@ class GymRP(gymnasium.Env):
         return self.simul_time >= 20.0
 
     def render(self):
-        if self.render_mode == "rgb_array":
-            return self.dm_env.render(camera_id=0, height=480, width=640)
+        if self.camera_view == "both":
+            # Two small views keep frame storage below the old 640x480 video size.
+            return np.concatenate([
+                self.dm_env.render(camera_id=0, height=240, width=320),
+                self.dm_env.render(
+                    camera_id=self.head_camera_name, height=240, width=320
+                ),
+            ], axis=1)
+        camera = self.head_camera_name if self.camera_view == "head" else 0
+        return self.dm_env.render(camera_id=camera, height=480, width=640)
 
     def _apply_action(self, action: Actions, value: np.ndarray):
         if action == Actions.TIME:
@@ -729,7 +837,7 @@ if __name__ == "__main__":
     arena = make_arena()
 
     # Spawn rp at arena:
-    xpos, ypos, zpos = 0.0, 0.0, WHEEL_D / 2
+    xpos, ypos, zpos = 0.0, 0.0, rp.spawn_height
     spawn_site = arena.worldbody.add(
         "site", name="rp_site", pos=[xpos, ypos, zpos], group=3
     )

@@ -400,27 +400,10 @@ def ebufs2batchd(
 
 
 class Episode:
-    """Episode data container for SINGLE finished episode with attribute access.
+    """One finished episode, accessed through namespaced get_data() keys.
 
-    Provides direct access to observations, actions, and rewards using enum names.
-    All arrays have shape: (num_steps, dim) - NO batch/env dimension!
-
-    IMPORTANT: FinishedEpisode represents a SINGLE episode. If you have data from
-    multiple environments, create separate FinishedEpisode objects for each.
-
-    Example:
-        eps = FinishedEpisode(obs_l, action_l, rewards_l)
-        pitch = eps.RP_PITCH           # (num_steps, 1)
-        gyro = eps.GYRO                # (num_steps, 3)
-        wheel_acc = eps.ACC_BOTH_WHEELS  # (num_steps, 1)
-        rewards = eps.rewards           # (num_steps,)
-
-    Available observation attributes (from Observables enum):
-        .ACC, .GYRO, .HEAD_PITCH, .HEAD_TURN, .LEFT_WHEEL_VEL,
-        .RIGHT_WHEEL_VEL, .RP_PITCH, .TRUE_PITCH, .OBS_TIME
-
-    Available action attributes (from Actions enum):
-        .ACC_BOTH_WHEELS, .VEL_HEAD_PITCH, etc.
+    State arrays have T+1 rows; actions and estimates have T rows. There is no
+    environment batch dimension in these stored arrays.
     """
 
     def __init__(
@@ -433,10 +416,10 @@ class Episode:
         """Initialize episode from rollout data for SINGLE episode.
 
         Args:
-            obs_l: List of observation dicts (keys are Observables enum)
-                   Each obs value should have shape (dim,) for single episode
-            action_l: List of action dicts (keys are strings)
-                      Each action value should have shape (dim,) for single episode
+            epbuffer: Finished single-environment rollout.
+            value_estimates: Optional critic predictions, shape (1, T).
+            returns: Optional discounted returns, shape (1, T).
+            advantages: Optional policy advantages, shape (1, T).
 
         Raises:
             ValueError: If input data contains batch dimension (multiple environments)
@@ -445,11 +428,9 @@ class Episode:
         if not epbuffer.finished:
             raise ValueError("EpisodeBuffer must be finished to create Episode")
 
-        # Stack over time: (T, dim_)
-        for obs_key, obs_arr in epbuffer.get_stvar_dict().items():
-            # (T, obs_dim), (T,) if scalar obs like time
-
-            setattr(self, f"STVAR_{obs_key.name}", obs_arr)
+        # Full namespaced keys prevent Target/DerivedObs member-name collisions.
+        self._observations = epbuffer.get_stvar_dict()
+        self.seq_len = epbuffer.seq_len
 
         for act_key, act_arr in epbuffer.get_action_dict().items():
             # (T, action_dim), (T,) if scalar action
@@ -493,7 +474,7 @@ class Episode:
 
     def get_observable(self, obs: StateVarKey) -> np.ndarray:
         """Get observable array by enum key."""
-        return getattr(self, f"STVAR_{obs.name}")
+        return self._observations[obs]
 
     def get_action(self, act: Actions) -> np.ndarray:
         """Get action array by enum key."""
@@ -504,18 +485,8 @@ class Episode:
         return getattr(self, f"MISC_{misc_key.name}")
 
     def __repr__(self) -> str:
-        """Return string representation listing available attributes."""
-        obs_attrs = [
-            attr for attr in dir(self) if not attr.startswith("_") and attr.isupper()
-        ]
-        action_attrs = [
-            attr
-            for attr in dir(self)
-            if not attr.startswith("_") and attr.isupper() and hasattr(Actions, attr)
-        ]
-
-        num_steps = getattr(self, obs_attrs[0]).shape[0] if obs_attrs else 0
+        """Return available state fields and number of transitions."""
         return (
-            f"Episode(observations={obs_attrs}, actions={action_attrs}, "
-            f"num_steps={num_steps})"
+            f"Episode(observations={[key.value for key in self._observations]}, "
+            f"num_steps={self.seq_len})"
         )
