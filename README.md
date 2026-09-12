@@ -253,8 +253,13 @@ requires further work.
 
 - `logging.plot_freq`: evaluate and save plots/videos every N iterations,
   including iteration zero; `0` disables evaluation rendering.
-- Plots go to `plots/`, videos to `video/`, relative to the run's working directory.
-  Output directories are created automatically.
+- Plots and numeric CSV episode traces go to `plots/`; videos go to `video/`,
+  relative to the run's working directory. Directories are created automatically.
+- Each evaluation saves and, with MLflow enabled, uploads the matching PNG, CSV
+  and MP4. These describe the same evaluation episode, not every training rollout.
+- Tracking plots follow the selected mode: position, velocity, or no tracking
+  plot for `none`. Inactive reward terms are omitted from plots; CSV traces keep
+  all observation and reward fields.
 - For headless rendering on systems with EGL support, prefix the command with
   `MUJOCO_GL=egl MPLBACKEND=Agg`.
 - MLflow is disabled by default. Enable it with
@@ -263,8 +268,30 @@ requires further work.
 - With MLflow enabled, metrics are logged every `logging.mlflow.push_freq`
   iterations and models every `logging.save_freq` iterations. Without MLflow,
   model checkpoints are not saved.
+- Training metric names are grouped by prefix: `losses/{policy,value,total}`,
+  `returns/{mean,min,max,std}`, and `episodes/length/{mean,min,max}`.
 - `policy.restore_id` accepts an MLflow **logged model ID** to restore an agent.
   Optimizer state and iteration count start fresh.
+
+### Reading an episode trace
+
+`plots/episode_iter_XXXX.csv` contains all observations/targets, actions, rewards,
+log-probabilities, value predictions, returns and advantages. Vector observations
+have separate columns such as `sens/gyro[0]`, `sens/gyro[1]`, `sens/gyro[2]`.
+
+There are **T+1 rows for T actions**. At row t:
+
+- `env/obs_time` and the observation/target columns describe the state at t.
+- `act/*` is the outgoing action taken from that state.
+- `transition/reward` is the reward received **after** that action, at t+dt.
+- Observation `reward/*` columns are the incoming reward diagnostics at t;
+  their reset values are zero placeholders.
+- `policy/value`, `policy/log_probability`, `policy/return` and
+  `policy/advantage` correspond to the observation/action at t.
+
+The final row preserves the final observation and incoming reward diagnostics.
+Its action, transition-reward and policy columns are blank. This format can be
+loaded with `pandas.read_csv()` for numerical inspection without a model checkpoint.
 
 ## Observations, actions and units
 

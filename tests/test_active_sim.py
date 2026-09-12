@@ -14,7 +14,7 @@ from nn_ctrl.nns import Agent
 from riktigpatric.patrick import Actions, DerivedObs, Observable, State, Target
 from riktigpatric.trajectory import PositionTrajectory
 from sim.envs.rp_env import GymRP
-from sim.train_agent import add_targets, get_policy_inputs, rollout
+from sim.train_agent import add_targets, get_plot_keys, get_policy_inputs, rollout
 from sim.utils import (
     EpisodeBuffer,
     SingleEnvWrapper,
@@ -538,6 +538,27 @@ class ActiveSimulationTests(unittest.TestCase):
                 agent.act(npd2tensord(obs))
         torch.testing.assert_close(seen[0], torch.tensor([[0.2]]))
         torch.testing.assert_close(seen[1], torch.tensor([[-0.1]]))
+
+    def test_tracking_plots_and_reward_terms_follow_the_selected_mode(self):
+        cfg = config()
+        all_tracking = {
+            Target.TARGET_POS, Target.TARGET_VEL,
+            DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL,
+        }
+        for mode, expected_tracking in (
+            ("position", {Target.TARGET_POS, DerivedObs.CURRENT_POS}),
+            ("velocity", {Target.TARGET_VEL, DerivedObs.CURRENT_VEL}),
+            ("none", set()),
+        ):
+            cfg.env.tracking_mode = mode
+            agent = Agent(get_policy_inputs(cfg), cfg.policy.actions)
+            keys = get_plot_keys(cfg, agent)
+            plotted = {key for _, row in keys for key in row}
+            self.assertEqual(plotted & all_tracking, expected_tracking)
+            self.assertIn(Observable.REWARD_TOTAL, plotted)
+            self.assertEqual(Observable.REWARD_POS in plotted, mode == "position")
+            self.assertEqual(Observable.REWARD_VEL in plotted, mode == "velocity")
+            self.assertEqual(Observable.REWARD_WHEEL_VEL in plotted, mode != "velocity")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ from riktigpatric.patrick import (
     Target,
 )
 from riktigpatric.trajectory import PositionTrajectory
+from sim.episode_io import save_episode_csv
 from sim.plot_utils import plot_episode
 from sim.utils import (
     Episode,
@@ -60,27 +61,20 @@ PLOTKS = [
         Observable.OBS_TIME,
         (Observable.HEAD_PITCH, Observable.HEAD_TURN),
     ),
-    (
-        Observable.OBS_TIME,
-        (Target.TARGET_POS, DerivedObs.CURRENT_POS),
-    ),
-    (
-        Observable.OBS_TIME,
-        (Target.TARGET_VEL, DerivedObs.CURRENT_VEL),
-    ),
 ]
+
+TRACKING_INPUTS = {
+    "position": (Target.TARGET_POS, DerivedObs.CURRENT_POS),
+    "velocity": (Target.TARGET_VEL, DerivedObs.CURRENT_VEL),
+    "none": (),
+}
 
 
 def get_policy_inputs(cfg: DictConfig) -> list[str]:
     """Append task inputs to the shared sensor inputs, independently of the agent."""
-    tracking_inputs = {
-        "position": (Target.TARGET_POS, DerivedObs.CURRENT_POS),
-        "velocity": (Target.TARGET_VEL, DerivedObs.CURRENT_VEL),
-        "none": (),
-    }
     return list(dict.fromkeys([
         *cfg.policy.inputs,
-        *[key.value for key in tracking_inputs[cfg.env.tracking_mode]],
+        *[key.value for key in TRACKING_INPUTS[cfg.env.tracking_mode]],
     ]))
 
 
@@ -283,16 +277,16 @@ def train(cfg: DictConfig, resources: ExitStack):
         if cfg.logging.mlflow.enabled and i % cfg.logging.mlflow.push_freq == 0:
             mlflow.log_metrics(
                 {
-                    "policy_loss": policy_loss.item(),
-                    "value_loss": values_loss.item(),
-                    "total_loss": loss.item(),
-                    "mean_return": mean_return,
-                    "min_episode_length": min(seq_lens),
-                    "max_episode_length": max(seq_lens),
-                    "mean_episode_length": seq_lens.mean(),
-                    "max_return": episode_returns.max(),
-                    "min_return": episode_returns.min(),
-                    "std_return": episode_returns.std(),
+                    "losses/policy": policy_loss.item(),
+                    "losses/value": values_loss.item(),
+                    "losses/total": loss.item(),
+                    "returns/mean": mean_return,
+                    "returns/max": episode_returns.max(),
+                    "returns/min": episode_returns.min(),
+                    "returns/std": episode_returns.std(),
+                    "episodes/length/min": min(seq_lens),
+                    "episodes/length/max": max(seq_lens),
+                    "episodes/length/mean": seq_lens.mean(),
                 },
                 step=i,
             )
@@ -326,6 +320,9 @@ def evaluate_and_plot(cfg: DictConfig, env: SingleEnvWrapper, agent: Agent, i: i
         buffers = rollout(env, agent, seed=cfg.seed + i + 10000)
         _, rewards, values, _, _ = ebufs2batchd(buffers)
         env.stop_recording()
+        video_path = Path(env.video_folder) / (
+            f"{env.name_prefix}-episode-{env.episode_id}.mp4"
+        )
 
     returns = get_returns(rewards, discount=cfg.rl.discount)
     advantages = get_advantages(returns, values)
@@ -336,28 +333,51 @@ def evaluate_and_plot(cfg: DictConfig, env: SingleEnvWrapper, agent: Agent, i: i
         advantages=advantages.cpu().numpy(),
     )
 
+    plot_path = Path(f"plots/episode_iter_{i:04d}.png")
+    trace_path = save_episode_csv(
+        buffers[0],
+        plot_path.with_suffix(".csv"),
+        returns=returns[0].cpu().numpy(),
+        advantages=advantages[0].cpu().numpy(),
+    )
+    fig = plot_episode(eps, keys=get_plot_keys(cfg, agent), save_path=plot_path)
+    plt.close(fig)
+    if cfg.logging.mlflow.enabled:
+        for artifact in (plot_path, trace_path, video_path):
+            mlflow.log_artifact(str(artifact))
+    print(f"  📊 Saved plot: {plot_path}")
+    print(f"  Saved episode trace: {trace_path}")
+
+
+def get_plot_keys(cfg: DictConfig, agent: Agent) -> list[PlotKey]:
+    """Plot the selected tracking task, policy inputs, and active reward terms."""
     plot_keys: list[PlotKey] = list(PLOTKS)
+    mode = cfg.env.tracking_mode
+    if tracking_keys := TRACKING_INPUTS[mode]:
+        plot_keys.append((Observable.OBS_TIME, tracking_keys))
     seen_observables = {
         Observable.OBS_TIME.value,
-        *[key.value for _, keys in PLOTKS for key in keys],
+        *[key.value for _, keys in plot_keys for key in keys],
     }
     for observable in agent.inputs:
         if observable not in seen_observables:
             plot_keys.append((Observable.OBS_TIME, (StateVar.from_str(observable),)))
     for action_name in agent.actions:
         plot_keys.append((Actions.TIME, (Actions.from_str(action_name),)))
-    reward_keys = tuple(Observable.from_str(key) for key in cfg.reward)
+    inactive_rewards = {
+        "position": {Observable.REWARD_VEL},
+        "velocity": {Observable.REWARD_POS, Observable.REWARD_WHEEL_VEL},
+        "none": {Observable.REWARD_POS, Observable.REWARD_VEL},
+    }[mode]
+    reward_keys = tuple(
+        Observable.from_str(key) for key in cfg.reward if key not in inactive_rewards
+    )
     plot_keys.append((Observable.OBS_TIME, reward_keys))
     plot_keys.append(
         (Actions.TIME, (MiscKeys.VALUE_ESTIM, MiscKeys.RETURNS, MiscKeys.ADVANTAGES))
     )
 
-    plot_path = Path(f"plots/episode_iter_{i:04d}.png")
-    fig = plot_episode(eps, keys=plot_keys, save_path=plot_path)
-    plt.close(fig)
-    if cfg.logging.mlflow.enabled:
-        mlflow.log_artifact(str(plot_path))
-    print(f"  📊 Saved plot: {plot_path}")
+    return plot_keys
 
 
 if __name__ == "__main__":
