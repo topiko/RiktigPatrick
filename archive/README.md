@@ -15,7 +15,9 @@ Paths generally mirror their former locations at the repository root:
 | `scad/` | Mechanical design and CAD resources |
 | `notes/` | Historical setup instructions and PDFs |
 | `test_observation_pipeline.py`, `scripts/` | Superseded tests and debug scripts |
-| `rpdev`, `screenlog.1` | Old development-session configuration and transcript |
+| `screenlog.1` | Old development-session transcript |
+
+The active development-session launcher is restored at [`../rpdev`](../rpdev).
 
 Local, previously ignored material is preserved here too: `claude/` contains
 earlier development notes, and ignored `local/` holds generated files and old

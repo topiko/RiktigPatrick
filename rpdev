@@ -7,9 +7,9 @@ screen -t PYTHON 2
 stuff "source .venv/bin/activate^M"
 screen -t PYTHON 3
 stuff "source .venv/bin/activate^M"
-screen -t CONTROL 4
+screen -t AI 4
 stuff "source .venv/bin/activate^M"
-stuff "cd `pwd`/src/sim^M"
+stuff "opencode --continue^M"
 # stuff "python remote/keyboard_remote.py"
 # split -v
 select VIM
