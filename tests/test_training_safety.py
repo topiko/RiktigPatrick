@@ -1,0 +1,362 @@
+"""Training recovery must preserve weights, Adam state, RNG, and episode alignment."""
+
+import random
+import tempfile
+import unittest
+from contextlib import ExitStack
+from copy import deepcopy
+from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
+import torch
+from gymnasium import Env
+from omegaconf import DictConfig, OmegaConf
+
+from nn_ctrl.nns import Agent
+from riktigpatric.patrick import Actions, Observable
+from sim.checkpoints import (
+    PolicyGuard,
+    capture_state,
+    load_checkpoint,
+    restore_state,
+    save_checkpoint,
+)
+from sim.envs.rp_env import GymRP
+from sim.train_agent import (
+    get_policy_inputs,
+    make_validation_env,
+    run_training_loop,
+    training_update,
+    validate_policy,
+    write_checkpoint,
+)
+from sim.utils import SingleEnvWrapper
+
+
+class OneStepEnv(Env):
+    def __init__(self, reward=1.0):
+        self.reward = reward
+
+    def reset(self, seed=None, options=None):
+        return {Observable.OBS_TIME: np.array([0.0])}, {}
+
+    def step(self, action):
+        return {Observable.OBS_TIME: np.array([1.0])}, self.reward, True, False, {}
+
+
+def agent_and_optimizer():
+    agent = Agent([Observable.OBS_TIME.value], {
+        Actions.ACC_BOTH_WHEELS.value: {"type": "discrete", "bins": [-1.0, 0.0, 1.0]}
+    }, hsize=4)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=0.01)
+    # Initialize Adam's moving averages so restoring only weights cannot pass.
+    torch.stack([p.square().sum() for p in agent.parameters()]).sum().backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    return agent, optimizer
+
+
+def config(folder="unused"):
+    return OmegaConf.create({
+        "seed": 42, "rl": {"discount": 0.99},
+        "train": {
+            "grad_clip": 1.0, "max_iterations": 1,
+            "target_positions": None, "target_velocities": None,
+            "target_trajectories": None,
+            "head_targets": None, "head_trajectories": None,
+        },
+        "logging": {"mlflow": {"enabled": False}, "plot_freq": 0},
+        "checkpoints": {"dir": folder, "every": 100},
+        "guard": {"seed": 1042, "every": 25},
+    })
+
+
+class TrainingSafetyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        torch.set_num_threads(1)
+
+    def assert_nested_equal(self, actual, expected):
+        if isinstance(expected, torch.Tensor):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        elif isinstance(expected, dict):
+            self.assertEqual(actual.keys(), expected.keys())
+            for key in expected:
+                self.assert_nested_equal(actual[key], expected[key])
+        elif isinstance(expected, (list, tuple)):
+            self.assertEqual(len(actual), len(expected))
+            for a, e in zip(actual, expected):
+                self.assert_nested_equal(a, e)
+        else:
+            self.assertEqual(actual, expected)
+
+    def test_checkpoint_round_trip_restores_optimizer_progress_and_rng(self):
+        agent, optimizer = agent_and_optimizer()
+        state = capture_state(agent, optimizer, next_iteration=123)
+        expected_torch = torch.rand(4)
+        expected_numpy = np.random.rand(4)
+        expected_python = random.random()
+        with tempfile.TemporaryDirectory() as folder:
+            path = save_checkpoint(Path(folder) / "latest.pt", state, {"seed": 42})
+            # Verify the file contains data, not a pickled Python agent instance.
+            self.assertEqual(torch.load(path, weights_only=True)["format_version"], 1)
+            with torch.no_grad():
+                for parameter in agent.parameters():
+                    parameter.add_(100)
+            optimizer.param_groups[0]["lr"] = 0.2
+            self.assertEqual(load_checkpoint(path, agent, optimizer), 123)
+        self.assert_nested_equal(agent.state_dict(), state["model"])
+        self.assert_nested_equal(optimizer.state_dict(), state["optimizer"])
+        torch.testing.assert_close(torch.rand(4), expected_torch, rtol=0, atol=0)
+        np.testing.assert_array_equal(np.random.rand(4), expected_numpy)
+        self.assertEqual(random.random(), expected_python)
+
+    def test_failed_write_preserves_previous_checkpoint(self):
+        agent, optimizer = agent_and_optimizer()
+        state = capture_state(agent, optimizer, 10)
+        with tempfile.TemporaryDirectory() as folder:
+            path = save_checkpoint(Path(folder) / "best.pt", state, {})
+
+            def failed_save(_payload, stream):
+                stream.write(b"incomplete checkpoint")
+                raise OSError("simulated full disk")
+
+            with patch("sim.checkpoints.torch.save", side_effect=failed_save):
+                with self.assertRaises(OSError):
+                    save_checkpoint(path, state, {})
+            self.assertEqual(load_checkpoint(path, agent, optimizer), 10)
+            self.assertFalse(path.with_suffix(".pt.tmp").exists())
+
+    def test_checkpoint_rejects_different_policy_before_loading(self):
+        agent, optimizer = agent_and_optimizer()
+        state = capture_state(agent, optimizer, 0)
+        state["policy"]["inputs"] = [Observable.RP_PITCH.value]
+        with self.assertRaises(ValueError):
+            restore_state(agent, optimizer, state)
+
+    def test_guard_needs_sustained_drop_and_restores_adam_with_lower_lr(self):
+        agent, optimizer = agent_and_optimizer()
+        guard = PolicyGuard(agent, optimizer)
+        self.assertEqual(guard.observe(100, 10), "best")
+        assert guard.best_state is not None
+        best = deepcopy(guard.best_state)
+        with torch.no_grad():
+            next(agent.parameters()).add_(1)
+        optimizer.state[next(agent.parameters())]["exp_avg"].add_(2)
+        self.assertEqual(guard.observe(20, 11), "keep")
+        self.assertEqual(guard.observe(80, 12), "keep")  # breaks the bad streak
+        self.assertEqual(guard.observe(20, 13), "keep")
+        rng = torch.get_rng_state().clone()
+        self.assertEqual(guard.observe(19, 14), "rollback")
+        self.assert_nested_equal(agent.state_dict(), best["model"])
+        expected_optimizer = deepcopy(best["optimizer"])
+        expected_optimizer["param_groups"][0]["lr"] = 0.005
+        self.assert_nested_equal(optimizer.state_dict(), expected_optimizer)
+        torch.testing.assert_close(torch.get_rng_state(), rng, rtol=0, atol=0)
+        self.assertEqual(guard.best_score, 100)
+        self.assertEqual(guard.rollbacks, 1)
+        self.assertEqual(guard.observe(0, 15), "keep")
+        self.assertEqual(guard.observe(0, 16), "rollback")
+        self.assertEqual(optimizer.param_groups[0]["lr"], 0.0025)
+
+    def test_guard_does_not_lock_initial_learning_and_keeps_improvements(self):
+        agent, optimizer = agent_and_optimizer()
+        guard = PolicyGuard(agent, optimizer)
+        self.assertEqual(guard.observe(-10, 0), "best")
+        self.assertEqual(guard.observe(-100, 1), "keep")
+        self.assertEqual(guard.observe(-100, 2), "keep")
+        self.assertEqual(guard.observe(120, 3), "best")
+        assert guard.best_state is not None
+        self.assertEqual(guard.best_state["next_iteration"], 3)
+        with self.assertRaises(FloatingPointError):
+            guard.observe(float("nan"), 4)
+
+    def test_nonfinite_reward_gradient_and_optimizer_updates_are_rolled_back(self):
+        for failure in ("reward", "gradient", "optimizer"):
+            with self.subTest(failure=failure):
+                agent, optimizer = agent_and_optimizer()
+                reward = float("nan") if failure == "reward" else 1.0
+                env = SingleEnvWrapper(OneStepEnv(reward))
+                before = capture_state(agent, optimizer, 0)
+                if failure == "gradient":
+                    hook = next(agent.parameters()).register_hook(
+                        lambda grad: grad * float("nan")
+                    )
+                    self.addCleanup(hook.remove)
+                original_step = optimizer.step
+
+                def bad_step(*args, **kwargs):
+                    result = original_step(*args, **kwargs)
+                    if failure == "optimizer":
+                        with torch.no_grad():
+                            next(agent.parameters()).fill_(float("inf"))
+                    return result
+
+                with patch.object(optimizer, "step", side_effect=bad_step):
+                    with self.assertRaises((FloatingPointError, RuntimeError)):
+                        training_update(config(), env, agent, optimizer, 0)
+                self.assert_nested_equal(capture_state(agent, optimizer, 0), before)
+                self.assertTrue(all(p.grad is None for p in agent.parameters()))
+
+    def test_failed_training_writes_resumable_state_and_failure_report(self):
+        agent, optimizer = agent_and_optimizer()
+        env = SingleEnvWrapper(OneStepEnv(float("nan")))
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            with self.assertLogs("sim.train_agent", level="ERROR"):
+                with self.assertRaises(FloatingPointError):
+                    run_training_loop(cfg, env, None, None, agent, optimizer,
+                                      PolicyGuard(agent, optimizer), 0)
+            self.assertEqual(
+                load_checkpoint(Path(folder) / "latest.pt", agent, optimizer), 0
+            )
+            report = (Path(folder) / "training_failure.txt").read_text()
+            self.assertIn("Non-finite reward", report)
+
+    def test_validation_is_repeatable_and_does_not_consume_training_rng(self):
+        cfg = OmegaConf.load(Path(__file__).resolve().parents[1] / "config/rlrp.yaml")
+        assert isinstance(cfg, DictConfig)
+        cfg.env.max_episode_steps = 5
+        cfg.env.randomize = True
+        agent = Agent(get_policy_inputs(cfg), cfg.policy.actions, hsize=4)
+        with ExitStack() as resources:
+            env = make_validation_env(cfg, resources)
+            self.assertEqual(env.num_envs, cfg.guard.episodes)
+            rng = torch.get_rng_state().clone()
+            first = validate_policy(cfg, env, agent)
+            second = validate_policy(cfg, env, agent)
+        self.assertEqual(first, second)
+        self.assertTrue(agent.training)
+        torch.testing.assert_close(torch.get_rng_state(), rng, rtol=0, atol=0)
+
+    def test_interrupt_saves_a_checkpoint_and_identifies_the_stop_reason(self):
+        agent, optimizer = agent_and_optimizer()
+        raw_env = OneStepEnv()
+        env = SingleEnvWrapper(raw_env)
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(raw_env, "step", side_effect=KeyboardInterrupt):
+                with self.assertLogs("sim.train_agent", level="ERROR"):
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_training_loop(
+                            config(folder), env, None, None, agent, optimizer,
+                            PolicyGuard(agent, optimizer), 0,
+                        )
+            self.assertEqual(
+                load_checkpoint(Path(folder) / "latest.pt", agent, optimizer), 0
+            )
+            report = (Path(folder) / "training_failure.txt").read_text()
+            self.assertIn("KeyboardInterrupt", report)
+
+    def test_plane_collisions_extend_beyond_visual_arena(self):
+        env = GymRP(actions=[Actions.ACC_BOTH_WHEELS], arena_half_size=4)
+        self.addCleanup(env.close)
+        env.reset(seed=1)
+        physics = env.dm_env
+        floor = physics.model.name2id("floor", "geom")
+        physics.data.qpos[0] = 100.0
+        physics.forward()
+        contacts = [(int(c.geom1), int(c.geom2)) for c in physics.data.contact]
+        self.assertEqual(sum(floor in pair for pair in contacts), 2)
+
+    def test_terminal_observations_are_checked_even_with_finite_reward(self):
+        agent, optimizer = agent_and_optimizer()
+        env = OneStepEnv()
+        invalid_transition = (
+            {Observable.OBS_TIME: np.array([float("nan")])}, 1.0, True, False, {}
+        )
+        before = capture_state(agent, optimizer, 0)
+        with patch.object(env, "step", return_value=invalid_transition):
+            with self.assertRaisesRegex(FloatingPointError, "Non-finite observation"):
+                training_update(config(), SingleEnvWrapper(env), agent, optimizer, 0)
+        self.assert_nested_equal(capture_state(agent, optimizer, 0), before)
+
+    def test_metric_transfer_failure_restores_the_completed_optimizer_update(self):
+        agent, optimizer = agent_and_optimizer()
+        before = capture_state(agent, optimizer, 0)
+        original_step = optimizer.step
+        original_numpy = torch.Tensor.numpy
+        fail_transfer = False
+
+        def step(*args, **kwargs):
+            nonlocal fail_transfer
+            result = original_step(*args, **kwargs)
+            fail_transfer = True
+            return result
+
+        def numpy(tensor, *args, **kwargs):
+            nonlocal fail_transfer
+            if fail_transfer:
+                fail_transfer = False
+                raise RuntimeError("metric transfer failed")
+            return original_numpy(tensor, *args, **kwargs)
+
+        with (
+            patch.object(optimizer, "step", side_effect=step),
+            patch.object(torch.Tensor, "numpy", new=numpy),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "metric transfer failed"):
+                training_update(config(), SingleEnvWrapper(OneStepEnv()),
+                                agent, optimizer, 0)
+        self.assert_nested_equal(capture_state(agent, optimizer, 0), before)
+
+    def test_final_checkpoint_failure_also_writes_a_failure_report(self):
+        agent, optimizer = agent_and_optimizer()
+        calls = 0
+
+        def save(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # Initial checkpoint succeeds; final checkpoint fails.
+                raise OSError("final upload failed")
+            return write_checkpoint(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            cfg.train.max_iterations = 0
+            with (
+                patch("sim.train_agent.write_checkpoint", side_effect=save),
+                self.assertLogs("sim.train_agent", level="ERROR"),
+            ):
+                with self.assertRaisesRegex(OSError, "final upload failed"):
+                    run_training_loop(
+                        cfg, SingleEnvWrapper(OneStepEnv()), None, None,
+                        agent, optimizer, PolicyGuard(agent, optimizer), 0,
+                    )
+            self.assertEqual(calls, 3)
+            self.assertEqual(
+                load_checkpoint(Path(folder) / "latest.pt", agent, optimizer), 0
+            )
+            report = (Path(folder) / "training_failure.txt").read_text()
+            self.assertIn("final upload failed", report)
+
+    def test_host_backup_is_saved_even_if_in_memory_restore_fails(self):
+        agent, optimizer = agent_and_optimizer()
+        before = capture_state(agent, optimizer, 0)
+        env = SingleEnvWrapper(OneStepEnv())
+        original_step = optimizer.step
+
+        def corrupt_step():
+            original_step()
+            with torch.no_grad():
+                next(agent.parameters()).fill_(float("inf"))
+
+        with tempfile.TemporaryDirectory() as folder:
+            with (
+                patch.object(optimizer, "step", side_effect=corrupt_step),
+                patch("sim.train_agent.restore_state",
+                      side_effect=RuntimeError("device lost")),
+                self.assertLogs("sim.train_agent", level="ERROR"),
+            ):
+                with self.assertRaises(FloatingPointError):
+                    run_training_loop(
+                        config(folder), env, None, None, agent, optimizer,
+                        PolicyGuard(agent, optimizer), 0,
+                    )
+            checkpoint = torch.load(Path(folder) / "latest.pt", weights_only=True)
+            self.assert_nested_equal(checkpoint["state"], before)
+            self.assertTrue(torch.isinf(next(agent.parameters())).all())
+
+
+if __name__ == "__main__":
+    unittest.main()

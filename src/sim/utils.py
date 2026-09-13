@@ -236,12 +236,40 @@ def flatten_dict(d, parent_key="", sep="_"):
     return dict(items)
 
 
-def npd2tensord(np_dict: dict) -> dict:
-    return {k: torch.from_numpy(v).float() for k, v in np_dict.items()}
+def npd2tensord(np_dict: dict, device: torch.device | str = "cpu") -> dict:
+    """Convert observations, packing CUDA inputs into one host-to-device transfer."""
+    device = torch.device(device)
+    if device.type == "cpu" or not np_dict:
+        return {k: torch.as_tensor(v, dtype=torch.float32, device=device)
+                for k, v in np_dict.items()}
+    arrays = {k: np.asarray(v, dtype=np.float32) for k, v in np_dict.items()}
+    flat = torch.from_numpy(np.concatenate([v.reshape(-1) for v in arrays.values()]))
+    flat = flat.to(device)
+    tensors = {}
+    offset = 0
+    for key, array in arrays.items():
+        tensors[key] = flat[offset:offset + array.size].reshape(array.shape)
+        offset += array.size
+    return tensors
 
 
 def tensord2npd(tensor_dict: dict) -> dict:
-    return {k: v.cpu().numpy() for k, v in tensor_dict.items()}
+    """Detach simulator commands; pack same-device CUDA actions into one transfer."""
+    if not tensor_dict:
+        return {}
+    first = next(iter(tensor_dict.values()))
+    if first.device.type == "cpu" or any(
+        v.device != first.device or v.dtype != first.dtype for v in tensor_dict.values()
+    ):
+        return {k: v.detach().cpu().numpy() for k, v in tensor_dict.items()}
+    packed = torch.cat([v.detach().reshape(-1) for v in tensor_dict.values()])
+    flat = packed.cpu().numpy()
+    arrays = {}
+    offset = 0
+    for key, tensor in tensor_dict.items():
+        arrays[key] = flat[offset:offset + tensor.numel()].reshape(tuple(tensor.shape))
+        offset += tensor.numel()
+    return arrays
 
 
 def get_returns(rewards: torch.Tensor, discount: float) -> torch.Tensor:
@@ -377,26 +405,29 @@ class EpisodeBuffer:
 
 
 def ebufs2batchd(
-    ebuf_l: list[EpisodeBuffer], device: torch.device | str = "cpu"
+    ebuf_l: list[EpisodeBuffer], device: torch.device | str | None = None
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, torch.Tensor]:
+    if device is None:
+        device = ebuf_l[0].values_l[0].device
     maxlen = max(buf.seq_len for buf in ebuf_l)
     bs = len(ebuf_l)
 
     values = torch.zeros((bs, maxlen), device=device)
     logps = torch.zeros((bs, maxlen), device=device)
-    valid_mask = torch.zeros((bs, maxlen), device=device)
-    rewards = torch.zeros((bs, maxlen), device=device)
+    # Assemble CPU-origin data on the host, then transfer each padded batch once.
+    valid_mask = torch.zeros((bs, maxlen))
+    rewards = torch.zeros((bs, maxlen))
     seq_lens = np.zeros(bs)
 
     for i, buf in enumerate(ebuf_l):
         seq_len = buf.seq_len
-        values[i, :seq_len] = buf.get_values()
-        logps[i, :seq_len] = buf.get_logps()
+        values[i, :seq_len] = buf.get_values().to(device)
+        logps[i, :seq_len] = buf.get_logps().to(device)
         rewards[i, :seq_len] = buf.get_rewards()
         seq_lens[i] = seq_len
         valid_mask[i, :seq_len] = 1.0
 
-    return logps, rewards, values, seq_lens, valid_mask
+    return logps, rewards.to(device), values, seq_lens, valid_mask.to(device)
 
 
 class Episode:

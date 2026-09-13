@@ -75,6 +75,8 @@ See [fixes.md](fixes.md) for the cleanup findings and before/after pseudocode.
 | `src/sim/train_agent.py` | Rollouts, actor–critic training, evaluation |
 | `src/sim/envs/rp_env.py` | MuJoCo model and Gymnasium environment |
 | `src/sim/utils.py` | Environment creation, batching, episode buffers and returns |
+| `src/sim/devices.py` | CPU/CUDA selection and isolated evaluation RNG streams |
+| `src/sim/checkpoints.py` | Portable training snapshots and validation rollback |
 | `src/sim/plot_utils.py` | Episode plots |
 | `src/nn_ctrl/nns.py` | Recurrent neural-network agent |
 | `src/riktigpatric/patrick.py` | Shared state/action definitions, filter and odometry state |
@@ -126,6 +128,50 @@ Training runs until interrupted unless `train.max_iterations` is set.
 `seed` initializes PyTorch/NumPy and provides the base seed for episode resets.
 Each iteration collects one episode per environment, with completed episodes
 masked out while the remaining environments finish.
+
+### Compute device and network size
+
+`train.device=auto` (default) selects an available CUDA device, otherwise CPU.
+Use `cpu`, `cuda`, or `cuda:N` to choose explicitly. An explicit CUDA request fails
+clearly if unavailable; it does not silently fall back to CPU. CUDA indices refer
+to devices visible to PyTorch, including any `CUDA_VISIBLE_DEVICES` mapping.
+
+```bash
+# Larger recurrent policy and batch on CUDA
+uv run python -m sim.train_agent train.device=cuda \
+  policy.hsize=256 policy.n_rnnlayers=2 env.n_parallel=64
+
+# Explicit CPU baseline
+uv run python -m sim.train_agent train.device=cpu
+
+# Choose a particular visible GPU
+uv run python -m sim.train_agent train.device=cuda:1
+```
+
+`policy.hsize` defaults to 64 and `policy.n_rnnlayers` to 1. These configure the
+GRU and connected heads; observation encoders retain their existing sizes.
+Network shapes must match when resuming or restoring a checkpoint. Changing
+width/layer count requires a fresh policy or a separately designed weight transfer.
+
+The NN, recurrent state, losses and backward pass run on the selected device.
+MuJoCo physics still runs on CPU through `SyncVectorEnv`; larger environment
+batches are not automatically distributed across CPU workers or multiple GPUs.
+CUDA policy inputs and outputs are packed into one transfer in each direction
+per simulation step. Only configured policy inputs (plus the action timestamp)
+are sent to the accelerator; CSVs and plots are exported on CPU.
+
+Validation and video evaluation preserve the CPU and selected CUDA RNG streams
+and restore the agent's previous train/eval mode. MLflow records the resolved
+device and PyTorch/CUDA build versions in `training.*` tags.
+
+Recovery snapshots are kept in host RAM to avoid duplicating model/Adam state in
+VRAM. This costs a device-to-host copy per protected update. Full-episode
+backpropagation is retained, so larger batches, hidden sizes and episode lengths
+still increase training memory use. Benchmark throughput for the chosen setup;
+CUDA is not necessarily faster for the small default network.
+
+EGL/video rendering is configured separately from `train.device`. CUDA execution
+requires a compatible PyTorch build, driver and accessible GPU.
 
 ### Tracking tasks
 
@@ -325,14 +371,89 @@ the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assum
   `logging.mlflow.enabled=true` and set `MLFLOW_TRACKING_URI`; optional credentials
   can be supplied in the environment or a local `.env` file.
 - With MLflow enabled, metrics are logged every `logging.mlflow.push_freq`
-  iterations and models every `logging.save_freq` iterations. Without MLflow,
-  model checkpoints are not saved.
+  iterations and deployment policy models every `logging.save_freq` iterations.
+  Resumable training checkpoints are saved locally even without MLflow (see below).
 - Training metric names are grouped by prefix: `losses/{policy,value,total}`,
   `returns/{mean,min,max,std}`, and `episodes/length/{mean,min,max}`.
 - Head evaluations also log `evaluation/head/{camera_pitch_mae,neck_yaw_mae,
   camera_estimation_mae}` in radians, over the post-action observations.
 - `policy.restore_id` accepts an MLflow **logged model ID** to restore an agent.
   Optimizer state and iteration count start fresh.
+
+### Training checkpoints and degradation guard
+
+Training checkpoints live in the Hydra run output directory, under `checkpoints/`.
+`checkpoints.dir` can override that location. With MLflow enabled, they are also
+uploaded as `checkpoints/*` artifacts:
+
+| File | Purpose |
+|------|---------|
+| `best.pt` | Best fixed-benchmark validation return seen in this run |
+| `latest.pt` | Initial/periodic, new best, recovered, final or interrupted training state |
+| `iteration_XXXXXX.pt` | Periodic archive, every `checkpoints.every` updates (100 by default) |
+| `training_failure.txt` | Exception/interrupt traceback if training stops abnormally |
+
+The `.pt` files contain model weights, Adam state, CPU PyTorch/NumPy/Python RNG
+states, the selected CUDA RNG state when applicable, configuration and the next
+iteration number. They are tensor/data
+checkpoints loaded with `weights_only=True`, rather than serialized Python agents.
+Writes replace files atomically. Local saves happen before uploads, so an MLflow
+upload failure still leaves a local recovery point.
+
+```bash
+# Resume a downloaded or local training checkpoint; use an absolute path
+uv run python -m sim.train_agent train.resume_from=/path/to/checkpoints/latest.pt
+
+# Resume the strongest saved benchmark policy, including its Adam state
+uv run python -m sim.train_agent train.resume_from=/path/to/checkpoints/best.pt
+```
+
+`train.resume_from` and `policy.restore_id` are mutually exclusive. The former
+restores optimizer LR and progress; the latter loads policy weights with a new
+optimizer. Input order, action specifications and network shapes must match for checkpoint
+resume. Keep the same task/seed overrides for reproducible continuation: saved
+configuration is included for reference, while the supplied run configuration
+remains active. `train.max_iterations` is a total limit, not an additional count.
+
+Checkpoints keep tensor data on CPU and can be loaded on CPU or the selected CUDA
+device; Adam moments follow the model's parameters. The saved CUDA RNG stream is
+restored to the selected GPU, even if its visible index differs from the source.
+CPU loads do not require CUDA and ignore that optional stream. Older CPU-only
+checkpoints remain readable; when moving one to CUDA, the GPU stream starts from
+the configured seed. Cross-device continuation is supported, but it is not
+bitwise-reproducible across CPU/CUDA or different hardware/software versions.
+
+With `guard.enabled=true` (default), training runs a fixed-seed validation batch
+before the first update and every `guard.every=25` updates. The batch has
+`guard.episodes=4` environments, uses the environment's default targets/trajectory
+and randomization settings, and does not render. Training-only per-environment
+target overrides are not used for this benchmark. Validation preserves training
+RNG and policy mode. A resumed run establishes a fresh benchmark baseline.
+
+Rollback requires **two consecutive** scores more than **50% and 25 return units**
+below the best, after the best reaches at least 50. These thresholds are configurable
+with `guard.patience`, `drop_fraction`, `absolute_drop` and `min_best_return`.
+Rollback restores the best weights and optimizer moments, halves the current
+learning rate (down to `guard.min_lr`), and continues at the current iteration and
+sampling state. It does not rewind into exactly the same failing sample sequence.
+
+Metrics are grouped under `validation/returns/*`, `guard/*` and
+`optimization/{gradient_norm,learning_rate}`. Validation step numbers count
+completed updates; zero is the initial benchmark. `guard.enabled=false` disables
+performance rollback, but local checkpoints and numerical update checks remain.
+When `guard/rolled_back=1`, `validation/*` describes the rejected candidate;
+`guard/best_return` describes the recovered reference policy's benchmark score.
+
+Non-finite observations, rewards, losses or updates stop training with a recovery
+checkpoint; they are not silently retried indefinitely. Hard kills and power loss
+cannot run the failure handler, so recovery then uses the most recent saved state.
+`latest.pt` is not written after every update by default, and it may be worse than
+`best.pt`. A validation guard mitigates policy collapse; it is not a monotonic-
+improvement guarantee or a replacement for broader evaluation. A pre-update host
+snapshot can still be saved if an accelerator error prevents in-memory rollback.
+
+See the [review of run 2b502b61](docs/run_2b502b61.md) for the observed degradation
+and checkpoint gaps that motivated these changes.
 
 ### Reading an episode trace
 
@@ -407,6 +528,11 @@ corrects for slip or yaw.
 
 ## Rewards and episode limits
 
+`env.arena_half_size` controls the rendered floor extent (default 20 m, giving a
+40×40 m visual arena). The MuJoCo plane's collision surface is infinite: the robot
+cannot fall off its visual edge. Changing this value does not add a position
+boundary or change the tracking objective.
+
 Rewards are computed from the newly observed state after each action:
 
 ```text
@@ -465,3 +591,6 @@ Tracking checks cover task-specific policy inputs, live batched velocity command
 disabled tracking, and the absence of a conflicting motion penalty in velocity mode.
 Head checks compare shared rotations with MuJoCo, test neck-yaw coupling, ensure
 only the NN commands actuators, and verify head-reference timing and reward inputs.
+CUDA integration checks run when PyTorch detects a CUDA device and otherwise
+report skips. They cover rollout/backpropagation, transfers, RNG isolation,
+checkpoint migration and rollback on the accelerator.

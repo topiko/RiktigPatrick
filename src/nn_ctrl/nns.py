@@ -140,6 +140,11 @@ class Agent(nn.Module):
             nn.Linear(16, 1),
         )
 
+    @property
+    def device(self) -> torch.device:
+        """Actual parameter device, including after .to() or checkpoint loading."""
+        return next(self.parameters()).device
+
     def forward(
         self, x: dict[StateVarKey, torch.Tensor], h: torch.Tensor | None = None
     ) -> tuple[dict[Actions, torch.Tensor], torch.Tensor, torch.Tensor | None]:

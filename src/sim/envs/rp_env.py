@@ -302,7 +302,10 @@ class MujocoRP:
         )
 
 
-def make_arena() -> mjcf.RootElement:
+def make_arena(half_size: float = 20.0) -> mjcf.RootElement:
+    """Create a visual arena on a collision plane that extends infinitely."""
+    if not np.isfinite(half_size) or half_size <= 0:
+        raise ValueError("arena_half_size must be positive and finite")
     arena = mjcf.RootElement("arena")
     chequered = arena.asset.add(
         "texture",
@@ -322,7 +325,8 @@ def make_arena() -> mjcf.RootElement:
         reflectance=0.1,
     )
     arena.worldbody.add(
-        "geom", name="floor", type="plane", size=[4, 4, 0.1], material=grid
+        "geom", name="floor", type="plane",
+        size=[half_size, half_size, 0.1], material=grid,
     )
     for x in [-2, 2]:
         arena.worldbody.add(
@@ -412,6 +416,7 @@ class GymRP(gymnasium.Env):
         head_trajectory: Sequence[Sequence[float]] | None = None,
         max_head_vel: float = 1.0,
         camera_view: str = "external",
+        arena_half_size: float = 20.0,
     ):
         if tracking_mode not in ("position", "velocity", "none"):
             raise ValueError("tracking_mode must be position, velocity or none")
@@ -427,6 +432,7 @@ class GymRP(gymnasium.Env):
         self.head_tracking = head_tracking
         self.camera_view = camera_view
         self.max_head_vel = max_head_vel
+        self.arena_half_size = arena_half_size
         self._randomize = randomize
         self._init_pitch_scale = 2.0
         self.max_wheel_vel = max_wheel_vel
@@ -524,7 +530,7 @@ class GymRP(gymnasium.Env):
         )
 
         # Make arena:
-        arena = make_arena()
+        arena = make_arena(self.arena_half_size)
 
         init_pitch = prng.normal(0, self._init_pitch_scale) if self._randomize else 0.0
 

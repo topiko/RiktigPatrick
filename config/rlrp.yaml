@@ -29,20 +29,39 @@ reward:
   reward/total: 1.0
 
 train:
+  device: auto  # auto selects CUDA when available; cpu, cuda, or cuda:N also supported
   policy_lr: 0.0005
   grad_clip: 10.0
   max_iterations: null  # null trains until interrupted
+  resume_from: null  # full local/MLflow-downloaded .pt checkpoint (weights + Adam + RNG)
   target_positions: null  # optional list of n_parallel fixed targets, in meters
   target_trajectories: null  # optional per-env lists of [time, position] waypoints
   target_velocities: null  # optional list of n_parallel velocity commands, in m/s
   head_targets: null  # optional per-env [world camera elevation, neck yaw], rad
   head_trajectories: null  # optional per-env [time, elevation, yaw] waypoints
 
+checkpoints:
+  dir: ${hydra:runtime.output_dir}/checkpoints
+  every: 100  # archive periodic checkpoints, independently of MLflow model logging
+
+guard:
+  enabled: true
+  every: 25  # validate after this many training updates, and before the first update
+  episodes: 4  # fixed validation batch; no video rendering
+  seed: 1042
+  drop_fraction: 0.5  # rollback after a drop larger than both this fraction and absolute_drop
+  absolute_drop: 25.0
+  patience: 2  # consecutive degraded validation checks
+  min_best_return: 50.0  # do not constrain noisy initial learning
+  lr_factor: 0.5
+  min_lr: 0.000001
+
 env:
   step_time: 0.01  # seconds
   randomize: False
   n_parallel: 16
   max_episode_steps: 2000
+  arena_half_size: 20.0  # visual floor extent in meters; plane collisions are infinite
   tracking_mode: velocity  # velocity (low-level control), position, or none
   target_pos: 0.0  # default fixed position target, meters from episode origin
   target_trajectory: null  # optional default trajectory for training and evaluation
@@ -61,6 +80,8 @@ env:
   max_head_vel: 1.0  # rad/s; prototype hardware speed has not been measured
 
 policy:
+  hsize: 64
+  n_rnnlayers: 1
   restore_id: null #m-29426a56db26487faa3adad22b42489a
   actions:
     act/accelerate_both_wheels:

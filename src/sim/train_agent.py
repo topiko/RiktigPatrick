@@ -1,6 +1,10 @@
+import logging
 import os
+import random
+import traceback
 from collections.abc import Sequence
 from contextlib import ExitStack
+from copy import deepcopy
 from pathlib import Path
 
 import dotenv
@@ -28,6 +32,15 @@ from riktigpatric.trajectory import (
     PositionTrajectory,
     validate_head_target,
 )
+from sim.checkpoints import (
+    PolicyGuard,
+    capture_state,
+    load_checkpoint,
+    require_finite,
+    restore_state,
+    save_checkpoint,
+)
+from sim.devices import evaluation_rng, resolve_device, seed_torch
 from sim.episode_io import save_episode_csv
 from sim.plot_utils import plot_episode
 from sim.utils import (
@@ -45,6 +58,7 @@ from sim.utils import (
 )
 
 dotenv.load_dotenv()  # Load environment variables from .env file
+LOG = logging.getLogger(__name__)
 
 HYDRA_CONFIG_DIR = os.getenv(
     "HYDRA_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config")
@@ -90,6 +104,14 @@ def get_policy_inputs(cfg: DictConfig) -> list[str]:
 
 def _take_idx_from_d(d, idx: int):
     return {k: v[idx].copy() for k, v in d.items()}
+
+
+def _require_finite_observations(observations: dict, seed: int):
+    for key, value in observations.items():
+        if not np.isfinite(value).all():
+            raise FloatingPointError(
+                f"Non-finite observation {key}, rollout seed {seed}"
+            )
 
 
 def _zero_hidden_state(
@@ -201,12 +223,18 @@ def rollout(
         obs_d, rp_env, target_positions, target_trajectories, target_velocities
     )
     obs_d = add_head_targets(obs_d, rp_env, head_targets, head_trajectories)
+    _require_finite_observations(obs_d, seed)
     while active.any():
-        obs_d_t = npd2tensord(obs_d)
+        policy_obs = {key: obs_d[key] for key in (*agent.inputs, Observable.OBS_TIME)}
+        obs_d_t = npd2tensord(policy_obs, device=agent.device)
 
         action, logp, value, h = agent.act(obs_d_t, h)
+        require_finite((action, logp, value), "policy output")
         action_np = tensord2npd(action)
         next_obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
+        _require_finite_observations(next_obs_d, seed)
+        if not np.isfinite(reward).all():
+            raise FloatingPointError(f"Non-finite reward, rollout seed {seed}")
 
         done = (terminated | truncated) & active
 
@@ -234,13 +262,22 @@ def rollout(
 
 @hydra.main(config_path=HYDRA_CONFIG_DIR, config_name="rlrp", version_base=None)
 def main(cfg: DictConfig):
-    torch.manual_seed(cfg.seed)
+    device = resolve_device(cfg.train.device)
+    seed_torch(cfg.seed, device)
     np.random.seed(cfg.seed)
+    random.seed(cfg.seed)
     with ExitStack() as resources:
-        train(cfg, resources)
+        train(cfg, resources, device=device)
 
 
-def train(cfg: DictConfig, resources: ExitStack):
+def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = None):
+    device = resolve_device(cfg.train.device if device is None else device)
+    if cfg.checkpoints.every < 1 or cfg.guard.every < 1 or cfg.guard.episodes < 1:
+        raise ValueError(
+            "Checkpoint/validation intervals and episode count must be positive"
+        )
+    if cfg.train.resume_from is not None and cfg.policy.restore_id is not None:
+        raise ValueError("Choose a training checkpoint or an MLflow policy, not both")
     # Setup MLflow if enabled
     if cfg.logging.mlflow.enabled:
         if (tracking_uri := os.getenv("MLFLOW_TRACKING_URI")) is None:
@@ -248,6 +285,11 @@ def train(cfg: DictConfig, resources: ExitStack):
         mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(cfg.logging.mlflow.experiment_name)
         resources.enter_context(mlflow.start_run())
+        mlflow.set_tags({
+            "training.device": str(device),
+            "training.pytorch_version": str(torch.__version__),
+            "training.cuda_version": torch.version.cuda or "none",
+        })
 
         # Log config parameters
         flat_params = OmegaConf.to_container(cfg, resolve=True)
@@ -264,30 +306,62 @@ def train(cfg: DictConfig, resources: ExitStack):
 
     rp_video_env = make_video_env(cfg, resources)
 
-    # Create agent
+    agent = make_agent(cfg, device)
+    LOG.info("Policy device %s; GRU hidden size %d, layers %d",
+             agent.device, agent.rnn.hidden_size, agent.rnn.num_layers)
+    optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
+    next_iteration = 0
+    if cfg.train.resume_from is not None:
+        next_iteration = load_checkpoint(cfg.train.resume_from, agent, optimizer)
+        LOG.info("Resumed training at iteration %d", next_iteration)
+    agent.train()
+    require_finite(agent.state_dict(), "model")
+    guard = PolicyGuard(
+        agent, optimizer, drop_fraction=cfg.guard.drop_fraction,
+        absolute_drop=cfg.guard.absolute_drop, patience=cfg.guard.patience,
+        min_best_return=cfg.guard.min_best_return,
+        lr_factor=cfg.guard.lr_factor, min_lr=cfg.guard.min_lr,
+    )
+    validation_env = make_validation_env(cfg, resources) if cfg.guard.enabled else None
+    run_training_loop(
+        cfg, rp_env, rp_video_env, validation_env,
+        agent, optimizer, guard, next_iteration,
+    )
+
+
+def make_agent(cfg: DictConfig, device: torch.device | None = None) -> Agent:
+    device = resolve_device(cfg.train.device if device is None else device)
     if cfg.policy.restore_id is not None:
-        print(f"Restoring agent from MLflow model ID: {cfg.policy.restore_id}")
+        LOG.info("Restoring agent from MLflow model ID: %s", cfg.policy.restore_id)
         agent = mlflow.pytorch.load_model(
-            mlflow.get_logged_model(cfg.policy.restore_id).model_uri, map_location="cpu"
+            mlflow.get_logged_model(cfg.policy.restore_id).model_uri,
+            map_location=device,
         )
         if (
             set(agent.inputs) != set(get_policy_inputs(cfg))
             or set(agent.actions) != set(cfg.policy.actions)
+            or agent.rnn.hidden_size != cfg.policy.hsize
+            or agent.rnn.num_layers != cfg.policy.n_rnnlayers
         ):
-            raise ValueError("Restored policy inputs/actions do not match this task")
-    else:
-        agent = Agent(inputs=get_policy_inputs(cfg), actions=cfg.policy.actions)
+            raise ValueError(
+                "Restored policy architecture/inputs/actions do not match this task"
+            )
+        return agent.to(device)
+    return Agent(
+        inputs=get_policy_inputs(cfg), actions=cfg.policy.actions,
+        hsize=cfg.policy.hsize, n_rnnlayers=cfg.policy.n_rnnlayers,
+    ).to(device)
 
-    optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
 
-    i = 0
-    while cfg.train.max_iterations is None or i < cfg.train.max_iterations:
-        optimizer.zero_grad()
-
+def training_update(cfg, rp_env, agent, optimizer, iteration: int) -> dict[str, float]:
+    """One transactional update: a failed/non-finite update restores its input state."""
+    before = capture_state(agent, optimizer, iteration)
+    try:
+        optimizer.zero_grad(set_to_none=True)
         episode_buf_l = rollout(
             rp_env,
             agent,
-            seed=cfg.seed + i,
+            seed=cfg.seed + iteration,
             target_positions=cfg.train.target_positions,
             target_trajectories=cfg.train.target_trajectories,
             target_velocities=cfg.train.target_velocities,
@@ -295,7 +369,9 @@ def train(cfg: DictConfig, resources: ExitStack):
             head_trajectories=cfg.train.head_trajectories,
         )
 
-        logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(episode_buf_l)
+        logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(
+            episode_buf_l, device=agent.device
+        )
 
         G_t = get_returns(rewards, discount=cfg.rl.discount)
         advantages = get_advantages(G_t, values)
@@ -304,49 +380,173 @@ def train(cfg: DictConfig, resources: ExitStack):
         values_loss = (((values - G_t) ** 2) * valid_mask).sum() / valid_mask.sum()
 
         loss = policy_loss + values_loss
-
+        require_finite((policy_loss, values_loss, loss), "loss")
         loss.backward()
-
-        # Gradient clipping
-        torch.nn.utils.clip_grad_norm_(agent.parameters(), max_norm=cfg.train.grad_clip)
-
-        optimizer.step()
-
-        episode_returns = (rewards * valid_mask).sum(dim=1).cpu().numpy()
-        mean_return = episode_returns.mean()
-
-        print(
-            f"Step {i:4d}: p_l={policy_loss.item():.4f}, "
-            f"v_l={values_loss.item():.4f}, l={loss.item():.4f}, "
-            f"ret={mean_return:.2f}, mean_ep_len={seq_lens.mean():.0f}"
+        gradient_norm = torch.nn.utils.clip_grad_norm_(
+            agent.parameters(), max_norm=cfg.train.grad_clip, error_if_nonfinite=True
         )
+        optimizer.step()
+        require_finite(agent.state_dict(), "updated model")
+        require_finite(optimizer.state_dict(), "updated optimizer")
+        # CPU metric transfers are part of accepting the update too.
+        episode_returns = (rewards * valid_mask).sum(dim=1).cpu().numpy()
+        return {
+            "losses/policy": policy_loss.item(), "losses/value": values_loss.item(),
+            "losses/total": loss.item(), "returns/mean": float(episode_returns.mean()),
+            "returns/max": float(episode_returns.max()),
+            "returns/min": float(episode_returns.min()),
+            "returns/std": float(episode_returns.std()),
+            "episodes/length/min": float(min(seq_lens)),
+            "episodes/length/max": float(max(seq_lens)),
+            "episodes/length/mean": float(seq_lens.mean()),
+            "optimization/gradient_norm": float(gradient_norm),
+            "optimization/learning_rate": float(optimizer.param_groups[0]["lr"]),
+        }
+    except BaseException as error:
+        # Host-side recovery remains saveable even if a CUDA error prevents an
+        # in-memory restore. Preserve the original exception, not a restore error.
+        setattr(error, "training_state", before)
+        try:
+            restore_state(agent, optimizer, before)
+        except Exception:
+            LOG.exception("In-memory rollback failed; CPU recovery snapshot retained")
+        raise
 
-        # Log metrics to MLflow
-        if cfg.logging.mlflow.enabled and i % cfg.logging.mlflow.push_freq == 0:
-            mlflow.log_metrics(
-                {
-                    "losses/policy": policy_loss.item(),
-                    "losses/value": values_loss.item(),
-                    "losses/total": loss.item(),
-                    "returns/mean": mean_return,
-                    "returns/max": episode_returns.max(),
-                    "returns/min": episode_returns.min(),
-                    "returns/std": episode_returns.std(),
-                    "episodes/length/min": min(seq_lens),
-                    "episodes/length/max": max(seq_lens),
-                    "episodes/length/mean": seq_lens.mean(),
-                },
-                step=i,
-            )
 
-        if rp_video_env is not None and i % cfg.logging.plot_freq == 0:
-            evaluate_and_plot(cfg, rp_video_env, agent, i)
+def write_checkpoint(cfg, state, name: str, score=None, *, upload: bool = True) -> Path:
+    config = OmegaConf.to_container(cfg, resolve=True)
+    assert isinstance(config, dict)
+    path = save_checkpoint(Path(cfg.checkpoints.dir) / name, state, config, score)
+    if upload and cfg.logging.mlflow.enabled:
+        mlflow.log_artifact(str(path), artifact_path="checkpoints")
+    return path
 
-        if cfg.logging.mlflow.enabled and (i % cfg.logging.save_freq == 0):
-            mlflow.pytorch.log_model(agent, name=f"agent_{i:04d}", step=i)
-            print("  💾 Saved model")
 
-        i += 1
+def make_validation_env(cfg, resources: ExitStack):
+    validation_cfg = deepcopy(cfg)
+    validation_cfg.env.n_parallel = cfg.guard.episodes
+    env = register_and_make_env(validation_cfg)
+    resources.callback(env.close)
+    return SingleEnvWrapper(env) if isinstance(env, Env) else env
+
+
+def evaluation_rollout(env, agent: Agent, seed: int) -> list[EpisodeBuffer]:
+    """Use eval() without gradients and isolate all evaluation random streams."""
+    was_training = agent.training
+    try:
+        agent.eval()
+        with evaluation_rng(agent.device, seed), torch.no_grad():
+            return rollout(env, agent, seed=seed)
+    finally:
+        agent.train(was_training)
+
+
+def validate_policy(cfg, env, agent) -> dict[str, float]:
+    """Fixed stochastic action/environment seeds, without affecting training RNG."""
+    buffers = evaluation_rollout(env, agent, cfg.guard.seed)
+    returns = np.array([sum(buffer.rewards_l) for buffer in buffers])
+    if not np.isfinite(returns).all():
+        raise FloatingPointError("Non-finite validation returns")
+    return {
+        "validation/returns/mean": float(returns.mean()),
+        "validation/returns/min": float(returns.min()),
+        "validation/returns/max": float(returns.max()),
+        "validation/returns/std": float(returns.std()),
+        "validation/episodes/length/mean": float(
+            np.mean([b.seq_len for b in buffers])
+        ),
+    }
+
+
+def check_policy_guard(cfg, env, agent, guard, next_iteration: int):
+    metrics = validate_policy(cfg, env, agent)
+    score = metrics["validation/returns/mean"]
+    decision = guard.observe(score, next_iteration)
+    if decision == "best":
+        write_checkpoint(cfg, guard.best_state, "best.pt", score)
+        write_checkpoint(cfg, guard.best_state, "latest.pt", score)
+    if decision == "rollback":
+        LOG.warning("Policy degradation: restored best return %.2f; LR now %.3g",
+                    guard.best_score, guard.optimizer.param_groups[0]["lr"])
+        # Persist the restored state and reduced optimizer LR immediately.
+        write_checkpoint(
+            cfg, capture_state(agent, guard.optimizer, next_iteration), "latest.pt"
+        )
+    metrics.update({
+        "guard/best_return": guard.best_score,
+        "guard/bad_evaluations": guard.bad_evaluations,
+        "guard/rollbacks": guard.rollbacks,
+        "guard/rolled_back": int(decision == "rollback"),
+        "guard/learning_rate": guard.optimizer.param_groups[0]["lr"],
+    })
+    LOG.info("Validation at %d: %.2f; best %.2f (%s)",
+             next_iteration, score, guard.best_score, decision)
+    if cfg.logging.mlflow.enabled:
+        mlflow.log_metrics(metrics, step=next_iteration)
+
+
+def preserve_training_failure(
+    cfg, agent, optimizer, next_iteration: int, report: str,
+    *, state: dict | None = None,
+):
+    LOG.error("Training stopped; preserving the last finite state:\n%s", report)
+    try:
+        if state is None:
+            state = capture_state(agent, optimizer, next_iteration)
+        path = write_checkpoint(cfg, state, "latest.pt", upload=False)
+        failure = path.parent / "training_failure.txt"
+        failure.write_text(report, encoding="utf-8")
+        if cfg.logging.mlflow.enabled:
+            mlflow.log_artifact(str(path), artifact_path="checkpoints")
+            mlflow.log_artifact(str(failure), artifact_path="checkpoints")
+    except Exception:
+        LOG.exception("Could not persist/upload failure artifacts")
+
+
+def run_training_loop(
+    cfg, env, video_env, validation_env, agent, optimizer, guard, start
+):
+    next_iteration = start
+    try:
+        write_checkpoint(cfg, capture_state(agent, optimizer, start), "latest.pt")
+        if validation_env is not None:
+            check_policy_guard(cfg, validation_env, agent, guard, start)
+        while (
+            cfg.train.max_iterations is None
+            or next_iteration < cfg.train.max_iterations
+        ):
+            iteration = next_iteration
+            metrics = training_update(cfg, env, agent, optimizer, iteration)
+            next_iteration = iteration + 1
+            LOG.info("Step %4d: p_l=%.4f, v_l=%.4f, ret=%.2f, mean_ep_len=%.0f",
+                     iteration, metrics["losses/policy"], metrics["losses/value"],
+                     metrics["returns/mean"], metrics["episodes/length/mean"])
+            if (
+                cfg.logging.mlflow.enabled
+                and iteration % cfg.logging.mlflow.push_freq == 0
+            ):
+                mlflow.log_metrics(metrics, step=iteration)
+            if validation_env is not None and next_iteration % cfg.guard.every == 0:
+                check_policy_guard(cfg, validation_env, agent, guard, next_iteration)
+            if next_iteration % cfg.checkpoints.every == 0:
+                state = capture_state(agent, optimizer, next_iteration)
+                write_checkpoint(cfg, state, f"iteration_{iteration:06d}.pt")
+                write_checkpoint(cfg, state, "latest.pt")
+            if video_env is not None and iteration % cfg.logging.plot_freq == 0:
+                evaluate_and_plot(cfg, video_env, agent, iteration)
+            if cfg.logging.mlflow.enabled and iteration % cfg.logging.save_freq == 0:
+                mlflow.pytorch.log_model(
+                    agent, name=f"agent_{iteration:04d}", step=iteration
+                )
+        write_checkpoint(
+            cfg, capture_state(agent, optimizer, next_iteration), "latest.pt"
+        )
+    except BaseException as error:
+        preserve_training_failure(
+            cfg, agent, optimizer, next_iteration, traceback.format_exc(),
+            state=getattr(error, "training_state", None),
+        )
+        raise
 
 
 def make_video_env(cfg: DictConfig, resources: ExitStack) -> SingleEnvWrapper | None:
@@ -361,16 +561,13 @@ def make_video_env(cfg: DictConfig, resources: ExitStack) -> SingleEnvWrapper | 
 
 
 def evaluate_and_plot(cfg: DictConfig, env: SingleEnvWrapper, agent: Agent, i: int):
-    # Evaluation sampling must not change subsequent training action samples.
-    with torch.random.fork_rng(devices=[]), torch.no_grad():
-        torch.manual_seed(cfg.seed + i + 10000)
-        env.name_prefix = f"rp_iter_{i:04d}"
-        buffers = rollout(env, agent, seed=cfg.seed + i + 10000)
-        _, rewards, values, _, _ = ebufs2batchd(buffers)
-        env.stop_recording()
-        video_path = Path(env.video_folder) / (
-            f"{env.name_prefix}-episode-{env.episode_id}.mp4"
-        )
+    env.name_prefix = f"rp_iter_{i:04d}"
+    buffers = evaluation_rollout(env, agent, cfg.seed + i + 10000)
+    _, rewards, values, _, _ = ebufs2batchd(buffers, device=agent.device)
+    env.stop_recording()
+    video_path = Path(env.video_folder) / (
+        f"{env.name_prefix}-episode-{env.episode_id}.mp4"
+    )
 
     returns = get_returns(rewards, discount=cfg.rl.discount)
     advantages = get_advantages(returns, values)
