@@ -2,6 +2,9 @@ defaults:
   - rlrp
   - _self_
 
+curriculum:
+  enabled: false
+
 env:
   tracking_mode: position
   n_parallel: 2

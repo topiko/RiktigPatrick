@@ -64,6 +64,7 @@ class Actions(str, Enum):
 
     VEL_LEFT_WHEEL = "act/left_wheel_vel"
     VEL_RIGHT_WHEEL = "act/right_wheel_vel"
+    VEL_WHEEL_DIFF = "act/wheel_vel_diff"  # right minus left wheel velocity, rad/s
     VEL_HEAD_PITCH = "act/head_pitch_vel"  # rad/s - head pitch velocity control
     VEL_HEAD_TURN = "act/head_turn_vel"  # rad/s - head turn velocity control
 
@@ -134,6 +135,7 @@ class StepAction:
 class Target(str, Enum):
     TARGET_POS = "target/pos"  # fore/aft distance from episode origin, meters
     TARGET_VEL = "target/vel"  # signed fore/aft velocity, m/s
+    YAW_RATE = "target/yaw_rate"  # rotation about body +Z, positive left, rad/s
     CAMERA_PITCH_WORLD = "target/camera_pitch_world"  # elevation, positive up, rad
     HEAD_YAW_NECK = "target/head_yaw_neck"  # local joint angle, positive left, rad
 
@@ -144,7 +146,7 @@ class Target(str, Enum):
             Number of channels (1 for scalars, 3 for vectors)
         """
         if self in {
-            Target.TARGET_POS, Target.TARGET_VEL,
+            Target.TARGET_POS, Target.TARGET_VEL, Target.YAW_RATE,
             Target.CAMERA_PITCH_WORLD, Target.HEAD_YAW_NECK,
         }:
             return 1
@@ -174,6 +176,7 @@ class Target(str, Enum):
 class DerivedObs(str, Enum):
     CURRENT_POS = "derived/pos"  # fore/aft wheel odometry, meters
     CURRENT_VEL = "derived/vel"  # signed wheel-odometry velocity, m/s
+    YAW_RATE = "derived/yaw_rate"  # gyro body-Z rate, positive left, rad/s
     CAMERA_PITCH_WORLD = "derived/camera_pitch_world"  # estimated elevation, rad
 
     def dim(self) -> int:
@@ -185,6 +188,7 @@ class DerivedObs(str, Enum):
         if self in {
             DerivedObs.CURRENT_POS,
             DerivedObs.CURRENT_VEL,
+            DerivedObs.YAW_RATE,
             DerivedObs.CAMERA_PITCH_WORLD,
         }:
             return 1
@@ -236,6 +240,7 @@ class Observable(str, Enum):
     REWARD_HEAD_YAW = "reward/head_yaw"
     REWARD_POS = "reward/pos"
     REWARD_VEL = "reward/vel"
+    REWARD_YAW_RATE = "reward/yaw_rate"
     REWARD_TOTAL = "reward/total"
 
     @classmethod
@@ -359,10 +364,12 @@ class State:
         self.derived_obs: dict[DerivedObs, np.ndarray] = {
             DerivedObs.CURRENT_POS: np.array([0.0]),
             DerivedObs.CURRENT_VEL: np.array([0.0]),
+            DerivedObs.YAW_RATE: np.array([0.0]),
         }
         self.targets: dict[Target, np.ndarray] = {
             Target.TARGET_POS: np.array([0.0]),
             Target.TARGET_VEL: np.array([0.0]),
+            Target.YAW_RATE: np.array([0.0]),
             Target.CAMERA_PITCH_WORLD: np.array([0.0]),
             Target.HEAD_YAW_NECK: np.array([0.0]),
         }
@@ -388,6 +395,15 @@ class State:
     def target_vel(self, value: float):
         """Update the signed forward-velocity command without resetting state."""
         self._set_target(Target.TARGET_VEL, value)
+
+    @property
+    def target_yaw_rate(self) -> float:
+        return float(self.targets[Target.YAW_RATE][0])
+
+    @target_yaw_rate.setter
+    def target_yaw_rate(self, value: float):
+        """Set the body-Z angular-rate reference without generating wheel commands."""
+        self._set_target(Target.YAW_RATE, value)
 
     def _set_target(self, key: Target, value: float):
         value = float(value)
@@ -484,6 +500,7 @@ class State:
         # Nominal-radius wheel odometry; does not compensate for slip or yaw.
         self.derived_obs[DerivedObs.CURRENT_VEL] = wheel_velocity
         self.derived_obs[DerivedObs.CURRENT_POS] += wheel_velocity * dt
+        self.derived_obs[DerivedObs.YAW_RATE] = gyro[2:3].copy()
         self.obs = obs
         self._update_camera_pose()
         self.prev_t = obs_t
@@ -578,6 +595,9 @@ class State:
             DerivedObs.CURRENT_POS: np.array([0.0]),
             DerivedObs.CURRENT_VEL: (
                 self._wheel_velocity(obs) if measurements else np.array([0.0])
+            ),
+            DerivedObs.YAW_RATE: (
+                obs.to_dict().get(Observable.GYRO, np.zeros(3))[2:3].copy()
             ),
         }
         self._update_camera_pose()

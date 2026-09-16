@@ -2,6 +2,9 @@ defaults:
   - rlrp
   - _self_
 
+curriculum:
+  enabled: false
+
 env:
   n_parallel: 2
   head_tracking: true

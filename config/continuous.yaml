@@ -1,0 +1,40 @@
+defaults:
+  - rlrp
+  - _self_
+
+guard:
+  compare_deterministic: true
+
+policy:
+  # Limits match the discrete baseline. Standard deviations are dimensionless,
+  # before tanh; near zero, physical std is approximately limit * initial_std.
+  # Clear inherited bins so discrete-grid changes do not alter continuous checkpoints.
+  actions:
+    act/accelerate_both_wheels:
+      type: continuous
+      bins: null
+      limit: 150.0  # rad/s²
+      initial_std: 0.1  # approximately 15 rad/s² near zero
+      min_std: 0.02
+      max_std: 0.5
+    act/wheel_vel_diff:
+      type: continuous
+      bins: null
+      limit: 4.0  # right minus left wheel rad/s
+      initial_std: 0.1  # approximately 0.4 wheel rad/s near zero
+      min_std: 0.02
+      max_std: 0.5
+    act/head_pitch_vel:
+      type: continuous
+      bins: null
+      limit: 1.0  # rad/s
+      initial_std: 0.05
+      min_std: 0.01
+      max_std: 0.3
+    act/head_turn_vel:
+      type: continuous
+      bins: null
+      limit: 1.0  # rad/s
+      initial_std: 0.05
+      min_std: 0.01
+      max_std: 0.3

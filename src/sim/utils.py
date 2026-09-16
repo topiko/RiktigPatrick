@@ -331,6 +331,7 @@ class EpisodeBuffer:
     logps_l: list[torch.Tensor] = field(default_factory=list)
     values_l: list[torch.Tensor] = field(default_factory=list)
     finished: bool = False
+    terminated: bool = False
 
     def add_step(
         self,
@@ -347,10 +348,13 @@ class EpisodeBuffer:
         self.logps_l.append(logp_t)
         self.values_l.append(value_t)
 
-    def finish(self, final_obs: dict[StateVarKey, np.ndarray]) -> None:
+    def finish(
+        self, final_obs: dict[StateVarKey, np.ndarray], *, terminated: bool = False
+    ) -> None:
         self.obs_l.append(final_obs)
 
         self.finished = True
+        self.terminated = terminated
 
         if len(self.rewards_l) != len(self.obs_l) - 1:
             raise ValueError(

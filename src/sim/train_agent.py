@@ -18,7 +18,7 @@ from gymnasium.vector import SyncVectorEnv
 from gymnasium.wrappers import RecordVideo
 from omegaconf import DictConfig, OmegaConf
 
-from nn_ctrl.nns import Agent
+from nn_ctrl.nns import Agent, ContinuousHead
 from riktigpatric.patrick import (
     Actions,
     DerivedObs,
@@ -36,13 +36,16 @@ from sim.checkpoints import (
     PolicyGuard,
     capture_state,
     load_checkpoint,
+    policy_spec,
     require_finite,
     restore_state,
     save_checkpoint,
 )
+from sim.curriculum import Curriculum
 from sim.devices import evaluation_rng, resolve_device, seed_torch
 from sim.episode_io import save_episode_csv
 from sim.plot_utils import plot_episode
+from sim.policy_probe import PolicyProbe
 from sim.utils import (
     Episode,
     EpisodeBuffer,
@@ -84,6 +87,10 @@ PLOTKS = [
 TRACKING_INPUTS = {
     "position": (Target.TARGET_POS, DerivedObs.CURRENT_POS),
     "velocity": (Target.TARGET_VEL, DerivedObs.CURRENT_VEL),
+    "position_velocity": (
+        Target.TARGET_POS, DerivedObs.CURRENT_POS,
+        Target.TARGET_VEL, DerivedObs.CURRENT_VEL,
+    ),
     "none": (),
 }
 
@@ -92,6 +99,8 @@ HEAD_INPUTS = (
     Observable.RP_ROLL, Observable.HEAD_PITCH_VEL, Observable.HEAD_TURN_VEL,
 )
 
+YAW_INPUTS = (Target.YAW_RATE, DerivedObs.YAW_RATE)
+
 
 def get_policy_inputs(cfg: DictConfig) -> list[str]:
     """Append task inputs to the shared sensor inputs, independently of the agent."""
@@ -99,6 +108,9 @@ def get_policy_inputs(cfg: DictConfig) -> list[str]:
         *cfg.policy.inputs,
         *[key.value for key in TRACKING_INPUTS[cfg.env.tracking_mode]],
         *[key.value for key in HEAD_INPUTS if cfg.env.head_tracking],
+        *[key.value for key in YAW_INPUTS if cfg.env.yaw_tracking],
+        *[key.value for key in TRACKING_INPUTS["position"]
+          if cfg.get("curriculum", {}).get("enabled", False)],
     ]))
 
 
@@ -154,6 +166,11 @@ def add_targets(
         if target_velocities is not None
         else (Target.TARGET_POS, "target_pos", target_positions)
     )
+    return _add_scalar_targets(obs_d, rp_env, key, attribute, values)
+
+
+def _add_scalar_targets(obs_d, rp_env, key, attribute, values):
+    """Validate the whole batch before changing scalar references in any backend."""
     if values is None:
         return obs_d
     targets = np.asarray(values, dtype=np.float64)
@@ -171,6 +188,13 @@ def add_targets(
     rp_env.set_attr(attribute, targets.tolist())
     obs_d[key] = targets[:, None].copy()
     return obs_d
+
+
+def add_yaw_targets(obs_d, rp_env, target_yaw_rates=None):
+    """Set independent body yaw-rate references, in rad/s; never wheel commands."""
+    return _add_scalar_targets(
+        obs_d, rp_env, Target.YAW_RATE, "target_yaw_rate", target_yaw_rates
+    )
 
 
 def add_head_targets(
@@ -212,23 +236,42 @@ def rollout(
     target_velocities: list[float] | np.ndarray | None = None,
     head_targets: Sequence[Sequence[float]] | np.ndarray | None = None,
     head_trajectories: Sequence[Sequence[Sequence[float]]] | None = None,
+    tbptt_steps: int | None = None,
+    target_yaw_rates: list[float] | np.ndarray | None = None,
+    curriculum: Curriculum | None = None,
+    evaluation: bool = False,
+    deterministic: bool = False,
+    policy_probe: PolicyProbe | None = None,
 ) -> list[EpisodeBuffer]:
+    """Collect episodes, optionally detaching recurrent history every N steps."""
+    if tbptt_steps is not None:
+        _validate_tbptt_steps(tbptt_steps)
+    if curriculum is not None:
+        commands = curriculum.prepare_rollout(rp_env, agent, evaluation=evaluation)
+        target_velocities = commands["target_velocities"]
+        target_yaw_rates = commands["target_yaw_rates"]
+        head_targets = commands["head_targets"]
+        head_trajectories = commands["head_trajectories"]
     num_envs = rp_env.num_envs
     active = np.ones(num_envs, dtype=bool)
     episode_buffers = [EpisodeBuffer() for _ in range(num_envs)]
 
     h = None
+    step = 0
     obs_d, _ = rp_env.reset(seed=seed)
     obs_d = add_targets(
         obs_d, rp_env, target_positions, target_trajectories, target_velocities
     )
     obs_d = add_head_targets(obs_d, rp_env, head_targets, head_trajectories)
+    obs_d = add_yaw_targets(obs_d, rp_env, target_yaw_rates)
     _require_finite_observations(obs_d, seed)
     while active.any():
         policy_obs = {key: obs_d[key] for key in (*agent.inputs, Observable.OBS_TIME)}
         obs_d_t = npd2tensord(policy_obs, device=agent.device)
 
-        action, logp, value, h = agent.act(obs_d_t, h)
+        if policy_probe is not None and step % policy_probe.every == 0:
+            policy_probe.capture(agent, obs_d_t, h, active)
+        action, logp, value, h = agent.act(obs_d_t, h, deterministic=deterministic)
         require_finite((action, logp, value), "policy output")
         action_np = tensord2npd(action)
         next_obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
@@ -248,11 +291,17 @@ def rollout(
             )
 
         for env_idx in np.flatnonzero(done):
-            episode_buffers[env_idx].finish(_take_idx_from_d(next_obs_d, env_idx))
+            episode_buffers[env_idx].finish(
+                _take_idx_from_d(next_obs_d, env_idx),
+                terminated=bool(terminated[env_idx]),
+            )
 
         # If an episode is done, mark it as inactive and zero out its hidden state
         active = active & ~done
         h = _zero_hidden_state(h, done)
+        step += 1
+        if tbptt_steps is not None and step % tbptt_steps == 0 and h is not None:
+            h = h.detach()  # Preserve memory values; cut only gradient history.
 
         # Update obs_d for the next step
         obs_d = next_obs_d
@@ -272,12 +321,16 @@ def main(cfg: DictConfig):
 
 def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = None):
     device = resolve_device(cfg.train.device if device is None else device)
+    _validate_tbptt_steps(cfg.train.tbptt_steps)
     if cfg.checkpoints.every < 1 or cfg.guard.every < 1 or cfg.guard.episodes < 1:
         raise ValueError(
             "Checkpoint/validation intervals and episode count must be positive"
         )
     if cfg.train.resume_from is not None and cfg.policy.restore_id is not None:
         raise ValueError("Choose a training checkpoint or an MLflow policy, not both")
+    if cfg.train.resume_lr is not None and cfg.train.resume_from is None:
+        raise ValueError("train.resume_lr requires train.resume_from")
+    curriculum = Curriculum(cfg) if cfg.curriculum.enabled else None
     # Setup MLflow if enabled
     if cfg.logging.mlflow.enabled:
         if (tracking_uri := os.getenv("MLFLOW_TRACKING_URI")) is None:
@@ -307,13 +360,19 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
     rp_video_env = make_video_env(cfg, resources)
 
     agent = make_agent(cfg, device)
+    if curriculum is not None:
+        curriculum.apply_policy(agent)
     LOG.info("Policy device %s; GRU hidden size %d, layers %d",
              agent.device, agent.rnn.hidden_size, agent.rnn.num_layers)
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
     next_iteration = 0
     if cfg.train.resume_from is not None:
-        next_iteration = load_checkpoint(cfg.train.resume_from, agent, optimizer)
-        LOG.info("Resumed training at iteration %d", next_iteration)
+        next_iteration = load_checkpoint(
+            cfg.train.resume_from, agent, optimizer, curriculum,
+            learning_rate=cfg.train.resume_lr,
+        )
+        LOG.info("Resumed at iteration %d; Adam LR %.3g",
+                 next_iteration, optimizer.param_groups[0]["lr"])
     agent.train()
     require_finite(agent.state_dict(), "model")
     guard = PolicyGuard(
@@ -321,11 +380,19 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
         absolute_drop=cfg.guard.absolute_drop, patience=cfg.guard.patience,
         min_best_return=cfg.guard.min_best_return,
         lr_factor=cfg.guard.lr_factor, min_lr=cfg.guard.min_lr,
+        curriculum=curriculum,
     )
-    validation_env = make_validation_env(cfg, resources) if cfg.guard.enabled else None
+    validation_env = (
+        make_validation_env(cfg, resources, curriculum)
+        if cfg.guard.enabled or curriculum is not None else None
+    )
+    stage_runs = (
+        resources.enter_context(ExitStack())
+        if cfg.logging.mlflow.enabled and curriculum is not None else None
+    )
     run_training_loop(
         cfg, rp_env, rp_video_env, validation_env,
-        agent, optimizer, guard, next_iteration,
+        agent, optimizer, guard, next_iteration, curriculum, stage_runs,
     )
 
 
@@ -339,13 +406,16 @@ def make_agent(cfg: DictConfig, device: torch.device | None = None) -> Agent:
         )
         if (
             set(agent.inputs) != set(get_policy_inputs(cfg))
-            or set(agent.actions) != set(cfg.policy.actions)
+            or policy_spec(agent)["actions"] != OmegaConf.to_container(
+                cfg.policy.actions, resolve=True
+            )
             or agent.rnn.hidden_size != cfg.policy.hsize
             or agent.rnn.num_layers != cfg.policy.n_rnnlayers
         ):
             raise ValueError(
                 "Restored policy architecture/inputs/actions do not match this task"
             )
+        agent.inactive_actions = ()  # Non-curriculum fine-tuning enables every head.
         return agent.to(device)
     return Agent(
         inputs=get_policy_inputs(cfg), actions=cfg.policy.actions,
@@ -353,11 +423,38 @@ def make_agent(cfg: DictConfig, device: torch.device | None = None) -> Agent:
     ).to(device)
 
 
-def training_update(cfg, rp_env, agent, optimizer, iteration: int) -> dict[str, float]:
+def _validate_tbptt_steps(steps: int) -> None:
+    if isinstance(steps, bool) or not isinstance(steps, int) or steps < 1:
+        raise ValueError("train.tbptt_steps must be a positive integer")
+
+
+def _restore_after_failure(error, before, agent, optimizer, curriculum):
+    # Keep the CPU backup saveable even if a device error prevents in-memory
+    # restoration. Preserve the original failure and its recovery snapshot.
+    setattr(error, "training_state", before)
+    try:
+        restore_state(agent, optimizer, before, curriculum=curriculum)
+    except Exception:
+        LOG.exception("In-memory rollback failed; CPU recovery snapshot retained")
+
+
+def training_update(
+    cfg, rp_env, agent, optimizer, iteration: int, curriculum: Curriculum | None = None
+) -> dict[str, float]:
     """One transactional update: a failed/non-finite update restores its input state."""
-    before = capture_state(agent, optimizer, iteration)
+    if curriculum is not None:
+        curriculum.apply_policy(agent)
+    before = capture_state(agent, optimizer, iteration, curriculum)
     try:
         optimizer.zero_grad(set_to_none=True)
+        _validate_tbptt_steps(cfg.train.tbptt_steps)
+        coefficient = cfg.rl.value_loss_coef
+        if not np.isfinite(coefficient) or coefficient < 0:
+            raise ValueError("rl.value_loss_coef must be finite and nonnegative")
+        probe_every = cfg.train.kl_probe_every
+        if type(probe_every) is not int or probe_every < 0:
+            raise ValueError("train.kl_probe_every must be a nonnegative integer")
+        probe = PolicyProbe(agent, probe_every) if probe_every else None
         episode_buf_l = rollout(
             rp_env,
             agent,
@@ -367,6 +464,10 @@ def training_update(cfg, rp_env, agent, optimizer, iteration: int) -> dict[str, 
             target_velocities=cfg.train.target_velocities,
             head_targets=cfg.train.head_targets,
             head_trajectories=cfg.train.head_trajectories,
+            tbptt_steps=cfg.train.tbptt_steps,
+            target_yaw_rates=cfg.train.target_yaw_rates,
+            curriculum=curriculum,
+            policy_probe=probe,
         )
 
         logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(
@@ -379,7 +480,8 @@ def training_update(cfg, rp_env, agent, optimizer, iteration: int) -> dict[str, 
         policy_loss = -((logps * advantages) * valid_mask).sum() / valid_mask.sum()
         values_loss = (((values - G_t) ** 2) * valid_mask).sum() / valid_mask.sum()
 
-        loss = policy_loss + values_loss
+        weighted_value_loss = coefficient * values_loss
+        loss = policy_loss + weighted_value_loss
         require_finite((policy_loss, values_loss, loss), "loss")
         loss.backward()
         gradient_norm = torch.nn.utils.clip_grad_norm_(
@@ -388,10 +490,13 @@ def training_update(cfg, rp_env, agent, optimizer, iteration: int) -> dict[str, 
         optimizer.step()
         require_finite(agent.state_dict(), "updated model")
         require_finite(optimizer.state_dict(), "updated optimizer")
+        probe_metrics = probe.metrics(agent) if probe is not None else {}
+        require_finite(probe_metrics, "policy change")
         # CPU metric transfers are part of accepting the update too.
         episode_returns = (rewards * valid_mask).sum(dim=1).cpu().numpy()
         return {
             "losses/policy": policy_loss.item(), "losses/value": values_loss.item(),
+            "losses/value_weighted": weighted_value_loss.item(),
             "losses/total": loss.item(), "returns/mean": float(episode_returns.mean()),
             "returns/max": float(episode_returns.max()),
             "returns/min": float(episode_returns.min()),
@@ -401,15 +506,15 @@ def training_update(cfg, rp_env, agent, optimizer, iteration: int) -> dict[str, 
             "episodes/length/mean": float(seq_lens.mean()),
             "optimization/gradient_norm": float(gradient_norm),
             "optimization/learning_rate": float(optimizer.param_groups[0]["lr"]),
+            **probe_metrics,
+            **{
+                f"policy/std/{action}": float(head.std.detach())
+                for action, head in agent.action_heads.items()
+                if isinstance(head, ContinuousHead)
+            },
         }
     except BaseException as error:
-        # Host-side recovery remains saveable even if a CUDA error prevents an
-        # in-memory restore. Preserve the original exception, not a restore error.
-        setattr(error, "training_state", before)
-        try:
-            restore_state(agent, optimizer, before)
-        except Exception:
-            LOG.exception("In-memory rollback failed; CPU recovery snapshot retained")
+        _restore_after_failure(error, before, agent, optimizer, curriculum)
         raise
 
 
@@ -422,32 +527,57 @@ def write_checkpoint(cfg, state, name: str, score=None, *, upload: bool = True) 
     return path
 
 
-def make_validation_env(cfg, resources: ExitStack):
+def make_validation_env(
+    cfg, resources: ExitStack, curriculum: Curriculum | None = None
+):
     validation_cfg = deepcopy(cfg)
     validation_cfg.env.n_parallel = cfg.guard.episodes
+    if curriculum is not None:
+        validation_cfg.env.randomize = True
     env = register_and_make_env(validation_cfg)
     resources.callback(env.close)
     return SingleEnvWrapper(env) if isinstance(env, Env) else env
 
 
-def evaluation_rollout(env, agent: Agent, seed: int) -> list[EpisodeBuffer]:
+def evaluation_rollout(
+    env, agent: Agent, seed: int, curriculum: Curriculum | None = None,
+    *, deterministic: bool = False,
+) -> list[EpisodeBuffer]:
     """Use eval() without gradients and isolate all evaluation random streams."""
     was_training = agent.training
     try:
         agent.eval()
         with evaluation_rng(agent.device, seed), torch.no_grad():
-            return rollout(env, agent, seed=seed)
+            return rollout(
+                env, agent, seed=seed, curriculum=curriculum, evaluation=True,
+                deterministic=deterministic,
+            )
     finally:
         agent.train(was_training)
 
 
-def validate_policy(cfg, env, agent) -> dict[str, float]:
+def validate_policy(
+    cfg, env, agent, curriculum: Curriculum | None = None
+) -> dict[str, float]:
     """Fixed stochastic action/environment seeds, without affecting training RNG."""
-    buffers = evaluation_rollout(env, agent, cfg.guard.seed)
+    buffers = evaluation_rollout(env, agent, cfg.guard.seed, curriculum)
+    metrics = _validation_metrics(buffers, curriculum)
+    if cfg.guard.get("compare_deterministic", False):
+        deterministic = evaluation_rollout(
+            env, agent, cfg.guard.seed, curriculum, deterministic=True
+        )
+        metrics.update({
+            key.replace("validation/", "validation_deterministic/", 1): value
+            for key, value in _validation_metrics(deterministic, curriculum).items()
+        })
+    return metrics
+
+
+def _validation_metrics(buffers, curriculum: Curriculum | None):
     returns = np.array([sum(buffer.rewards_l) for buffer in buffers])
     if not np.isfinite(returns).all():
         raise FloatingPointError("Non-finite validation returns")
-    return {
+    metrics = {
         "validation/returns/mean": float(returns.mean()),
         "validation/returns/min": float(returns.min()),
         "validation/returns/max": float(returns.max()),
@@ -456,43 +586,119 @@ def validate_policy(cfg, env, agent) -> dict[str, float]:
             np.mean([b.seq_len for b in buffers])
         ),
     }
+    if curriculum is not None:
+        metrics.update(curriculum.validation_metrics(buffers))
+    return metrics
 
 
-def check_policy_guard(cfg, env, agent, guard, next_iteration: int):
-    metrics = validate_policy(cfg, env, agent)
+def start_stage_run(cfg, agent, curriculum: Curriculum, iteration: int, stage_runs):
+    """Close the completed child run, keeping the overall session's parent open."""
+    if stage_runs is None:
+        return
+    stage_runs.close()
+    stage_runs.enter_context(mlflow.start_run(run_name=curriculum.stage, nested=True))
+    mlflow.log_params({
+        str(k): str(v) for k, v in flatten_dict(
+            OmegaConf.to_container(cfg, resolve=True)
+        ).items()
+    })
+    mlflow.set_tags({
+        "curriculum.stage": curriculum.stage,
+        "curriculum.version": curriculum.VERSION,
+        "curriculum.stage_index": curriculum.index,
+        "training.start_iteration": iteration,
+        "training.resume_from": cfg.train.resume_from or "",
+        "training.device": str(agent.device),
+        "training.inactive_actions": ",".join(curriculum.inactive_actions),
+        "training.disabled_rewards": ",".join(curriculum.disabled_rewards),
+        "training.tracking_mode": curriculum.tracking_mode,
+        "training.velocity_reward_weight": curriculum.velocity_reward_weight,
+    })
+
+
+def check_policy_guard(
+    cfg, env, agent, guard, next_iteration: int,
+    curriculum: Curriculum | None = None, stage_runs=None, *, advance: bool = True,
+):
+    metrics = validate_policy(cfg, env, agent, curriculum)
     score = metrics["validation/returns/mean"]
-    decision = guard.observe(score, next_iteration)
+    promote = (
+        curriculum.observe(metrics) if curriculum is not None and advance else False
+    )
+    decision = (
+        guard.observe(score, next_iteration)
+        if cfg.guard.get("enabled", True) else "disabled"
+    )
+    if decision == "rollback":
+        promote = False
     if decision == "best":
         write_checkpoint(cfg, guard.best_state, "best.pt", score)
-        write_checkpoint(cfg, guard.best_state, "latest.pt", score)
     if decision == "rollback":
         LOG.warning("Policy degradation: restored best return %.2f; LR now %.3g",
                     guard.best_score, guard.optimizer.param_groups[0]["lr"])
-        # Persist the restored state and reduced optimizer LR immediately.
-        write_checkpoint(
-            cfg, capture_state(agent, guard.optimizer, next_iteration), "latest.pt"
+    if guard.best_score is not None:
+        metrics.update({
+            "guard/best_return": guard.best_score,
+            "guard/bad_evaluations": guard.bad_evaluations,
+            "guard/rollbacks": guard.rollbacks,
+            "guard/rolled_back": int(decision == "rollback"),
+            "guard/learning_rate": guard.optimizer.param_groups[0]["lr"],
+        })
+    if curriculum is not None:
+        metrics.update({"curriculum/stage": curriculum.index,
+                        "curriculum/success_streak": curriculum.success_streak})
+        LOG.info(
+            "Curriculum %s: survival %.0f%%, position MAE %.3f m, "
+            "velocity MAE %.3f m/s, yaw MAE %.3f rad/s; passing evaluations %d",
+            curriculum.stage, 100 * metrics["validation/survival_fraction"],
+            metrics["validation/position_mae"],
+            metrics["validation/velocity_mae"], metrics["validation/yaw_rate_mae"],
+            curriculum.success_streak,
         )
-    metrics.update({
-        "guard/best_return": guard.best_score,
-        "guard/bad_evaluations": guard.bad_evaluations,
-        "guard/rollbacks": guard.rollbacks,
-        "guard/rolled_back": int(decision == "rollback"),
-        "guard/learning_rate": guard.optimizer.param_groups[0]["lr"],
-    })
-    LOG.info("Validation at %d: %.2f; best %.2f (%s)",
+    if decision in ("best", "rollback") or curriculum is not None:
+        # Save progress even without a new best score, including a rollback's LR.
+        write_checkpoint(
+            cfg, capture_state(agent, guard.optimizer, next_iteration, curriculum),
+            "latest.pt",
+        )
+    LOG.info("Validation at %d: %.2f; best %s (%s)",
              next_iteration, score, guard.best_score, decision)
     if cfg.logging.mlflow.enabled:
         mlflow.log_metrics(metrics, step=next_iteration)
+    if promote:
+        assert curriculum is not None
+        before = capture_state(agent, guard.optimizer, next_iteration, curriculum)
+        write_checkpoint(cfg, before, f"stage_{curriculum.stage}_complete.pt", score)
+        try:
+            curriculum.advance(agent, guard.optimizer)
+            require_finite(agent.state_dict(), "promoted model")
+        except BaseException as error:
+            _restore_after_failure(error, before, agent, guard.optimizer, curriculum)
+            raise
+        guard.reset_baseline()
+        LOG.info("Curriculum promoted to %s at iteration %d",
+                 curriculum.stage, next_iteration)
+        start_stage_run(cfg, agent, curriculum, next_iteration, stage_runs)
+        write_checkpoint(
+            cfg, capture_state(agent, guard.optimizer, next_iteration, curriculum),
+            "latest.pt",
+        )
+        # Establish a comparable baseline before learning under the new objective.
+        check_policy_guard(
+            cfg, env, agent, guard, next_iteration, curriculum, stage_runs,
+            advance=False,
+        )
 
 
 def preserve_training_failure(
     cfg, agent, optimizer, next_iteration: int, report: str,
     *, state: dict | None = None,
+    curriculum: Curriculum | None = None,
 ):
     LOG.error("Training stopped; preserving the last finite state:\n%s", report)
     try:
         if state is None:
-            state = capture_state(agent, optimizer, next_iteration)
+            state = capture_state(agent, optimizer, next_iteration, curriculum)
         path = write_checkpoint(cfg, state, "latest.pt", upload=False)
         failure = path.parent / "training_failure.txt"
         failure.write_text(report, encoding="utf-8")
@@ -504,19 +710,28 @@ def preserve_training_failure(
 
 
 def run_training_loop(
-    cfg, env, video_env, validation_env, agent, optimizer, guard, start
+    cfg, env, video_env, validation_env, agent, optimizer, guard, start,
+    curriculum: Curriculum | None = None, stage_runs=None,
 ):
     next_iteration = start
     try:
-        write_checkpoint(cfg, capture_state(agent, optimizer, start), "latest.pt")
+        if curriculum is not None:
+            curriculum.apply_policy(agent)
+            start_stage_run(cfg, agent, curriculum, start, stage_runs)
+        write_checkpoint(
+            cfg, capture_state(agent, optimizer, start, curriculum), "latest.pt"
+        )
         if validation_env is not None:
-            check_policy_guard(cfg, validation_env, agent, guard, start)
+            check_policy_guard(
+                cfg, validation_env, agent, guard, start, curriculum, stage_runs,
+                advance=False,
+            )
         while (
             cfg.train.max_iterations is None
             or next_iteration < cfg.train.max_iterations
         ):
             iteration = next_iteration
-            metrics = training_update(cfg, env, agent, optimizer, iteration)
+            metrics = training_update(cfg, env, agent, optimizer, iteration, curriculum)
             next_iteration = iteration + 1
             LOG.info("Step %4d: p_l=%.4f, v_l=%.4f, ret=%.2f, mean_ep_len=%.0f",
                      iteration, metrics["losses/policy"], metrics["losses/value"],
@@ -527,24 +742,29 @@ def run_training_loop(
             ):
                 mlflow.log_metrics(metrics, step=iteration)
             if validation_env is not None and next_iteration % cfg.guard.every == 0:
-                check_policy_guard(cfg, validation_env, agent, guard, next_iteration)
+                check_policy_guard(
+                    cfg, validation_env, agent, guard, next_iteration, curriculum,
+                    stage_runs,
+                )
             if next_iteration % cfg.checkpoints.every == 0:
-                state = capture_state(agent, optimizer, next_iteration)
+                state = capture_state(agent, optimizer, next_iteration, curriculum)
                 write_checkpoint(cfg, state, f"iteration_{iteration:06d}.pt")
                 write_checkpoint(cfg, state, "latest.pt")
             if video_env is not None and iteration % cfg.logging.plot_freq == 0:
-                evaluate_and_plot(cfg, video_env, agent, iteration)
+                evaluate_and_plot(cfg, video_env, agent, iteration, curriculum)
             if cfg.logging.mlflow.enabled and iteration % cfg.logging.save_freq == 0:
                 mlflow.pytorch.log_model(
                     agent, name=f"agent_{iteration:04d}", step=iteration
                 )
         write_checkpoint(
-            cfg, capture_state(agent, optimizer, next_iteration), "latest.pt"
+            cfg, capture_state(agent, optimizer, next_iteration, curriculum),
+            "latest.pt",
         )
     except BaseException as error:
         preserve_training_failure(
             cfg, agent, optimizer, next_iteration, traceback.format_exc(),
             state=getattr(error, "training_state", None),
+            curriculum=curriculum,
         )
         raise
 
@@ -560,14 +780,20 @@ def make_video_env(cfg: DictConfig, resources: ExitStack) -> SingleEnvWrapper | 
     return SingleEnvWrapper(video)
 
 
-def evaluate_and_plot(cfg: DictConfig, env: SingleEnvWrapper, agent: Agent, i: int):
-    env.name_prefix = f"rp_iter_{i:04d}"
-    buffers = evaluation_rollout(env, agent, cfg.seed + i + 10000)
+def evaluate_and_plot(
+    cfg: DictConfig, env: SingleEnvWrapper, agent: Agent, i: int,
+    curriculum: Curriculum | None = None,
+):
+    artifact_name = f"train_iter_{i:06d}"
+    env.name_prefix = artifact_name
+    buffers = evaluation_rollout(env, agent, cfg.seed + i + 10000, curriculum)
     _, rewards, values, _, _ = ebufs2batchd(buffers, device=agent.device)
     env.stop_recording()
-    video_path = Path(env.video_folder) / (
+    recorded_path = Path(env.video_folder) / (
         f"{env.name_prefix}-episode-{env.episode_id}.mp4"
     )
+    video_path = recorded_path.with_name(f"{artifact_name}.mp4")
+    recorded_path.replace(video_path)  # Drop Gymnasium's recording-episode counter.
 
     returns = get_returns(rewards, discount=cfg.rl.discount)
     advantages = get_advantages(returns, values)
@@ -578,14 +804,16 @@ def evaluate_and_plot(cfg: DictConfig, env: SingleEnvWrapper, agent: Agent, i: i
         advantages=advantages.cpu().numpy(),
     )
 
-    plot_path = Path(f"plots/episode_iter_{i:04d}.png")
+    plot_path = Path("plots") / f"{artifact_name}.png"
     trace_path = save_episode_csv(
         buffers[0],
         plot_path.with_suffix(".csv"),
         returns=returns[0].cpu().numpy(),
         advantages=advantages[0].cpu().numpy(),
     )
-    fig = plot_episode(eps, keys=get_plot_keys(cfg, agent), save_path=plot_path)
+    fig = plot_episode(
+        eps, keys=get_plot_keys(cfg, agent, curriculum), save_path=plot_path
+    )
     plt.close(fig)
     if cfg.logging.mlflow.enabled:
         for artifact in (plot_path, trace_path, video_path):
@@ -609,15 +837,25 @@ def evaluate_and_plot(cfg: DictConfig, env: SingleEnvWrapper, agent: Agent, i: i
                 for name, (actual, target) in errors.items()
             }, step=i)
     print(f"  📊 Saved plot: {plot_path}")
-    print(f"  Saved episode trace: {trace_path}")
+    print(f"  Saved evaluation trace: {trace_path}")
+    print(f"  Saved video: {video_path}")
 
 
-def get_plot_keys(cfg: DictConfig, agent: Agent) -> list[PlotKey]:
+def get_plot_keys(
+    cfg: DictConfig, agent: Agent, curriculum: Curriculum | None = None
+) -> list[PlotKey]:
     """Plot the selected tracking task, policy inputs, and active reward terms."""
     plot_keys: list[PlotKey] = list(PLOTKS)
-    mode = cfg.env.tracking_mode
-    if tracking_keys := TRACKING_INPUTS[mode]:
-        plot_keys.append((Observable.OBS_TIME, tracking_keys))
+    mode = curriculum.tracking_mode if curriculum is not None else cfg.env.tracking_mode
+    tracking_modes = (
+        ("position", "velocity") if mode == "position_velocity" else (mode,)
+    )
+    plot_keys.extend(
+        (Observable.OBS_TIME, TRACKING_INPUTS[kind])
+        for kind in tracking_modes if TRACKING_INPUTS[kind]
+    )
+    if cfg.env.yaw_tracking:
+        plot_keys.append((Observable.OBS_TIME, YAW_INPUTS))
     if cfg.env.head_tracking:
         plot_keys.extend([
             (Observable.OBS_TIME, (
@@ -638,8 +876,13 @@ def get_plot_keys(cfg: DictConfig, agent: Agent) -> list[PlotKey]:
     inactive_rewards = {
         "position": {Observable.REWARD_VEL},
         "velocity": {Observable.REWARD_POS, Observable.REWARD_WHEEL_VEL},
+        "position_velocity": {Observable.REWARD_WHEEL_VEL},
         "none": {Observable.REWARD_POS, Observable.REWARD_VEL},
     }[mode]
+    if curriculum is not None:
+        inactive_rewards.update(curriculum.disabled_rewards)
+    if not cfg.env.yaw_tracking:
+        inactive_rewards.add(Observable.REWARD_YAW_RATE)
     if cfg.env.head_tracking:
         inactive_rewards.add(Observable.REWARD_HEAD_PITCH)
     else:

@@ -65,6 +65,8 @@ from riktigpatric.patrick import (
     Target,
 )
 from riktigpatric.trajectory import HeadTrajectory, PositionTrajectory
+from riktigpatric.wheel_control import wheel_velocity_targets
+from sim.rewards import FALL_PITCH_LIMIT, pitch_reward, validate_pitch_deadband
 
 BODY_M = 0.4
 HEAD_M = 0.2
@@ -370,6 +372,11 @@ def _get_action_space(
             d_[k] = gymnasium.spaces.Box(
                 low=-max_wheel_vel, high=max_wheel_vel, shape=(1,), dtype=np.float32
             )
+        elif k == Actions.VEL_WHEEL_DIFF:
+            d_[k] = gymnasium.spaces.Box(
+                low=-2 * max_wheel_vel, high=2 * max_wheel_vel,
+                shape=(1,), dtype=np.float32,
+            )
         elif k in [
             Actions.ACC_LEFT_WHEEL,
             Actions.ACC_RIGHT_WHEEL,
@@ -392,6 +399,20 @@ def _get_observation_space() -> gymnasium.spaces.Dict:
         for key in (*Observable, *DerivedObs, *Target)
     }
     return gymnasium.spaces.Dict(spaces)
+
+
+def _validate_wheel_actions(actions):
+    if Actions.VEL_WHEEL_DIFF not in actions:
+        return
+    conflicts = {
+        Actions.ACC_LEFT_WHEEL, Actions.ACC_RIGHT_WHEEL, Actions.ACC_YAW_TURN,
+        Actions.VEL_LEFT_WHEEL, Actions.VEL_RIGHT_WHEEL,
+    }
+    if Actions.ACC_BOTH_WHEELS not in actions or conflicts.intersection(actions):
+        raise ValueError(
+            "wheel_vel_diff requires accelerate_both_wheels and cannot be combined "
+            "with individual wheel commands or accelerate_yaw_turn"
+        )
 
 
 class GymRP(gymnasium.Env):
@@ -417,9 +438,19 @@ class GymRP(gymnasium.Env):
         max_head_vel: float = 1.0,
         camera_view: str = "external",
         arena_half_size: float = 20.0,
+        yaw_tracking: bool = False,
+        target_yaw_rate: float = 0.0,
+        pitch_deadband: float | None = None,
     ):
-        if tracking_mode not in ("position", "velocity", "none"):
-            raise ValueError("tracking_mode must be position, velocity or none")
+        _validate_wheel_actions(actions)
+        if yaw_tracking and Actions.VEL_WHEEL_DIFF not in actions:
+            raise ValueError("Yaw-rate tracking requires the wheel_vel_diff action")
+        self.yaw_tracking = yaw_tracking
+        self.disabled_rewards: tuple[Observable, ...] = ()
+        self.velocity_reward_weight = 1.0
+        self.pitch_deadband = pitch_deadband
+        if tracking_mode not in ("position", "velocity", "position_velocity", "none"):
+            raise ValueError("Unknown tracking_mode")
         self.tracking_mode = tracking_mode
         if camera_view not in ("external", "head", "both"):
             raise ValueError("camera_view must be external, head or both")
@@ -448,6 +479,7 @@ class GymRP(gymnasium.Env):
         self.target_pos = target_pos
         self.target_trajectory = target_trajectory
         self.target_vel = target_vel
+        self.target_yaw_rate = target_yaw_rate
         self.head_target = head_target
         self.head_trajectory = head_trajectory
 
@@ -470,6 +502,15 @@ class GymRP(gymnasium.Env):
         self.reward_scales.update(reward_scales or {})
 
     @property
+    def pitch_deadband(self) -> float | None:
+        return self._pitch_deadband
+
+    @pitch_deadband.setter
+    def pitch_deadband(self, value: float | None):
+        validate_pitch_deadband(value)
+        self._pitch_deadband = value
+
+    @property
     def target_pos(self) -> float:
         """Current fore/aft target in meters."""
         return self.state.target_pos
@@ -485,6 +526,14 @@ class GymRP(gymnasium.Env):
     @target_vel.setter
     def target_vel(self, value: float):
         self.state.target_vel = value
+
+    @property
+    def target_yaw_rate(self) -> float:
+        return self.state.target_yaw_rate
+
+    @target_yaw_rate.setter
+    def target_yaw_rate(self, value: float):
+        self.state.target_yaw_rate = value
 
     @property
     def target_trajectory(self) -> PositionTrajectory | None:
@@ -634,8 +683,9 @@ class GymRP(gymnasium.Env):
         fell_cost = (
             self.reward_scales[Observable.REWARD_FELL] if terminated else 0.0
         )
-        pitch_reward = self.reward_scales[Observable.REWARD_RP_PITCH] * abs(
-            state.obs.get_observable(Observable.RP_PITCH)[0]
+        body_pitch_reward = pitch_reward(
+            float(state.obs.get_observable(Observable.RP_PITCH)[0]),
+            self.reward_scales[Observable.REWARD_RP_PITCH], self.pitch_deadband,
         )
 
         wheel_vel_reward = (
@@ -647,29 +697,37 @@ class GymRP(gymnasium.Env):
             / 2
         )
         # An absolute-speed penalty would oppose nonzero velocity commands.
-        if self.tracking_mode == "velocity":
+        if self.tracking_mode in ("velocity", "position_velocity"):
             wheel_vel_reward = 0.0
 
         position_reward = 0.0
         velocity_reward = 0.0
-        if self.tracking_mode == "position":
+        if self.tracking_mode in ("position", "position_velocity"):
             position_reward = self.reward_scales[Observable.REWARD_POS] * abs(
                 state.derived_obs[DerivedObs.CURRENT_POS][0] - state.target_pos
             )
-        elif self.tracking_mode == "velocity":
-            velocity_reward = self.reward_scales[Observable.REWARD_VEL] * abs(
-                state.derived_obs[DerivedObs.CURRENT_VEL][0] - state.target_vel
+        if self.tracking_mode in ("velocity", "position_velocity"):
+            velocity_reward = (
+                self.velocity_reward_weight * self.reward_scales[Observable.REWARD_VEL]
+                * abs(state.derived_obs[DerivedObs.CURRENT_VEL][0] - state.target_vel)
             )
 
         components = {
             Observable.REWARD_STEP: step_reward,
-            Observable.REWARD_RP_PITCH: pitch_reward,
+            Observable.REWARD_RP_PITCH: body_pitch_reward,
             Observable.REWARD_WHEEL_VEL: wheel_vel_reward,
             Observable.REWARD_POS: position_reward,
             Observable.REWARD_VEL: velocity_reward,
+            Observable.REWARD_YAW_RATE: (
+                self.reward_scales[Observable.REWARD_YAW_RATE]
+                * abs(state.derived_obs[DerivedObs.YAW_RATE][0] - state.target_yaw_rate)
+                if self.yaw_tracking else 0.0
+            ),
             Observable.REWARD_FELL: fell_cost,
             **self._head_rewards(state),
         }
+        for key in self.disabled_rewards:
+            components[key] = 0.0
         components[Observable.REWARD_TOTAL] = (
             sum(components.values()) * self.reward_scales[Observable.REWARD_TOTAL]
         )
@@ -710,7 +768,7 @@ class GymRP(gymnasium.Env):
     @property
     def terminated(self) -> bool:
         true_pitch = q2eul(self.dm_env.bind(self.body_quat).sensordata.copy())[1]
-        return bool(abs(true_pitch) > np.deg2rad(20))
+        return bool(abs(true_pitch) > FALL_PITCH_LIMIT)
 
     @property
     def truncated(self) -> bool:
@@ -727,6 +785,34 @@ class GymRP(gymnasium.Env):
             ], axis=1)
         camera = self.head_camera_name if self.camera_view == "head" else 0
         return self.dm_env.render(camera_id=camera, height=480, width=640)
+
+    def _wheel_targets(self, acceleration: float, difference: float | None = None):
+        measured = np.array([
+            self.state.obs.get_observable(sensor)[0]
+            for sensor in (Observable.LEFT_WHEEL_VEL, Observable.RIGHT_WHEEL_VEL)
+        ])
+        return wheel_velocity_targets(
+            measured, acceleration, self.step_time,
+            self.max_wheel_vel, self.max_wheel_acc, difference,
+        )
+
+    def _apply_actions(self, actions: dict[Actions, np.ndarray]):
+        """Mix coupled wheel heads together, independently of dictionary ordering."""
+        _validate_wheel_actions(actions)
+        steering = Actions.VEL_WHEEL_DIFF in actions
+        if steering:
+            targets = self._wheel_targets(
+                float(actions[Actions.ACC_BOTH_WHEELS][0]),
+                float(actions[Actions.VEL_WHEEL_DIFF][0]),
+            )
+            for actuator, velocity in zip(
+                (self.left_wheel_act, self.right_wheel_act), targets
+            ):
+                self.dm_env.bind(actuator).ctrl = velocity
+        for action, value in actions.items():
+            if steering and action in (Actions.ACC_BOTH_WHEELS, Actions.VEL_WHEEL_DIFF):
+                continue
+            self._apply_action(action, value)
 
     def _apply_action(self, action: Actions, value: np.ndarray):
         if action == Actions.TIME:
@@ -749,18 +835,13 @@ class GymRP(gymnasium.Env):
         }:
             raise ValueError(f"Invalid action key: {action}")
 
-        acceleration = np.clip(value[0], -self.max_wheel_acc, self.max_wheel_acc)
-        for wheel_action, sensor, actuator in (
-            (Actions.ACC_LEFT_WHEEL, Observable.LEFT_WHEEL_VEL, self.left_wheel_act),
-            (Actions.ACC_RIGHT_WHEEL, Observable.RIGHT_WHEEL_VEL, self.right_wheel_act),
-        ):
+        targets = self._wheel_targets(float(value[0]))
+        for index, (wheel_action, actuator) in enumerate((
+            (Actions.ACC_LEFT_WHEEL, self.left_wheel_act),
+            (Actions.ACC_RIGHT_WHEEL, self.right_wheel_act),
+        )):
             if action in (wheel_action, Actions.ACC_BOTH_WHEELS):
-                velocity = self.state.obs.get_observable(sensor)[0]
-                self.dm_env.bind(actuator).ctrl = np.clip(
-                    velocity + acceleration * self.step_time,
-                    -self.max_wheel_vel,
-                    self.max_wheel_vel,
-                )
+                self.dm_env.bind(actuator).ctrl = targets[index]
 
     def step(
         self, action: dict[Actions, np.ndarray]
@@ -770,6 +851,7 @@ class GymRP(gymnasium.Env):
         All actions are in SI units:
         - VEL_*_WHEEL: rad/s (wheel target velocities)
         - ACC_*_WHEEL: rad/s² (wheel accelerations)
+        - VEL_WHEEL_DIFF: rad/s (right minus left wheel velocity target)
         - VEL_HEAD_PITCH, VEL_HEAD_TURN: rad/s (head velocities)
         - TIME: seconds (observation time for sync check, not applied as action)
         """
@@ -791,8 +873,7 @@ class GymRP(gymnasium.Env):
                 )
 
         # Apply the actions at time t (all in SI units)
-        for a, val in action.items():
-            self._apply_action(a, val)
+        self._apply_actions(action)
 
         # Step the MuJoCo environment t -> t + self.step_time.
         t0 = self.dm_env.data.time

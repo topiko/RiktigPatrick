@@ -141,6 +141,7 @@ class ActiveSimulationTests(unittest.TestCase):
                 self.assertEqual(obs[Target.TARGET_POS].shape, (count, 1))
                 actions = {
                     Actions.ACC_BOTH_WHEELS: np.zeros((count, 1), dtype=np.float32),
+                    Actions.VEL_WHEEL_DIFF: np.zeros((count, 1), dtype=np.float32),
                     Actions.VEL_HEAD_PITCH: np.zeros((count, 1), dtype=np.float32),
                     Actions.VEL_HEAD_TURN: np.zeros((count, 1), dtype=np.float32),
                 }
@@ -410,6 +411,7 @@ class ActiveSimulationTests(unittest.TestCase):
 
     def test_zero_velocity_is_default_and_policy_inputs_follow_the_task(self):
         cfg = config()
+        cfg.curriculum.enabled = False
         cfg.env.head_tracking = False  # Isolate the locomotion input selection.
         self.assertEqual(cfg.env.tracking_mode, "velocity")
         self.assertEqual(cfg.env.target_vel, 0.0)
@@ -424,7 +426,10 @@ class ActiveSimulationTests(unittest.TestCase):
         ):
             cfg.env.tracking_mode = mode
             inputs = get_policy_inputs(cfg)
-            self.assertEqual(set(inputs) - set(cfg.policy.inputs), expected)
+            self.assertEqual(
+                set(inputs) - set(cfg.policy.inputs),
+                expected | {Target.YAW_RATE.value, DerivedObs.YAW_RATE.value},
+            )
 
     def test_tracking_rewards_are_exclusive_and_velocity_does_not_penalize_motion(self):
         state = State(wheel_radius=0.05)
@@ -476,6 +481,7 @@ class ActiveSimulationTests(unittest.TestCase):
             self.assertEqual(obs[Target.TARGET_VEL].shape, (count, 1))
             actions = {
                 Actions.ACC_BOTH_WHEELS: np.zeros((count, 1), dtype=np.float32),
+                Actions.VEL_WHEEL_DIFF: np.zeros((count, 1), dtype=np.float32),
                 Actions.VEL_HEAD_PITCH: np.zeros((count, 1), dtype=np.float32),
                 Actions.VEL_HEAD_TURN: np.zeros((count, 1), dtype=np.float32),
             }
@@ -525,6 +531,7 @@ class ActiveSimulationTests(unittest.TestCase):
 
     def test_live_velocity_commands_reach_the_policy_encoder(self):
         cfg = config()
+        cfg.curriculum.enabled = False
         env = SingleEnvWrapper(single_env(5))
         self.addCleanup(env.close)
         agent = Agent(get_policy_inputs(cfg), cfg.policy.actions)
@@ -544,6 +551,7 @@ class ActiveSimulationTests(unittest.TestCase):
 
     def test_tracking_plots_and_reward_terms_follow_the_selected_mode(self):
         cfg = config()
+        cfg.curriculum.enabled = False
         all_tracking = {
             Target.TARGET_POS, Target.TARGET_VEL,
             DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL,

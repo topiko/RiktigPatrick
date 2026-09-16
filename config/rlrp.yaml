@@ -14,6 +14,7 @@ logging:
 
 rl:
   discount: 0.99
+  value_loss_coef: 0.1  # limit critic influence on the shared recurrent features
 
 reward:
   # These keys need to exactly match the values in patrick/Observables
@@ -26,17 +27,22 @@ reward:
   reward/head_yaw: -0.25  # neck-relative yaw error
   reward/pos: -1.0  # penalty per meter of absolute position error
   reward/vel: -4.0  # penalty per m/s of absolute velocity error
+  reward/yaw_rate: -1.0  # penalty per rad/s of body-Z angular-rate error
   reward/total: 1.0
 
 train:
   device: auto  # auto selects CUDA when available; cpu, cuda, or cuda:N also supported
-  policy_lr: 0.0005
-  grad_clip: 10.0
+  policy_lr: 0.0001
+  grad_clip: 100.0
+  tbptt_steps: 32  # detach recurrent gradient history every N rollout steps
   max_iterations: null  # null trains until interrupted
   resume_from: null  # full local/MLflow-downloaded .pt checkpoint (weights + Adam + RNG)
+  resume_lr: null  # optional explicit Adam LR override after loading a checkpoint
+  kl_probe_every: 32  # sample conditional before/after policy KL; 0 disables diagnostics
   target_positions: null  # optional list of n_parallel fixed targets, in meters
   target_trajectories: null  # optional per-env lists of [time, position] waypoints
   target_velocities: null  # optional list of n_parallel velocity commands, in m/s
+  target_yaw_rates: null  # optional list of n_parallel body-Z rate commands, rad/s
   head_targets: null  # optional per-env [world camera elevation, neck yaw], rad
   head_trajectories: null  # optional per-env [time, elevation, yaw] waypoints
 
@@ -44,14 +50,32 @@ checkpoints:
   dir: ${hydra:runtime.output_dir}/checkpoints
   every: 100  # archive periodic checkpoints, independently of MLflow model logging
 
+curriculum:
+  enabled: true  # balance -> hold_position -> locomotion -> full_control
+  neutral_probability: 0.9  # discrete-head activation; continuous heads use their initial_std
+  consecutive_passes: 3
+  survival_fraction: 0.9
+  balance_seconds: 10.0
+  hold_seconds: 20.0
+  position_mae: 0.05  # meters from the starting position
+  hold_velocity_weight: 0.125  # multiply reward/vel for gentle damping during position hold
+  locomotion_seconds: 20.0
+  startup_seconds: 1.0  # tracking-error allowance at episode start
+  velocity_mae: 0.05  # m/s
+  yaw_rate_mae: 0.2  # rad/s
+  pitch_deadband: 0.08726646259971647  # 5 degrees in radians; all curriculum stages
+  forward_velocities: [-0.1, 0.0, 0.1]
+  yaw_rates: [-0.5, 0.0, 0.5]
+
 guard:
   enabled: true
-  every: 25  # validate after this many training updates, and before the first update
-  episodes: 4  # fixed validation batch; no video rendering
+  compare_deterministic: false  # optional paired diagnostic; gates still use sampled actions
+  every: 25  # shared guard/curriculum evaluation interval; initial evaluation sets baseline
+  episodes: 20  # fixed validation batch; covers all curriculum command pairs
   seed: 1042
-  drop_fraction: 0.5  # rollback after a drop larger than both this fraction and absolute_drop
+  drop_fraction: 0.25  # rollback after a drop larger than both this fraction and absolute_drop
   absolute_drop: 25.0
-  patience: 2  # consecutive degraded validation checks
+  patience: 1  # consecutive degraded validation checks
   min_best_return: 50.0  # do not constrain noisy initial learning
   lr_factor: 0.5
   min_lr: 0.000001
@@ -62,13 +86,16 @@ env:
   n_parallel: 16
   max_episode_steps: 2000
   arena_half_size: 20.0  # visual floor extent in meters; plane collisions are infinite
-  tracking_mode: velocity  # velocity (low-level control), position, or none
+  tracking_mode: velocity  # velocity, position, position_velocity, or none
   target_pos: 0.0  # default fixed position target, meters from episode origin
   target_trajectory: null  # optional default trajectory for training and evaluation
   target_vel: 0.0  # default low-level command: balance and stop, m/s
+  yaw_tracking: true
+  target_yaw_rate: 0.0  # rad/s about body +Z; positive turns left
   head_tracking: true
   head_target: [0.0, 0.0]  # horizontal gaze, forward neck-relative yaw, radians
   head_trajectory: null
+  pitch_deadband: null  # null: linear pitch cost; radians: quadratic outside free region
   camera_view: both  # external, head, or both (overview left, head camera right)
 
   # Relative standard deviation of body/head masses and wheel diameter
@@ -86,7 +113,11 @@ policy:
   actions:
     act/accelerate_both_wheels:
       type: discrete
-      bins: [-300, -200, -150, -100, -75, -50, -25, -10, -5, -2, 0, 2, 5, 10, 25, 50, 75, 100, 150, 200, 300]  # rad/s² - acceleration values for both wheels
+      bins: [-150, -100, -75, -50, -25, -10, -5, -2, 0, 2, 5, 10, 25, 50, 75, 100, 150]  # rad/s² - acceleration values for both wheels
+
+    act/wheel_vel_diff:
+      type: discrete
+      bins: [-4.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 4.0]  # right minus left wheel rad/s; positive turns left
 
     act/head_pitch_vel:
       type: discrete

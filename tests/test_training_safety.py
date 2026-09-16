@@ -59,10 +59,12 @@ def agent_and_optimizer():
 
 def config(folder="unused"):
     return OmegaConf.create({
-        "seed": 42, "rl": {"discount": 0.99},
+        "seed": 42, "rl": {"discount": 0.99, "value_loss_coef": 0.1},
         "train": {
-            "grad_clip": 1.0, "max_iterations": 1,
+            "grad_clip": 1.0, "max_iterations": 1, "tbptt_steps": 32,
+            "kl_probe_every": 32,
             "target_positions": None, "target_velocities": None,
+            "target_yaw_rates": None,
             "target_trajectories": None,
             "head_targets": None, "head_trajectories": None,
         },
@@ -299,6 +301,44 @@ class TrainingSafetyTests(unittest.TestCase):
                 training_update(config(), SingleEnvWrapper(OneStepEnv()),
                                 agent, optimizer, 0)
         self.assert_nested_equal(capture_state(agent, optimizer, 0), before)
+
+    def test_failed_kl_measurement_restores_the_completed_optimizer_update(self):
+        agent, optimizer = agent_and_optimizer()
+        before = capture_state(agent, optimizer, 0)
+        with (
+            patch("sim.train_agent.PolicyProbe.metrics",
+                  side_effect=RuntimeError("KL probe")),
+            patch.object(optimizer, "step", wraps=optimizer.step) as step,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "KL probe"):
+                training_update(config(), SingleEnvWrapper(OneStepEnv()),
+                                agent, optimizer, 0)
+        step.assert_called_once()
+        self.assert_nested_equal(capture_state(agent, optimizer, 0), before)
+
+    def test_value_loss_coefficient_scales_critic_gradient(self):
+        agent, _ = agent_and_optimizer()
+        models = [deepcopy(agent), deepcopy(agent)]
+        rng = torch.get_rng_state().clone()
+        gradients = []
+        for model, coefficient in zip(models, (1.0, 0.1)):
+            torch.set_rng_state(rng)
+            cfg = config()
+            cfg.rl.value_loss_coef = coefficient
+            cfg.train.grad_clip = 1e9  # Compare unclipped critic gradients.
+            optimizer = torch.optim.Adam(model.parameters())
+            metrics = training_update(cfg, SingleEnvWrapper(OneStepEnv()),
+                                      model, optimizer, 0)
+            head = model.value_head[-1]
+            assert isinstance(head, torch.nn.Linear) and head.bias is not None
+            assert head.bias.grad is not None
+            gradients.append(head.bias.grad.clone())
+            self.assertAlmostEqual(
+                metrics["losses/total"],
+                metrics["losses/policy"] + metrics["losses/value_weighted"], places=5,
+            )
+        self.assertGreater(gradients[0].abs().sum(), 0)
+        torch.testing.assert_close(gradients[1], 0.1 * gradients[0])
 
     def test_final_checkpoint_failure_also_writes_a_failure_report(self):
         agent, optimizer = agent_and_optimizer()

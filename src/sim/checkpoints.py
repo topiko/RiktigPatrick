@@ -1,18 +1,27 @@
 """Portable CPU/CUDA training checkpoints and conservative validation rollback."""
 
+from __future__ import annotations
+
+import logging
 import math
 import os
 import random
 from collections.abc import Iterator
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
 from omegaconf import OmegaConf
 
 from nn_ctrl.nns import Agent
+from sim.checkpoint_migrations import add_position_inputs
+
+if TYPE_CHECKING:
+    from sim.curriculum import Curriculum
+
+LOG = logging.getLogger(__name__)
 
 
 def _leaves(value: Any, path: str = "") -> Iterator[tuple[str, Any]]:
@@ -62,7 +71,8 @@ def policy_spec(agent: Agent) -> dict:
 
 
 def capture_state(
-    agent: Agent, optimizer: torch.optim.Optimizer, next_iteration: int
+    agent: Agent, optimizer: torch.optim.Optimizer, next_iteration: int,
+    curriculum: Curriculum | None = None,
 ) -> dict:
     """Capture host-side recovery data without retaining GPU/autograd storage."""
     np_rng = np.random.get_state()
@@ -72,6 +82,9 @@ def capture_state(
         "model": cpu_snapshot(agent.state_dict()),
         "optimizer": cpu_snapshot(optimizer.state_dict()),
         "next_iteration": next_iteration,
+        "curriculum": (
+            deepcopy(curriculum.state_dict()) if curriculum is not None else None
+        ),
         "device": str(agent.device),
         "torch_rng": torch.get_rng_state().clone(),
         "cuda_rng": (
@@ -83,10 +96,34 @@ def capture_state(
     }
 
 
+def _restore_rng(state: dict, device: torch.device):
+    torch.set_rng_state(state["torch_rng"].cpu())
+    if device.type == "cuda" and state.get("cuda_rng") is not None:
+        # Map the saved policy's GPU stream onto the selected destination GPU.
+        torch.cuda.set_rng_state(state["cuda_rng"].cpu(), device)
+    name, keys, position, has_gauss, cached_gaussian = state["numpy_rng"]
+    np.random.set_state((name, np.asarray(keys, dtype=np.uint32), position,
+                         has_gauss, cached_gaussian))
+    random.setstate(state["python_rng"])
+
+
 def restore_state(
     agent: Agent, optimizer: torch.optim.Optimizer, state: dict,
-    *, restore_rng: bool = True,
+    *, restore_rng: bool = True, curriculum: Curriculum | None = None,
+    restore_curriculum: bool = True,
 ) -> int:
+    progress = state.get("curriculum")
+    if (progress is None) != (curriculum is None):
+        raise ValueError("Checkpoint curriculum differs; match curriculum.enabled")
+    if curriculum is not None:
+        if not isinstance(progress, dict):
+            raise ValueError("Invalid checkpoint curriculum state")
+        curriculum.validate_state(progress)
+        if not restore_curriculum and (
+            progress.get("version") != curriculum.VERSION
+            or progress["stage"] != curriculum.stage
+        ):
+            raise ValueError("Cannot roll back across curriculum stages")
     # Input order matters for the GRU's concatenated feature vector.
     if state["policy"] != policy_spec(agent):
         raise ValueError("Checkpoint inputs/actions do not match this configuration")
@@ -105,15 +142,13 @@ def restore_state(
     # step counters on CPU. Do not blindly move every optimizer tensor to CUDA.
     optimizer.load_state_dict(deepcopy(state["optimizer"]))
     optimizer.zero_grad(set_to_none=True)
+    if curriculum is not None:
+        assert isinstance(progress, dict)
+        if restore_curriculum:
+            curriculum.load_state_dict(progress)
+        curriculum.apply_policy(agent)
     if restore_rng:
-        torch.set_rng_state(state["torch_rng"].cpu())
-        if agent.device.type == "cuda" and state.get("cuda_rng") is not None:
-            # Map the saved policy's GPU stream onto the selected destination GPU.
-            torch.cuda.set_rng_state(state["cuda_rng"].cpu(), agent.device)
-        name, keys, position, has_gauss, cached_gaussian = state["numpy_rng"]
-        np.random.set_state((name, np.asarray(keys, dtype=np.uint32), position,
-                             has_gauss, cached_gaussian))
-        random.setstate(state["python_rng"])
+        _restore_rng(state, agent.device)
     return int(state["next_iteration"])
 
 
@@ -138,12 +173,27 @@ def save_checkpoint(
 
 
 def load_checkpoint(
-    path: str | Path, agent: Agent, optimizer: torch.optim.Optimizer
+    path: str | Path, agent: Agent, optimizer: torch.optim.Optimizer,
+    curriculum: Curriculum | None = None,
+    *, learning_rate: float | None = None,
 ) -> int:
+    if learning_rate is not None and (
+        not math.isfinite(learning_rate) or learning_rate <= 0
+    ):
+        raise ValueError("Resume learning rate must be positive and finite")
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if checkpoint.get("format_version") != 1:
         raise ValueError("Unsupported training checkpoint format")
-    return restore_state(agent, optimizer, checkpoint["state"])
+    state = checkpoint["state"]
+    if curriculum is not None and state.get("curriculum") is not None:
+        state = add_position_inputs(agent, optimizer, state, policy_spec(agent))
+        if state is not checkpoint["state"]:
+            LOG.info("Added position inputs with zero GRU influence; kept Adam moments")
+    iteration = restore_state(agent, optimizer, state, curriculum=curriculum)
+    if learning_rate is not None:
+        for group in optimizer.param_groups:
+            group["lr"] = learning_rate
+    return iteration
 
 
 class PolicyGuard:
@@ -159,6 +209,7 @@ class PolicyGuard:
         drop_fraction: float = 0.5, absolute_drop: float = 25.0,
         patience: int = 2, min_best_return: float = 50.0,
         lr_factor: float = 0.5, min_lr: float = 1e-6,
+        curriculum: Curriculum | None = None,
     ):
         if not 0 < drop_fraction < 1 or not 0 < lr_factor < 1:
             raise ValueError("Guard fractions must lie strictly between 0 and 1")
@@ -168,6 +219,7 @@ class PolicyGuard:
             raise ValueError("Guard thresholds must be finite")
         self.agent = agent
         self.optimizer = optimizer
+        self.curriculum = curriculum
         self.drop_fraction = drop_fraction
         self.absolute_drop = absolute_drop
         self.patience = patience
@@ -179,11 +231,19 @@ class PolicyGuard:
         self.bad_evaluations = 0
         self.rollbacks = 0
 
+    def reset_baseline(self):
+        """A new curriculum objective gets its own best policy and return baseline."""
+        self.best_state = None
+        self.best_score = None
+        self.bad_evaluations = 0
+
     def observe(self, score: float, next_iteration: int) -> str:
         if not math.isfinite(score):
             raise FloatingPointError("Non-finite validation return")
         if self.best_score is None or score > self.best_score:
-            self.best_state = capture_state(self.agent, self.optimizer, next_iteration)
+            self.best_state = capture_state(
+                self.agent, self.optimizer, next_iteration, self.curriculum
+            )
             self.best_score = score
             self.bad_evaluations = 0
             return "best"
@@ -198,7 +258,12 @@ class PolicyGuard:
 
         assert self.best_state is not None
         previous_rates = [group["lr"] for group in self.optimizer.param_groups]
-        restore_state(self.agent, self.optimizer, self.best_state, restore_rng=False)
+        restore_state(
+            self.agent, self.optimizer, self.best_state, restore_rng=False,
+            curriculum=self.curriculum, restore_curriculum=False,
+        )
+        if self.curriculum is not None:
+            self.curriculum.success_streak = 0
         for group, previous in zip(self.optimizer.param_groups, previous_rates):
             group["lr"] = min(previous, max(
                 self.min_lr, min(previous, group["lr"]) * self.lr_factor

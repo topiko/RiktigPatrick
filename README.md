@@ -72,11 +72,15 @@ See [fixes.md](fixes.md) for the cleanup findings and before/after pseudocode.
 | File | Purpose |
 |------|---------|
 | `config/rlrp.yaml` | Hydra configuration, in SI units |
+| `config/continuous.yaml` | Bounded continuous-action comparison configuration |
 | `src/sim/train_agent.py` | Rollouts, actor–critic training, evaluation |
 | `src/sim/envs/rp_env.py` | MuJoCo model and Gymnasium environment |
 | `src/sim/utils.py` | Environment creation, batching, episode buffers and returns |
 | `src/sim/devices.py` | CPU/CUDA selection and isolated evaluation RNG streams |
 | `src/sim/checkpoints.py` | Portable training snapshots and validation rollback |
+| `src/sim/checkpoint_migrations.py` | Preserve old policies when adding position inputs |
+| `src/sim/policy_probe.py` | Sampled conditional policy-change diagnostics |
+| `src/sim/curriculum.py` | Stage masks, command sampling and physical promotion gates |
 | `src/sim/plot_utils.py` | Episode plots |
 | `src/nn_ctrl/nns.py` | Recurrent neural-network agent |
 | `src/riktigpatric/patrick.py` | Shared state/action definitions, filter and odometry state |
@@ -109,7 +113,7 @@ when resolving them; the lockfile is not currently tracked in this repository.
 ## Training
 
 ```bash
-# Default: balance at zero forward velocity, 16 synchronously stepped environments
+# Default: four-stage curriculum, 16 synchronously stepped environments
 uv run python -m sim.train_agent
 
 # One environment, same training loop
@@ -165,17 +169,183 @@ and restore the agent's previous train/eval mode. MLflow records the resolved
 device and PyTorch/CUDA build versions in `training.*` tags.
 
 Recovery snapshots are kept in host RAM to avoid duplicating model/Adam state in
-VRAM. This costs a device-to-host copy per protected update. Full-episode
-backpropagation is retained, so larger batches, hidden sizes and episode lengths
-still increase training memory use. Benchmark throughput for the chosen setup;
-CUDA is not necessarily faster for the small default network.
+VRAM. This costs a device-to-host copy per protected update. Benchmark throughput
+for the chosen setup; CUDA is not necessarily faster for the small default network.
 
 EGL/video rendering is configured separately from `train.device`. CUDA execution
 requires a compatible PyTorch build, driver and accessible GPU.
 
+### Continuous-action comparison
+
+Use the continuous configuration to run the same curriculum with bounded Gaussian
+action heads. The base `rlrp.yaml` remains the discrete baseline.
+
+```bash
+# Continuous curriculum with sampled and deterministic validation diagnostics
+uv run python -m sim.train_agent --config-name continuous logging.mlflow.enabled=true
+
+# Compare sampled and argmax evaluation for a discrete policy
+uv run python -m sim.train_agent guard.compare_deterministic=true
+```
+
+Each continuous head predicts a pre-tanh mean and learns one state-independent
+standard deviation:
+```text
+z ~ Normal(mean, std)
+action = limit * tanh(z)
+```
+The mean heads start at zero. `initial_std`, `min_std` and `max_std` are configured
+per action in **dimensionless pre-tanh units**; log-standard-deviation is smoothly
+bounded between the configured limits. Near zero, physical standard deviation is
+approximately `limit * std`:
+
+| Head | Physical limit | Initial std | Approximate initial physical std |
+|------|----------------|-------------|----------------------------------|
+| Common wheel acceleration | ±150 rad/s² | 0.10 | 15 rad/s² |
+| Right-minus-left wheel velocity | ±4 rad/s | 0.10 | 0.4 rad/s |
+| Head pitch and turn | ±1 rad/s each | 0.05 | 0.05 rad/s each |
+
+The action limits match the current discrete baseline. Sampling is local around
+the mean, rather than assigning probability to unrelated bins. Samples remain
+stochastic at every control step; this does not impose temporal smoothing.
+
+The trainer uses score-function gradients: samples are detached, and log densities
+include the stable tanh-and-scale Jacobian. Continuous log densities may be positive
+and are not directly comparable to categorical log probabilities. Optimizer,
+reward, return and TBPTT settings follow the base configuration.
+
+`guard.compare_deterministic=true` runs a second evaluation on the same cases,
+using argmax for discrete heads or `limit*tanh(mean)` for continuous heads. It logs
+`validation_deterministic/*`; the original sampled `validation/*` still governs
+curriculum promotion and rollback. Both evaluations preserve training RNG state.
+This comparison is enabled by default in `continuous.yaml`; it adds a second
+validation rollout. `policy/std/act/*` logs learned pre-tanh widths during training.
+
+Continuous and discrete action schemas require their own matching checkpoints.
+Start a fresh continuous policy, and use `--config-name continuous` again when
+resuming its checkpoint. Both schemes can use the existing stage-separated MLflow
+runs. See the [inspection of discrete run b6a33b4d](docs/run_b6a33b4d.md) for the
+observed sampling/stability tradeoff that motivates this comparison.
+
+### Recurrent training (TBPTT)
+
+Fresh training uses `train.policy_lr=0.0001`. The loss is
+`policy_loss + rl.value_loss_coef * value_loss`, with `rl.value_loss_coef=0.1` to
+reduce critic-driven changes to the shared GRU. `losses/value` remains the raw MSE;
+`losses/value_weighted` shows its actual contribution to `losses/total`.
+
+`train.kl_probe_every=32` records an observation and detached GRU state every 32
+control steps, excluding finished environments. After the optimizer step, the
+same observation/state pairs measure conditional policy KL, logged as
+`optimization/{policy_kl_mean,policy_kl_max,policy_probe_samples}`. Active Gaussian
+and categorical heads are supported; inactive heads contribute no KL. This is
+a local diagnostic conditional on cached hidden states, not a full recurrent
+history replay or a KL-based rejection rule. It costs an extra forward pass at
+probe steps and one batched post-update pass; `0` disables it.
+
+`train.tbptt_steps=32` controls truncated backpropagation through time. At the
+default 0.01 s control timestep, each chunk spans up to **0.32 s**. The GRU's
+hidden-state values carry forward continuously; only gradient history is detached
+at chunk boundaries. Memory is reset at the start of an episode.
+
+Training collects full episodes with gradients enabled, detaching the hidden
+state every N rollout steps. It then computes full-episode discounted returns
+and performs one backward pass, gradient clip and Adam step per rollout batch.
+The critic baseline is detached, losses are normalized by the batch's total valid
+transitions, and finished episodes and padded tails contribute no further loss.
+
+Override with `train.tbptt_steps=64`, for example. The value must be a positive
+integer; setting it at least as large as the longest episode gives full-episode
+BPTT. Chunk size can change when resuming a checkpoint.
+
+This simple approach retains all chunk graphs until the final backward pass, so
+activation memory still grows with episode length. If memory becomes a bottleneck,
+a future optimization is no-grad collection followed by chunked replay/backward,
+freeing each chunk's graph immediately while retaining full-episode return targets.
+
+### Curriculum (default)
+
+`curriculum.enabled=true` starts in **balance**, then advances based on fixed-suite
+validation. One GRU, critic and four action heads exist throughout; input/output
+shapes stay constant across stages.
+
+| Stage | Active action heads | Objectives |
+|-------|---------------------|------------|
+| `balance` | Common wheel acceleration | Survival and pitch shaping; no velocity penalty |
+| `hold_position` | Common wheel acceleration | Hold the starting position with gentle velocity damping |
+| `locomotion` | Common acceleration + wheel-speed difference | Balance, forward velocity and yaw rate |
+| `full_control` | All four | Locomotion plus horizontal camera elevation and forward neck yaw |
+
+Inactive heads issue exactly zero, without sampling or contributing log-probability
+to the policy loss. Their parameters receive no gradient. Corresponding yaw/head
+reward components are zeroed **before** the critic's return targets are computed.
+The GRU and previously active heads continue learning. At activation, a new discrete
+head selects zero with probability `curriculum.neutral_probability=0.9`; its other
+bins share the remaining probability. A continuous head instead starts with zero
+mean and its configured `initial_std`. Both its mean and exploration parameter
+start with fresh optimizer moments. Inactive continuous heads also issue exactly
+zero, with no gradient into their mean or standard deviation.
+
+**All curriculum stages, including balance, allow free leaning** within
+`curriculum.pitch_deadband=0.08726646259971647` radians (±5°), then apply a quadratic
+penalty. A nonzero torso angle may be needed to place the combined centre of mass
+above the wheel contact line. The curve matches the old pitch penalty at the
+20° fall-angle reference:
+
+```text
+excess = max(0, abs(filtered_body_pitch) - deadband)
+pitch_reward = pitch_scale * fall_angle * (excess / (fall_angle - deadband))²
+```
+
+With the default scale this costs approximately 0 at 5°, −0.222 at 10° and −2 at
+20°, symmetrically for forward/backward lean. True body pitch still controls the
+20° episode termination. Deadbands must be nonnegative and below 20°, in radians;
+`null` selects the original linear penalty. With curriculum disabled,
+`env.pitch_deadband` selects the shaping instead (default `null`).
+
+Balance and position hold both keep steering and head commands at zero. The balance stage
+excludes `reward/vel` and ignores velocity error for promotion, allowing the wheels
+to move as needed to stay upright. Position error is also unpenalized in balance.
+The hold stage targets `x=0` relative to the episode origin, using signed fore/aft
+wheel odometry, plus gentle damping toward `v=0`. With default scales its tracking
+reward is `-abs(x) - 0.5*abs(v)`: `reward/pos=-1` and
+`reward/vel=-4` multiplied by `curriculum.hold_velocity_weight=0.125`.
+This penalizes sustained drift while discouraging oscillation around the origin.
+The transition preserves all policy weights and optimizer moments because it
+enables no new action heads. Both position and velocity are observable throughout.
+
+After position hold, each training episode independently samples a command pair from
+`curriculum.forward_velocities=[-0.1,0,0.1]` m/s and
+`curriculum.yaw_rates=[-0.5,0,0.5]` rad/s. Gaze references remain `[0,0]`.
+Validation deterministically covers all pairs, with fixed seeds and small initial
+pitch/mass/geometry variations. Training randomization follows `env.randomize`.
+
+Promotion requires **three consecutive scheduled evaluations**, shared with the
+guard: `guard.every=25` updates and `guard.episodes=20` episodes by default.
+
+| Promotion | Survival requirement | Tracking-error limits |
+|-----------|----------------------|-----------------------|
+| Balance → Position hold | ≥90% reach 10 s | None; position/velocity/yaw errors are diagnostics only |
+| Position hold → Locomotion | ≥90% reach 20 s | Position MAE ≤0.05 m and forward-speed MAE ≤0.05 m/s |
+| Locomotion → Full control | ≥90% reach 20 s | Forward-speed MAE ≤0.05 m/s; yaw-rate MAE ≤0.2 rad/s |
+
+These are tunable `curriculum.*` settings, not measured guarantees. MAEs omit the
+first `startup_seconds=1.0` and average episodes equally. Short failed episodes
+still contribute errors and count against survival; a fall exactly at the required
+duration is a failure. Episode limits shorter than a gate prevent promotion.
+Initial/resumed evaluations and new-stage baseline evaluations do not advance the
+streak. A failed gate or guard rollback clears it. Curriculum evaluation continues
+with `guard.enabled=false`, with rollback disabled.
+
+Use `curriculum.enabled=false` to train all configured heads immediately and use
+manual references or other tracking modes. The named task-example configurations
+already disable the curriculum. Curriculum runs own their references; conflicting
+manual target overrides are rejected rather than silently ignored.
+
 ### Tracking tasks
 
-The default task is **zero forward velocity with horizontal, forward-facing gaze**:
+With the curriculum disabled, the default task is **zero forward velocity and yaw rate, with horizontal,
+forward-facing gaze**:
 balance and stop moving, without
 requiring a return to the episode's starting position. Select the objective with
 `env.tracking_mode`:
@@ -184,24 +354,25 @@ requiring a return to the episode's starting position. Select the objective with
 |------|------------------------|-----------------|
 | `velocity` (default) | `target/vel`, `derived/vel` | Absolute velocity error in m/s |
 | `position` | `target/pos`, `derived/pos` | Absolute position error in meters |
+| `position_velocity` | Both position and velocity pairs | Position error plus velocity error |
 | `none` | No tracking inputs | No position/velocity-reference penalty |
 
-All locomotion modes retain balancing and the selected head objective. Position and `none` modes
-also retain the configured absolute wheel-speed penalty. Velocity mode disables
+All locomotion modes retain balancing and the selected head/yaw objectives. Position and `none` modes
+also retain the configured absolute wheel-speed penalty. Velocity and combined modes disable
 that penalty, since penalizing motion itself would oppose a nonzero command.
 
 ```bash
-# Zero-velocity balancing (the default)
-uv run python -m sim.train_agent
+# Train all heads immediately at zero velocity and yaw rate
+uv run python -m sim.train_agent curriculum.enabled=false
 
 # Zero-position holding: also return toward the episode's starting position
 uv run python -m sim.train_agent --config-name position_hold
 
-# Disable setpoint tracking; retain the other balancing/motion penalties
-uv run python -m sim.train_agent env.tracking_mode=none
+# Disable fore/aft setpoint tracking; retain yaw, head and balancing objectives
+uv run python -m sim.train_agent curriculum.enabled=false env.tracking_mode=none
 
 # Request 0.1 m/s forward in all environments and evaluation
-uv run python -m sim.train_agent env.target_vel=0.1
+uv run python -m sim.train_agent curriculum.enabled=false env.target_vel=0.1
 
 # Three constant training commands: -0.1, 0.0, +0.1 m/s; evaluate at zero velocity
 uv run python -m sim.train_agent --config-name velocity_example
@@ -216,10 +387,12 @@ The fixed position target remains zero unless overridden:
 
 ```bash
 # Same fixed target for all training environments and evaluation
-uv run python -m sim.train_agent env.tracking_mode=position env.target_pos=0.2
+uv run python -m sim.train_agent curriculum.enabled=false \
+  env.tracking_mode=position env.target_pos=0.2
 
 # Different fixed targets for each training environment
-uv run python -m sim.train_agent env.tracking_mode=position env.n_parallel=3 \
+uv run python -m sim.train_agent curriculum.enabled=false \
+  env.tracking_mode=position env.n_parallel=3 \
   'train.target_positions=[-0.2,0.0,0.2]'
 ```
 
@@ -236,7 +409,7 @@ The intended control hierarchy is:
 
 ```text
 position controller or RC command
-    -> desired forward velocity in m/s
+    -> desired forward velocity in m/s and body yaw rate in rad/s
     -> balancing policy
     -> wheel/head actuator commands
 ```
@@ -259,11 +432,59 @@ Training only at zero velocity establishes balancing/stopping. General command
 following needs varied commands and command changes during training. The example
 configuration varies constant commands across environments; it does not yet
 schedule velocity-command changes within episodes. RC transport and the outer
-controller are not implemented here. Turning would need a separate yaw-rate or
-heading command.
+controller are not implemented here. Body yaw-rate commands use the independent
+reference described below.
 
 Changing tracking mode changes the policy input fields, so train a matching
 policy. Restoring a model with incompatible inputs raises an error.
+
+### Robot yaw-rate control
+
+`env.yaw_tracking=true` adds a body-yaw tracking objective independently of the
+fore/aft and head tasks. `env.target_yaw_rate=0.0` is the default: avoid spinning.
+Positive rates turn left about the robot's +Z axis. The shared `State` exposes
+`target/yaw_rate` and `derived/yaw_rate`; the latter is the body-frame gyro Z
+component, in rad/s. This approximates heading rate near upright; it is not an
+absolute heading reference or an exact world-frame heading derivative when tilted.
+
+```bash
+# Turn left at 0.5 rad/s while balancing; same reference for evaluation
+uv run python -m sim.train_agent curriculum.enabled=false env.target_yaw_rate=0.5
+
+# Train right, straight and left commands; evaluate at the default zero rate
+uv run python -m sim.train_agent curriculum.enabled=false env.n_parallel=3 \
+  'train.target_yaw_rates=[-0.5,0.0,0.5]'
+```
+
+`train.target_yaw_rates` accepts one finite reference per training environment.
+It can coexist with forward-velocity or position references and head targets.
+For live commands use `state.target_yaw_rate = rate`, or
+`add_yaw_targets(obs, env, rates)` for batched environments. Targets persist across
+resets and do not generate actuator commands. Training only at zero yaw rate
+teaches stopping rotation; command following needs varied training references.
+
+The separate `act/wheel_vel_diff` policy head selects **right minus left wheel
+angular velocity**, using nine bins from −4 to +4 wheel rad/s. Its units differ
+from the body-yaw reference. For ideal upright rolling, body yaw rate is roughly
+`wheel_radius * wheel_velocity_difference / wheel_track`; the policy learns the
+mapping using gyro feedback, including actuator dynamics and slip.
+
+The wheel mixer combines the two NN outputs:
+```text
+mean_target = mean(measured_wheel_velocities) + wheel_acceleration * dt
+left_target  = mean_target - wheel_velocity_difference / 2
+right_target = mean_target + wheel_velocity_difference / 2
+```
+It clips common acceleration and mean velocity to their configured limits, then
+reduces the requested difference to fit the remaining wheel-speed headroom.
+This prioritizes balance when turning and forward-speed demands compete. A zero
+difference requests equal wheel speeds; a repeated difference does not accumulate.
+The shared implementation is `src/riktigpatric/wheel_control.py`.
+
+`env.yaw_tracking=false` disables its reward and appended policy inputs. To return
+to the earlier three-head setup, also remove `act/wheel_vel_diff` from
+`policy.actions` in the YAML configuration. The four-head setup adds action and input
+weights, so it requires a matching policy rather than an old three-head checkpoint.
 
 ### Time-varying position trajectories
 
@@ -276,7 +497,7 @@ Times must strictly increase; a single waypoint gives a fixed target.
 uv run python -m sim.train_agent --config-name trajectory_example
 
 # One trajectory shared by all training environments and evaluation
-uv run python -m sim.train_agent \
+uv run python -m sim.train_agent curriculum.enabled=false \
   env.tracking_mode=position 'env.target_trajectory=[[0,0],[2,0.2],[4,0]]'
 ```
 
@@ -314,23 +535,23 @@ Head tracking is independent of the locomotion mode and enabled by default:
   remain available to the policy.
 
 ```bash
-# Default: balance at zero speed, camera horizontal, neck yaw forward
-uv run python -m sim.train_agent
+# Train full control directly at zero speed, camera horizontal, neck yaw forward
+uv run python -m sim.train_agent curriculum.enabled=false
 
 # Slow, opposite head trajectories in two environments
 uv run python -m sim.train_agent --config-name head_tracking
 
 # Fixed camera elevation 0.1 rad and neck yaw 0.2 rad
-uv run python -m sim.train_agent 'env.head_target=[0.1,0.2]'
+uv run python -m sim.train_agent curriculum.enabled=false 'env.head_target=[0.1,0.2]'
 
 # Locomotion-only reference tracking
-uv run python -m sim.train_agent env.head_tracking=false
+uv run python -m sim.train_agent curriculum.enabled=false env.head_tracking=false
 ```
 
 The shared `State` computes estimated camera elevation from the body attitude
 estimate and measured head joints. The rotation chain includes the tilted neck
-yaw axis; it does not simply add pitch angles. **The NN chooses all wheel and head
-commands.** There is no inverse-kinematics controller or body-pitch compensation
+yaw axis; it does not simply add pitch angles. **The NN chooses active actuator
+commands; curriculum-inactive heads issue zero.** There is no inverse-kinematics controller or body-pitch compensation
 command applied outside the NN.
 
 With head tracking enabled, the old `abs(head_joint_pitch)` penalty is disabled.
@@ -357,6 +578,9 @@ the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assum
   including iteration zero; `0` disables evaluation rendering.
 - Plots and numeric CSV episode traces go to `plots/`; videos go to `video/`,
   relative to the run's working directory. Directories are created automatically.
+- Matching artifacts share a training-iteration name, such as
+  `train_iter_000400.mp4`, `train_iter_000400.png` and `train_iter_000400.csv`.
+  The number matches the zero-based training iteration, not a recording counter.
 - Each evaluation saves and, with MLflow enabled, uploads the matching PNG, CSV
   and MP4. These describe the same evaluation episode, not every training rollout.
 - Tracking plots follow the selected mode: position, velocity, or no tracking
@@ -373,12 +597,29 @@ the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assum
 - With MLflow enabled, metrics are logged every `logging.mlflow.push_freq`
   iterations and deployment policy models every `logging.save_freq` iterations.
   Resumable training checkpoints are saved locally even without MLflow (see below).
-- Training metric names are grouped by prefix: `losses/{policy,value,total}`,
+- Training metric names are grouped by prefix: `losses/{policy,value,value_weighted,total}`,
   `returns/{mean,min,max,std}`, and `episodes/length/{mean,min,max}`.
 - Head evaluations also log `evaluation/head/{camera_pitch_mae,neck_yaw_mae,
   camera_estimation_mae}` in radians, over the post-action observations.
 - `policy.restore_id` accepts an MLflow **logged model ID** to restore an agent.
-  Optimizer state and iteration count start fresh.
+  Use `curriculum.enabled=false`; all heads are enabled and optimizer state and
+  iteration count start fresh. Full curriculum resume uses `train.resume_from`.
+
+#### Separate MLflow runs per stage
+
+With curriculum and MLflow enabled, the session is a parent run containing nested
+`balance`, `hold_position`, `locomotion` and `full_control` runs as those stages are reached. Each
+child owns its training/validation metrics, policy models, videos, plots and
+checkpoints. The parent holds the overall configuration and build/device tags.
+Reward curves from different objectives are therefore separate.
+
+Child tags include `curriculum.version`, `curriculum.stage`, `curriculum.stage_index`, inactive actions,
+disabled rewards, `training.start_iteration` and `training.resume_from`. A resumed
+process starts a new parent session and a **fresh child for the restored stage**,
+tagged with its source checkpoint; it does not append to an old stage's curves.
+Iterations remain global across the curriculum. A successfully completed child is
+closed before the next opens, and an interrupted/failed active child closes with
+the session's exception status.
 
 ### Training checkpoints and degradation guard
 
@@ -388,14 +629,16 @@ uploaded as `checkpoints/*` artifacts:
 
 | File | Purpose |
 |------|---------|
-| `best.pt` | Best fixed-benchmark validation return seen in this run |
+| `best.pt` | Best fixed-benchmark validation return in the current stage/session |
+| `stage_<name>_complete.pt` | Outgoing stage's weights, Adam and curriculum progress |
 | `latest.pt` | Initial/periodic, new best, recovered, final or interrupted training state |
 | `iteration_XXXXXX.pt` | Periodic archive, every `checkpoints.every` updates (100 by default) |
 | `training_failure.txt` | Exception/interrupt traceback if training stops abnormally |
 
 The `.pt` files contain model weights, Adam state, CPU PyTorch/NumPy/Python RNG
 states, the selected CUDA RNG state when applicable, configuration and the next
-iteration number. They are tensor/data
+iteration number. Curriculum checkpoints also contain the stage and promotion
+streak. They are tensor/data
 checkpoints loaded with `weights_only=True`, rather than serialized Python agents.
 Writes replace files atomically. Local saves happen before uploads, so an MLflow
 upload failure still leaves a local recovery point.
@@ -406,14 +649,43 @@ uv run python -m sim.train_agent train.resume_from=/path/to/checkpoints/latest.p
 
 # Resume the strongest saved benchmark policy, including its Adam state
 uv run python -m sim.train_agent train.resume_from=/path/to/checkpoints/best.pt
+
+# Resume an older continuous policy with a deliberately smaller optimizer step
+uv run python -m sim.train_agent --config-name continuous \
+  train.resume_from=/path/to/checkpoints/best.pt train.resume_lr=0.0001
 ```
 
 `train.resume_from` and `policy.restore_id` are mutually exclusive. The former
 restores optimizer LR and progress; the latter loads policy weights with a new
-optimizer. Input order, action specifications and network shapes must match for checkpoint
+optimizer. `train.resume_lr` explicitly overrides the loaded Adam LR while retaining
+its moments; the default `null` preserves the saved LR (including guard reductions).
+Changing `train.policy_lr` alone affects fresh optimizers, not resumed ones.
+Input order, action specifications and network shapes must match for checkpoint
 resume. Keep the same task/seed overrides for reproducible continuation: saved
 configuration is included for reference, while the supplied run configuration
 remains active. `train.max_iterations` is a total limit, not an additional count.
+Match `curriculum.enabled` to the checkpoint: older non-curriculum checkpoints
+load with it disabled. Curriculum resume restores the neutral-action mask without
+reinitializing learned heads. Changed curriculum criteria/commands or validation
+seed/batch/timing settings reset the streak while retaining the stage.
+
+Curriculum state uses schema version 3. Version-2 `balance` remains balance-only;
+its `stop` stage becomes `hold_position`. Unversioned three-stage `balance` also
+maps to `hold_position`, since it already included a stopping objective. Later
+stage names are retained, and migration resets the promotion streak.
+
+Training checkpoints from the earlier policy can automatically gain the two
+appended position inputs. Existing GRU columns and Adam moments are preserved;
+new GRU input columns and their moments start at zero, so the additional inputs
+initially have no influence on the controller. New encoders can then learn during
+training. This narrow migration requires matching old inputs, action specifications,
+hidden size and layer count; unrelated architecture changes are rejected. Full
+MLflow model restores still require an exact input/action specification.
+
+Promotion archives `stage_<name>_complete.pt`, enables the next heads, and resets
+the guard baseline. New-stage validation establishes its own `best.pt`; guard
+rollback cannot cross a stage boundary. Validation progress is saved to `latest.pt`
+even when return does not improve.
 
 Checkpoints keep tensor data on CPU and can be loaded on CPU or the selected CUDA
 device; Adam moments follow the model's parameters. The saved CUDA RNG stream is
@@ -425,12 +697,13 @@ bitwise-reproducible across CPU/CUDA or different hardware/software versions.
 
 With `guard.enabled=true` (default), training runs a fixed-seed validation batch
 before the first update and every `guard.every=25` updates. The batch has
-`guard.episodes=4` environments, uses the environment's default targets/trajectory
-and randomization settings, and does not render. Training-only per-environment
-target overrides are not used for this benchmark. Validation preserves training
+`guard.episodes=20` environments and does not render. Curriculum validation uses
+the fixed command suite and randomized initial conditions described above.
+Without curriculum, it uses the environment's default targets/trajectory and
+randomization settings; training-only target overrides are excluded. Validation preserves training
 RNG and policy mode. A resumed run establishes a fresh benchmark baseline.
 
-Rollback requires **two consecutive** scores more than **50% and 25 return units**
+Rollback requires **one** score more than **25% and 25 return units**
 below the best, after the best reaches at least 50. These thresholds are configurable
 with `guard.patience`, `drop_fraction`, `absolute_drop` and `min_best_return`.
 Rollback restores the best weights and optimizer moments, halves the current
@@ -443,6 +716,9 @@ completed updates; zero is the initial benchmark. `guard.enabled=false` disables
 performance rollback, but local checkpoints and numerical update checks remain.
 When `guard/rolled_back=1`, `validation/*` describes the rejected candidate;
 `guard/best_return` describes the recovered reference policy's benchmark score.
+Curriculum also logs `validation/{survival_fraction,position_mae,velocity_mae,yaw_rate_mae}` and
+`curriculum/{stage,success_streak}`. Stage indices are 0 (balance), 1 (position hold),
+2 (locomotion) and 3 (full control).
 
 Non-finite observations, rewards, losses or updates stop training with a recovery
 checkpoint; they are not silently retried indefinitely. Hard kills and power loss
@@ -457,7 +733,7 @@ and checkpoint gaps that motivated these changes.
 
 ### Reading an episode trace
 
-`plots/episode_iter_XXXX.csv` contains all observations/targets, actions, rewards,
+`plots/train_iter_XXXXXX.csv` contains all observations/targets, actions, rewards,
 log-probabilities, value predictions, returns and advantages. Vector observations
 have separate columns such as `sens/gyro[0]`, `sens/gyro[1]`, `sens/gyro[2]`.
 
@@ -494,6 +770,8 @@ The active simulation and agent use SI units:
 | `derived/pos` | Wheel odometry | m, 1 |
 | `target/vel` | Desired signed forward velocity | m/s, 1 |
 | `derived/vel` | Signed forward velocity from wheel odometry | m/s, 1 |
+| `target/yaw_rate` | Desired body-Z angular rate, positive left | rad/s, 1 |
+| `derived/yaw_rate` | Measured body-Z angular rate from gyro | rad/s, 1 |
 | `target/camera_pitch_world` | Desired optical-axis elevation above horizon | rad, 1 |
 | `target/head_yaw_neck` | Desired neck-relative yaw | rad, 1 |
 | `derived/camera_pitch_world` | Camera elevation from estimated body attitude + joints | rad, 1 |
@@ -503,18 +781,23 @@ The active simulation and agent use SI units:
 `get_policy_inputs()` appends the selected task's two fields: velocity or position
 tracking uses 14 scalar input channels, while `none` uses 12. Head tracking adds
 six channels (two targets, estimated camera elevation, roll, two joint rates),
-giving **20 default input channels**. Simulation truth is not added to the NN.
+giving 20 channels. Yaw-rate tracking adds its target and measured rate, giving
+22 channels. Curriculum policies append position reference and odometry, giving
+**24 default input channels**. Simulation truth is not added to the NN.
 Unused target/state fields remain available in environment observations and plots.
 Each policy input has a learned linear encoder. Their outputs feed
-a shared 64-unit GRU, layer normalization, categorical action heads and a value
-head. Continuous action distributions are not implemented.
+a shared 64-unit GRU, layer normalization, action heads and a value head.
+Categorical and tanh-Gaussian heads are supported, including mixed configurations.
 
 Default policy actions:
 - `act/accelerate_both_wheels`: discrete wheel accelerations in rad/s².
+- `act/wheel_vel_diff`: discrete right-minus-left wheel velocity targets in rad/s.
 - `act/head_pitch_vel`: discrete head pitch velocities in rad/s.
 - `act/head_turn_vel`: discrete neck-relative yaw velocities in rad/s.
 
 Individual wheel velocity commands are also supported by the environment.
+Differential steering requires the common acceleration head and cannot be mixed
+with individual wheel commands or the legacy unimplemented `accelerate_yaw_turn`.
 
 MuJoCo `intvelocity` actuators integrate commanded velocity into a position
 setpoint. Head velocity commands are limited by `env.max_head_vel` (default ±1 rad/s).
@@ -539,7 +822,7 @@ Rewards are computed from the newly observed state after each action:
 balancing_terms = (
     step_scale
     + fell_scale * fell
-    + pitch_scale * abs(pitch)
+    + pitch_reward  # quadratic outside the deadband; null selects legacy linear shaping
 )
 wheel_penalty = wheel_vel_scale * mean(abs(wheel_velocities))
 
@@ -547,20 +830,30 @@ velocity mode: tracking_terms = velocity_scale * abs(current_vel - target_vel)
 position mode: tracking_terms = position_scale * abs(current_pos - target_pos)
                                + wheel_penalty
 none mode:     tracking_terms = wheel_penalty
+combined mode: tracking_terms = position_scale * abs(current_pos - target_pos)
+                               + velocity_weight * velocity_scale * abs(current_vel - target_vel)
+
+yaw tracking:  yaw_terms = yaw_rate_scale * abs(gyro_z - target_yaw_rate)
+otherwise:     yaw_terms = 0
 
 head tracking: head_terms = camera_pitch_scale * abs(true_camera_pitch - target_pitch)
                            + head_yaw_scale * abs(neck_yaw - target_neck_yaw)
 otherwise:     head_terms = head_pitch_scale * abs(head_joint_pitch)
 
-reward = total_scale * (balancing_terms + tracking_terms + head_terms)
+reward = total_scale * (balancing_terms + tracking_terms + yaw_terms + head_terms)
 ```
+
+Curriculum stages zero inactive yaw/head components before this final sum, and
+the balance-only stage also zeros the velocity-tracking component.
 
 Scales are the corresponding `reward/*` entries in `config/rlrp.yaml`.
 The position and velocity penalties are `reward/pos` and `reward/vel`; only the
-selected mode's error term is active. The default velocity coefficient is -4 per
+selected mode's error terms are active. The default velocity coefficient is -4 per
 m/s, matching approximately the former zero-speed penalty for straight travel
-with a 0.05 m wheel radius. Pitch uses radians; its default coefficient
-preserves approximately the former per-degree penalty strength.
+with a 0.05 m wheel radius. Pitch uses radians; its default coefficient preserves
+the former per-degree penalty strength when linear shaping is selected. Default
+deadband shaping preserves that cost at the fall-angle reference.
+The default yaw-rate coefficient is −1 per rad/s of error (`reward/yaw_rate`).
 
 Episodes terminate beyond **20° absolute body pitch** and truncate at 20 seconds
 or `env.max_episode_steps` (default 2000), whichever limit is reached first.
@@ -591,6 +884,12 @@ Tracking checks cover task-specific policy inputs, live batched velocity command
 disabled tracking, and the absence of a conflicting motion penalty in velocity mode.
 Head checks compare shared rotations with MuJoCo, test neck-yaw coupling, ensure
 only the NN commands actuators, and verify head-reference timing and reward inputs.
+Yaw checks cover wheel mixing and saturation, physical turning direction, gyro-based
+rewards, live batched references, CSV alignment, and gradients into the new head.
+Curriculum checks cover neutral actions and excluded gradients/rewards, promotion
+gates, head activation, stage-aware recovery, and separate MLflow child runs.
+Continuous-policy checks cover bounds, transformed log densities, score-function
+gradients, exploration initialization, mixed heads and paired validation.
 CUDA integration checks run when PyTorch detects a CUDA device and otherwise
 report skips. They cover rollout/backpropagation, transfers, RNG isolation,
 checkpoint migration and rollback on the accelerator.

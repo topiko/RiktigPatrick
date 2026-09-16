@@ -19,6 +19,7 @@ from sim.checkpoints import (
     restore_state,
     save_checkpoint,
 )
+from sim.curriculum import Curriculum
 from sim.devices import evaluation_rng, resolve_device, seed_torch
 from sim.train_agent import make_agent, training_update, validate_policy
 from sim.utils import (
@@ -35,6 +36,7 @@ def config() -> DictConfig:
     assert isinstance(cfg, DictConfig)
     cfg.env.n_parallel = 2
     cfg.env.max_episode_steps = 3
+    cfg.train.tbptt_steps = 2
     return cfg
 
 
@@ -176,6 +178,26 @@ class DeviceTests(unittest.TestCase):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA device unavailable")
 class CUDAIntegrationTests(unittest.TestCase):
+    def test_curriculum_masks_and_activation_work_on_cuda(self):
+        cfg = config()
+        cfg.train.device = "cuda"
+        agent = make_agent(cfg)
+        curriculum = Curriculum(cfg)
+        optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
+        env = register_and_make_env(cfg)
+        self.addCleanup(env.close)
+        for _ in range(3):
+            metrics = training_update(cfg, env, agent, optimizer, 0, curriculum)
+            self.assertTrue(all(np.isfinite(v) for v in metrics.values()))
+            for action in curriculum.inactive_actions:
+                self.assertTrue(all(
+                    p.grad is None
+                    for p in agent.action_heads[action.value].parameters()
+                ))
+            state = capture_state(agent, optimizer, 1, curriculum)
+            restore_state(agent, optimizer, state, curriculum=curriculum)
+            curriculum.advance(agent, optimizer)
+
     def test_cuda_rollout_update_and_evaluation_rng(self):
         cfg = config()
         cfg.train.device = "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
