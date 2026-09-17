@@ -320,12 +320,17 @@ After position hold, each training episode independently samples a command pair 
 Validation deterministically covers all pairs, with fixed seeds and small initial
 pitch/mass/geometry variations. Training randomization follows `env.randomize`.
 
-Promotion requires **three consecutive scheduled evaluations**, shared with the
-guard: `guard.every=25` updates and `guard.episodes=20` episodes by default.
+Balance is a brief warm-up: promotion needs **one** passing scheduled evaluation
+with **80%** surviving **3 seconds**. Later stages require **three consecutive**
+passing evaluations with **90%** survival and strict tracking limits. Evaluations
+are shared with the guard: `guard.every=25` updates and `guard.episodes=20` episodes
+by default. The warm-up settings are `balance_seconds`,
+`balance_survival_fraction` and `balance_consecutive_passes` under `curriculum`;
+the other stages use `survival_fraction` and `consecutive_passes`.
 
 | Promotion | Survival requirement | Tracking-error limits |
 |-----------|----------------------|-----------------------|
-| Balance → Position hold | ≥90% reach 10 s | None; position/velocity/yaw errors are diagnostics only |
+| Balance → Position hold | ≥80% reach 3 s, one passing evaluation | None; position/velocity/yaw errors are diagnostics only |
 | Position hold → Locomotion | ≥90% reach 20 s | Position MAE ≤0.05 m and forward-speed MAE ≤0.05 m/s |
 | Locomotion → Full control | ≥90% reach 20 s | Forward-speed MAE ≤0.05 m/s; yaw-rate MAE ≤0.2 rad/s |
 

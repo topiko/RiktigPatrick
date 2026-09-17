@@ -89,11 +89,15 @@ class Curriculum:
         if not all(np.isfinite(v) and v > 0 for v in positive):
             raise ValueError("Curriculum durations and thresholds must be positive")
         if (
-            not 0 < c.neutral_probability < 1 or not 0 < c.survival_fraction <= 1
+            not 0 < c.neutral_probability < 1
+            or not all(0 < fraction <= 1 for fraction in (
+                c.survival_fraction, c.balance_survival_fraction
+            ))
             or not 0 <= c.hold_velocity_weight <= 1
             or not 0 <= c.startup_seconds < min(durations)
-            or isinstance(c.consecutive_passes, bool)
-            or not isinstance(c.consecutive_passes, int) or c.consecutive_passes < 1
+            or any(type(count) is not int or count < 1 for count in (
+                c.consecutive_passes, c.balance_consecutive_passes
+            ))
         ):
             raise ValueError("Invalid curriculum probability, startup or pass count")
         for grid in (c.forward_velocities, c.yaw_rates):
@@ -191,8 +195,17 @@ class Curriculum:
         """Record one scheduled evaluation; a true result requests promotion."""
         if self.stage == "full_control":
             return False
+        warming_up = self.stage == "balance"
+        survival_fraction = (
+            self.cfg.balance_survival_fraction
+            if warming_up else self.cfg.survival_fraction
+        )
+        required_passes = (
+            self.cfg.balance_consecutive_passes
+            if warming_up else self.cfg.consecutive_passes
+        )
         passed = (
-            metrics["validation/survival_fraction"] >= self.cfg.survival_fraction
+            metrics["validation/survival_fraction"] >= survival_fraction
             and (self.stage == "balance"
                  or metrics["validation/velocity_mae"] <= self.cfg.velocity_mae)
             and (self.stage != "hold_position"
@@ -201,7 +214,7 @@ class Curriculum:
                  or metrics["validation/yaw_rate_mae"] <= self.cfg.yaw_rate_mae)
         )
         self.success_streak = self.success_streak + 1 if passed else 0
-        return self.success_streak >= self.cfg.consecutive_passes
+        return self.success_streak >= required_passes
 
     def advance(self, agent: Agent, optimizer: torch.optim.Optimizer):
         if self.stage == "full_control":

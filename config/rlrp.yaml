@@ -32,8 +32,8 @@ reward:
 
 train:
   device: auto  # auto selects CUDA when available; cpu, cuda, or cuda:N also supported
-  policy_lr: 0.0001
-  grad_clip: 100.0
+  policy_lr: 0.0003
+  grad_clip: 500.0
   tbptt_steps: 32  # detach recurrent gradient history every N rollout steps
   max_iterations: null  # null trains until interrupted
   resume_from: null  # full local/MLflow-downloaded .pt checkpoint (weights + Adam + RNG)
@@ -53,9 +53,11 @@ checkpoints:
 curriculum:
   enabled: true  # balance -> hold_position -> locomotion -> full_control
   neutral_probability: 0.9  # discrete-head activation; continuous heads use their initial_std
-  consecutive_passes: 3
+  consecutive_passes: 3  # strict gates after the balance warm-up
   survival_fraction: 0.9
-  balance_seconds: 10.0
+  balance_seconds: 3.0
+  balance_survival_fraction: 0.8
+  balance_consecutive_passes: 1
   hold_seconds: 20.0
   position_mae: 0.05  # meters from the starting position
   hold_velocity_weight: 0.125  # multiply reward/vel for gentle damping during position hold
@@ -76,8 +78,8 @@ guard:
   drop_fraction: 0.25  # rollback after a drop larger than both this fraction and absolute_drop
   absolute_drop: 25.0
   patience: 1  # consecutive degraded validation checks
-  min_best_return: 50.0  # do not constrain noisy initial learning
-  lr_factor: 0.5
+  min_best_return: 200.0  # do not constrain noisy initial learning
+  lr_factor: 0.95
   min_lr: 0.000001
 
 env:

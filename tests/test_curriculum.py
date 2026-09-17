@@ -230,7 +230,8 @@ class CurriculumTests(unittest.TestCase):
 
     def test_physical_metrics_include_short_failures_and_distinguish_time_limit(self):
         curriculum = Curriculum(config())
-        long = metric_buffer([0, 0.5, 1, 10], [0, 99, 0.02, 0.04])
+        duration = curriculum.cfg.balance_seconds
+        long = metric_buffer([0, 0.5, 1, duration], [0, 99, 0.02, 0.04])
         short = metric_buffer([0, 0.5], [0, 2], terminated=True)
         metrics = curriculum.validation_metrics([long, short])
         self.assertEqual(metrics["validation/survival_fraction"], 0.5)
@@ -241,7 +242,7 @@ class CurriculumTests(unittest.TestCase):
         self.assertEqual(
             curriculum.validation_metrics([long])["validation/survival_fraction"], 0
         )
-        late_fall = metric_buffer([0, 11], [0, 0], terminated=True)
+        late_fall = metric_buffer([0, duration + 1], [0, 0], terminated=True)
         self.assertEqual(
             curriculum.validation_metrics([late_fall])["validation/survival_fraction"],
             1,
@@ -255,6 +256,8 @@ class CurriculumTests(unittest.TestCase):
 
     def test_promotion_needs_consecutive_passes_and_stage_specific_metrics(self):
         _, curriculum, agent, optimizer = self.training()
+        curriculum.cfg.balance_consecutive_passes = 3
+        curriculum.cfg.balance_survival_fraction = 0.9
         good = passing_metrics()
         good["validation/yaw_rate_mae"] = 100
         good["validation/velocity_mae"] = 100  # Both errors are ignored in balance.
@@ -281,6 +284,24 @@ class CurriculumTests(unittest.TestCase):
             self.assertEqual(curriculum.observe(passing_metrics()), expected)
         curriculum.advance(agent, optimizer)
         self.assertFalse(curriculum.observe(passing_metrics()))
+
+    def test_balance_warmup_is_relaxed_but_later_gates_remain_strict(self):
+        _, curriculum, agent, optimizer = self.training()
+        warmup = passing_metrics()
+        warmup.update({"validation/survival_fraction": 0.8,
+                       "validation/velocity_mae": 100,
+                       "validation/position_mae": 100,
+                       "validation/yaw_rate_mae": 100})
+        self.assertTrue(curriculum.observe(warmup))
+        curriculum.advance(agent, optimizer)
+        self.assertFalse(curriculum.observe({
+            **passing_metrics(), "validation/survival_fraction": 0.8
+        }))
+        for stage in ("hold_position", "locomotion"):
+            self.assertEqual(curriculum.stage, stage)
+            for expected in (False, False, True):
+                self.assertEqual(curriculum.observe(passing_metrics()), expected)
+            curriculum.advance(agent, optimizer)
 
     def test_checkpoint_restores_stage_streak_weights_adam_rng_and_neutral_mask(self):
         cfg, curriculum, agent, optimizer = self.training()
@@ -560,6 +581,10 @@ class CurriculumTests(unittest.TestCase):
         for key, value in (
             ("curriculum.neutral_probability", 1.0),
             ("curriculum.consecutive_passes", 0),
+            ("curriculum.balance_consecutive_passes", 0),
+            ("curriculum.balance_consecutive_passes", True),
+            ("curriculum.balance_survival_fraction", 0),
+            ("curriculum.balance_survival_fraction", 1.1),
             ("curriculum.hold_seconds", 0),
             ("curriculum.forward_velocities", []),
             ("curriculum.yaw_rates", [float("nan")]),
