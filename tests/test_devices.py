@@ -200,6 +200,7 @@ class CUDAIntegrationTests(unittest.TestCase):
 
     def test_cuda_rollout_update_and_evaluation_rng(self):
         cfg = config()
+        cfg.env.step_time_std = 0.002
         cfg.train.device = "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
         cfg.policy.hsize = 16
         cfg.policy.n_rnnlayers = 2

@@ -60,6 +60,7 @@ def agent_and_optimizer():
 def config(folder="unused"):
     return OmegaConf.create({
         "seed": 42, "rl": {"discount": 0.99, "value_loss_coef": 0.1},
+        "env": {"step_time": 0.01},
         "train": {
             "grad_clip": 1.0, "max_iterations": 1, "tbptt_steps": 32,
             "kl_probe_every": 32,

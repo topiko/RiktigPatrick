@@ -1,6 +1,7 @@
 """Numeric evaluation traces with explicit observation/transition alignment."""
 
 import csv
+import math
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,7 @@ def save_episode_csv(
     for key, values in buffer.get_action_dict().items():
         add_stream(key.value, values, steps)
     add_stream("transition/reward", np.asarray(buffer.rewards_l), steps)
+    add_stream("transition/duration", buffer.get_step_times(), steps)
     add_stream("policy/value", buffer.get_values().detach().cpu().numpy(), steps)
     add_stream(
         "policy/log_probability", buffer.get_logps().detach().cpu().numpy(), steps
@@ -53,3 +55,20 @@ def save_episode_csv(
         writer.writerow(columns)
         writer.writerows(zip(*columns.values(), strict=True))
     return path
+
+
+def resample_video_frames(frames: list, step_times: np.ndarray, fps: float) -> list:
+    """Map irregular observation frames onto a constant-FPS playback clock.
+
+    Display the most recent observation at each frame time, retaining the terminal
+    image. Playback duration is rounded up to a frame; no image interpolation.
+    """
+    if len(frames) != len(step_times) + 1:
+        raise ValueError("Expected one reset frame and one frame per transition")
+    times = np.concatenate(([0.0], np.cumsum(step_times, dtype=np.float64)))
+    count = max(1, math.ceil(times[-1] * fps - 1e-6))
+    frame_times = np.arange(count) / fps
+    indices = np.searchsorted(times, frame_times + 1e-12, side="right") - 1
+    result = [frames[index] for index in indices]
+    result[-1] = frames[-1]
+    return result

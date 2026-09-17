@@ -235,7 +235,8 @@ class CurriculumTests(unittest.TestCase):
         short = metric_buffer([0, 0.5], [0, 2], terminated=True)
         metrics = curriculum.validation_metrics([long, short])
         self.assertEqual(metrics["validation/survival_fraction"], 0.5)
-        self.assertAlmostEqual(metrics["validation/velocity_mae"], (0.03 + 2) / 2)
+        long_error = (0.02 * 0.5 + 0.04 * (duration - 1)) / (duration - 0.5)
+        self.assertAlmostEqual(metrics["validation/velocity_mae"], (long_error + 2) / 2)
         self.assertAlmostEqual(metrics["validation/position_mae"], 0.1)
         self.assertAlmostEqual(metrics["validation/yaw_rate_mae"], 0.2)
         long.terminated = True

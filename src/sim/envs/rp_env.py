@@ -67,6 +67,7 @@ from riktigpatric.patrick import (
 from riktigpatric.trajectory import HeadTrajectory, PositionTrajectory
 from riktigpatric.wheel_control import wheel_velocity_targets
 from sim.rewards import FALL_PITCH_LIMIT, pitch_reward, validate_pitch_deadband
+from sim.timing import PHYSICS_STEP, ControlTiming, physics_steps
 
 BODY_M = 0.4
 HEAD_M = 0.2
@@ -441,7 +442,16 @@ class GymRP(gymnasium.Env):
         yaw_tracking: bool = False,
         target_yaw_rate: float = 0.0,
         pitch_deadband: float | None = None,
+        step_time_std: float = 0.0,
+        min_step_time: float = 0.007,
+        max_episode_time: float = 20.0,
     ):
+        self.timing = ControlTiming(step_time, step_time_std, min_step_time)
+        self.step_time = step_time  # Nominal command-conversion/reference interval.
+        self.simul_timestep = PHYSICS_STEP
+        self._episode_substeps = physics_steps(max_episode_time, "max_episode_time")
+        self._elapsed_substeps = 0
+        self._timing_rng = np.random.default_rng()
         _validate_wheel_actions(actions)
         if yaw_tracking and Actions.VEL_WHEEL_DIFF not in actions:
             raise ValueError("Yaw-rate tracking requires the wheel_vel_diff action")
@@ -472,9 +482,6 @@ class GymRP(gymnasium.Env):
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
 
-        self.simul_timestep = 0.002
-        self.dm_env.model.opt.timestep = self.simul_timestep
-
         self.state = State(wheel_radius=WHEEL_D / 2, record=record)
         self.target_pos = target_pos
         self.target_trajectory = target_trajectory
@@ -483,12 +490,6 @@ class GymRP(gymnasium.Env):
         self.head_target = head_target
         self.head_trajectory = head_trajectory
 
-        self.step_time = step_time
-        self._substeps = round(step_time / self.simul_timestep)
-        if self._substeps < 1 or not np.isclose(
-            self._substeps * self.simul_timestep, step_time
-        ):
-            raise ValueError("step_time must be a positive multiple of 0.002 seconds")
         self.render_mode = "rgb_array"
         self.metadata["render_fps"] = int(1 / self.step_time)
 
@@ -618,6 +619,7 @@ class GymRP(gymnasium.Env):
 
         # Make environment:
         physics = mjcf.Physics.from_mjcf_model(arena)
+        physics.model.opt.timestep = self.simul_timestep
 
         return physics
 
@@ -674,7 +676,7 @@ class GymRP(gymnasium.Env):
         return {key: np.atleast_1d(value) for key, value in obs_d.items()}
 
     def _calculate_rewards(
-        self, state: State, *, terminated: bool
+        self, state: State, *, terminated: bool, time_fraction: float = 1.0
     ) -> dict[Observable, float]:
         """Calculate rewards from an explicitly supplied, already updated state."""
 
@@ -728,6 +730,11 @@ class GymRP(gymnasium.Env):
         }
         for key in self.disabled_rewards:
             components[key] = 0.0
+        # Dense terms are rates per nominal control interval. A fall is a one-off
+        # event, so its cost is not multiplied by the time between observations.
+        for key in components:
+            if key != Observable.REWARD_FELL:
+                components[key] *= time_fraction
         components[Observable.REWARD_TOTAL] = (
             sum(components.values()) * self.reward_scales[Observable.REWARD_TOTAL]
         )
@@ -759,6 +766,12 @@ class GymRP(gymnasium.Env):
         self, options: Optional[Any] = None, seed: int | None = None
     ) -> tuple[dict, dict]:
         super().reset(seed=seed)
+        if seed is not None:
+            # Independent from the generators used for physical randomization.
+            self._timing_rng = np.random.default_rng(
+                np.random.SeedSequence(seed, spawn_key=(1,))
+            )
+        self._elapsed_substeps = 0
         self.dm_env = self._reset_env(seed)
         self.state.reset(self._read_sensors())
         # Reset has an initial observation, but no action or transition reward.
@@ -772,7 +785,7 @@ class GymRP(gymnasium.Env):
 
     @property
     def truncated(self) -> bool:
-        return self.simul_time >= 20.0
+        return self._elapsed_substeps >= self._episode_substeps
 
     def render(self):
         if self.camera_view == "both":
@@ -791,6 +804,7 @@ class GymRP(gymnasium.Env):
             self.state.obs.get_observable(sensor)[0]
             for sensor in (Observable.LEFT_WHEEL_VEL, Observable.RIGHT_WHEEL_VEL)
         ])
+        # The next scheduling delay is unknown when the command is issued.
         return wheel_velocity_targets(
             measured, acceleration, self.step_time,
             self.max_wheel_vel, self.max_wheel_acc, difference,
@@ -872,23 +886,34 @@ class GymRP(gymnasium.Env):
                     f"Max diff: {time_diff.max():.6f}s (allowed: {max_diff:.6f}s)"
                 )
 
-        # Apply the actions at time t (all in SI units)
+        if self.truncated:
+            raise RuntimeError("Reset the environment after its time limit")
+        # Apply commands before sampling the unobserved future scheduling delay.
         self._apply_actions(action)
 
-        # Step the MuJoCo environment t -> t + self.step_time.
+        substeps = min(
+            self.timing.sample_steps(self._timing_rng),
+            self._episode_substeps - self._elapsed_substeps,
+        )
         t0 = self.dm_env.data.time
-        for _ in range(self._substeps):
+        for _ in range(substeps):
             self.dm_env.step()
+        self._elapsed_substeps += substeps
 
         # Keep acquisition, shared processing, reward and recording explicit.
         measurements = self._read_sensors()
         self.state.update(measurements)
         terminated = self.terminated
-        rewards = self._calculate_rewards(self.state, terminated=terminated)
+        rewards = self._calculate_rewards(
+            self.state, terminated=terminated,
+            time_fraction=substeps / self.timing.nominal_steps,
+        )
         self.state.record_transition(t0, action, rewards)
 
         reward = float(rewards[Observable.REWARD_TOTAL])
-        return self._get_obs(rewards), reward, terminated, self.truncated, {}
+        return self._get_obs(rewards), reward, terminated, self.truncated, {
+            "step_time": substeps * self.simul_timestep,
+        }
 
 
 def display_video(frames, framerate=30, fname: str = ""):

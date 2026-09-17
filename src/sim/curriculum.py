@@ -30,6 +30,9 @@ class Curriculum:
             "seed": cfg.guard.seed, "episodes": cfg.guard.episodes,
             "step_time": cfg.env.step_time,
             "max_episode_steps": cfg.env.max_episode_steps,
+            "max_episode_time": cfg.env.get("max_episode_time", 20.0),
+            "step_time_std": cfg.env.get("step_time_std", 0.0),
+            "min_step_time": cfg.env.get("min_step_time", 0.007),
             "random_scale": cfg.env.random_scale,
         }
         self.cfg = cfg.curriculum
@@ -166,6 +169,7 @@ class Curriculum:
         }.get(self.stage, self.cfg.locomotion_seconds)
         survived, position_errors, velocity_errors, yaw_errors = [], [], [], []
         for buffer in buffers:
+            step_times = buffer.get_step_times()
             time = buffer.get_observable(Observable.OBS_TIME)[:, 0]
             elapsed = time - time[0]
             survived.append(
@@ -183,7 +187,9 @@ class Curriculum:
             ):
                 error = abs(buffer.get_observable(actual)[1:, 0]
                             - buffer.get_observable(target)[1:, 0])
-                errors.append(float(error[after_startup].mean()))
+                errors.append(float(np.average(
+                    error[after_startup], weights=step_times[after_startup]
+                )))
         return {
             "validation/survival_fraction": float(np.mean(survived)),
             "validation/position_mae": float(np.mean(position_errors)),

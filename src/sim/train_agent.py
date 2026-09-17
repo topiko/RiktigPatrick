@@ -43,7 +43,7 @@ from sim.checkpoints import (
 )
 from sim.curriculum import Curriculum
 from sim.devices import evaluation_rng, resolve_device, seed_torch
-from sim.episode_io import save_episode_csv
+from sim.episode_io import resample_video_frames, save_episode_csv
 from sim.plot_utils import plot_episode
 from sim.policy_probe import PolicyProbe
 from sim.utils import (
@@ -52,6 +52,7 @@ from sim.utils import (
     MiscKeys,
     SingleEnvWrapper,
     ebufs2batchd,
+    ebufs2step_times,
     flatten_dict,
     get_advantages,
     get_returns,
@@ -274,7 +275,7 @@ def rollout(
         action, logp, value, h = agent.act(obs_d_t, h, deterministic=deterministic)
         require_finite((action, logp, value), "policy output")
         action_np = tensord2npd(action)
-        next_obs_d, reward, terminated, truncated, _ = rp_env.step(action_np)
+        next_obs_d, reward, terminated, truncated, info = rp_env.step(action_np)
         _require_finite_observations(next_obs_d, seed)
         if not np.isfinite(reward).all():
             raise FloatingPointError(f"Non-finite reward, rollout seed {seed}")
@@ -288,6 +289,9 @@ def rollout(
                 reward_t=reward[env_idx],
                 logp_t=logp[env_idx, 0],
                 value_t=value[env_idx, 0],
+                step_time=(
+                    float(info["step_time"][env_idx]) if "step_time" in info else None
+                ),
             )
 
         for env_idx in np.flatnonzero(done):
@@ -474,7 +478,11 @@ def training_update(
             episode_buf_l, device=agent.device
         )
 
-        G_t = get_returns(rewards, discount=cfg.rl.discount)
+        step_times = ebufs2step_times(episode_buf_l, device=agent.device)
+        G_t = get_returns(
+            rewards, discount=cfg.rl.discount, step_times=step_times,
+            reference_step_time=cfg.env.step_time,
+        )
         advantages = get_advantages(G_t, values)
 
         policy_loss = -((logps * advantages) * valid_mask).sum() / valid_mask.sum()
@@ -494,6 +502,8 @@ def training_update(
         require_finite(probe_metrics, "policy change")
         # CPU metric transfers are part of accepting the update too.
         episode_returns = (rewards * valid_mask).sum(dim=1).cpu().numpy()
+        durations = step_times.sum(dim=1).cpu().numpy()
+        valid_times = step_times[valid_mask.bool()]
         return {
             "losses/policy": policy_loss.item(), "losses/value": values_loss.item(),
             "losses/value_weighted": weighted_value_loss.item(),
@@ -504,6 +514,13 @@ def training_update(
             "episodes/length/min": float(min(seq_lens)),
             "episodes/length/max": float(max(seq_lens)),
             "episodes/length/mean": float(seq_lens.mean()),
+            "episodes/duration/mean": float(durations.mean()),
+            "episodes/duration/min": float(durations.min()),
+            "episodes/duration/max": float(durations.max()),
+            "timing/step_time/mean": float(valid_times.mean()),
+            "timing/step_time/min": float(valid_times.min()),
+            "timing/step_time/max": float(valid_times.max()),
+            "timing/step_time/std": float(valid_times.std(unbiased=False)),
             "optimization/gradient_norm": float(gradient_norm),
             "optimization/learning_rate": float(optimizer.param_groups[0]["lr"]),
             **probe_metrics,
@@ -584,6 +601,9 @@ def _validation_metrics(buffers, curriculum: Curriculum | None):
         "validation/returns/std": float(returns.std()),
         "validation/episodes/length/mean": float(
             np.mean([b.seq_len for b in buffers])
+        ),
+        "validation/episodes/duration/mean": float(
+            np.mean([b.get_step_times().sum() for b in buffers])
         ),
     }
     if curriculum is not None:
@@ -788,6 +808,10 @@ def evaluate_and_plot(
     env.name_prefix = artifact_name
     buffers = evaluation_rollout(env, agent, cfg.seed + i + 10000, curriculum)
     _, rewards, values, _, _ = ebufs2batchd(buffers, device=agent.device)
+    if cfg.env.step_time_std > 0:
+        env.recorded_frames = resample_video_frames(
+            env.recorded_frames, buffers[0].get_step_times(), env.frames_per_sec
+        )
     env.stop_recording()
     recorded_path = Path(env.video_folder) / (
         f"{env.name_prefix}-episode-{env.episode_id}.mp4"
@@ -795,7 +819,11 @@ def evaluate_and_plot(
     video_path = recorded_path.with_name(f"{artifact_name}.mp4")
     recorded_path.replace(video_path)  # Drop Gymnasium's recording-episode counter.
 
-    returns = get_returns(rewards, discount=cfg.rl.discount)
+    returns = get_returns(
+        rewards, discount=cfg.rl.discount,
+        step_times=ebufs2step_times(buffers, device=agent.device),
+        reference_step_time=cfg.env.step_time,
+    )
     advantages = get_advantages(returns, values)
     eps = Episode(
         buffers[0],

@@ -77,6 +77,7 @@ See [fixes.md](fixes.md) for the cleanup findings and before/after pseudocode.
 | `src/sim/envs/rp_env.py` | MuJoCo model and Gymnasium environment |
 | `src/sim/utils.py` | Environment creation, batching, episode buffers and returns |
 | `src/sim/devices.py` | CPU/CUDA selection and isolated evaluation RNG streams |
+| `src/sim/timing.py` | Seeded control-interval jitter on the fixed physics grid |
 | `src/sim/checkpoints.py` | Portable training snapshots and validation rollback |
 | `src/sim/checkpoint_migrations.py` | Preserve old policies when adding position inputs |
 | `src/sim/policy_probe.py` | Sampled conditional policy-change diagnostics |
@@ -121,7 +122,7 @@ uv run python -m sim.train_agent env.n_parallel=1
 
 # Short run without rendering
 uv run python -m sim.train_agent env.n_parallel=2 \
-  env.max_episode_steps=20 train.max_iterations=2 logging.plot_freq=0
+  env.max_episode_time=0.2 train.max_iterations=2 logging.plot_freq=0
 ```
 
 The Hydra configuration is located automatically relative to the script.
@@ -263,6 +264,49 @@ activation memory still grows with episode length. If memory becomes a bottlenec
 a future optimization is no-grad collection followed by chunked replay/backward,
 freeing each chunk's graph immediately while retaining full-episode return targets.
 
+### Control-interval jitter
+
+MuJoCo integrates at a fixed **2 ms**. `env.step_time=0.01` is the nominal control
+period, used for command conversion and as the reward/discount reference interval.
+Optional jitter varies how many physics steps pass before the next policy update:
+
+```bash
+uv run python -m sim.train_agent --config-name continuous \
+  env.step_time_std=0.002 env.min_step_time=0.007
+```
+
+The scheduler samples `max(min_step_time, Normal(step_time, step_time_std))`, then
+rounds to the physics grid while respecting the minimum. A 7 ms lower bound thus
+becomes **8 ms**, with intervals such as 8, 10, 12 and 14 ms. Clipping and rounding
+slightly change the realized mean/std. `step_time_std=0` disables jitter (default).
+Each environment has an independent, reset-seeded timing stream, separate from
+physical randomization; `env.randomize` controls only the latter. Validation and
+video evaluation use the same configured timing distribution reproducibly.
+
+Wheel acceleration commands still form velocity targets using the **nominal**
+period. Commands are issued before drawing the future scheduling delay, so the
+simulator does not compensate using timing information unavailable to the robot.
+Actual observation timestamps drive the shared filter, odometry and trajectories.
+The policy already receives observation time; no extra policy inputs are required.
+This models variable action-hold intervals, not separate sensor or transport delay.
+
+Dense rewards are scaled by `actual_dt / nominal_dt`; a one-off fall cost is not.
+Returns use `gamma_dt = rl.discount ** (actual_dt / nominal_dt)`. Thus elapsed
+time, rather than the number of policy calls, controls reward accumulation and
+discounting. Tracking MAEs weight post-startup samples by their elapsed intervals.
+
+`env.max_episode_time=20.0` sets the duration limit in seconds. The last interval
+is shortened to reach that limit, even if this is below the normal jitter minimum.
+The optional legacy `env.max_episode_steps` setting (default `null`) limits duration
+to `max_episode_steps * step_time`; with jitter it is not a cap on actual decisions.
+This allows a full-duration episode even when short intervals need more updates.
+
+CSV traces include `transition/duration`, aligned with the outgoing action.
+`episodes/duration/*` and `timing/step_time/{mean,min,max,std}` report realized
+timing; episode-length metrics continue to count policy decisions. With jitter,
+video frames are resampled onto the nominal playback clock, with the terminal
+image retained and duration rounded to a video frame.
+
 ### Curriculum (default)
 
 `curriculum.enabled=true` starts in **balance**, then advances based on fixed-suite
@@ -318,7 +362,8 @@ After position hold, each training episode independently samples a command pair 
 `curriculum.forward_velocities=[-0.1,0,0.1]` m/s and
 `curriculum.yaw_rates=[-0.5,0,0.5]` rad/s. Gaze references remain `[0,0]`.
 Validation deterministically covers all pairs, with fixed seeds and small initial
-pitch/mass/geometry variations. Training randomization follows `env.randomize`.
+pitch/mass/geometry variations. Training randomization is enabled by default
+(`env.randomize=true`), using varying training seeds and fixed validation seeds.
 
 Balance is a brief warm-up: promotion needs **one** passing scheduled evaluation
 with **80%** surviving **3 seconds**. Later stages require **three consecutive**
@@ -335,7 +380,7 @@ the other stages use `survival_fraction` and `consecutive_passes`.
 | Locomotion → Full control | ≥90% reach 20 s | Forward-speed MAE ≤0.05 m/s; yaw-rate MAE ≤0.2 rad/s |
 
 These are tunable `curriculum.*` settings, not measured guarantees. MAEs omit the
-first `startup_seconds=1.0` and average episodes equally. Short failed episodes
+first `startup_seconds=1.0`, time-weight the remaining samples, and average episodes equally. Short failed episodes
 still contribute errors and count against survival; a fall exactly at the required
 duration is a failure. Episode limits shorter than a gate prevent promotion.
 Initial/resumed evaluations and new-stage baseline evaluations do not advance the
@@ -747,6 +792,7 @@ There are **T+1 rows for T actions**. At row t:
 - `env/obs_time` and the observation/target columns describe the state at t.
 - `act/*` is the outgoing action taken from that state.
 - `transition/reward` is the reward received **after** that action, at t+dt.
+- `transition/duration` is that action's realized hold interval in seconds.
 - Observation `reward/*` columns are the incoming reward diagnostics at t;
   their reset values are zero placeholders.
 - `policy/value`, `policy/log_probability`, `policy/return` and
@@ -860,12 +906,13 @@ the former per-degree penalty strength when linear shaping is selected. Default
 deadband shaping preserves that cost at the fall-angle reference.
 The default yaw-rate coefficient is −1 per rad/s of error (`reward/yaw_rate`).
 
-Episodes terminate beyond **20° absolute body pitch** and truncate at 20 seconds
-or `env.max_episode_steps` (default 2000), whichever limit is reached first.
-The physics timestep is 0.002 s; `env.step_time` must be a positive integer
-multiple of it (default 0.01 s).
+Episodes terminate beyond **20° absolute body pitch** and truncate at
+`env.max_episode_time` (default 20 seconds), or the legacy nominal duration budget
+when `env.max_episode_steps` is set, whichever is shorter. The physics timestep is
+0.002 s; `env.step_time` and the episode duration must be positive integer multiples
+of it. The default fixed 0.01 s control period gives 2,000 decisions per full episode.
 
-`env.randomize=true` randomizes initial pitch (standard deviation 2°), body/head
+`env.randomize=true` (default) randomizes initial pitch (standard deviation 2°), body/head
 masses and wheel diameter. `env.random_scale` controls relative physical parameter
 variation. Initial wheel velocity is not randomized.
 

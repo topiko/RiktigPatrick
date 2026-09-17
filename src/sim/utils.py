@@ -185,7 +185,16 @@ def register_and_make_env(
 ) -> gym.Env | gym.vector.SyncVectorEnv:
     env_config = dict(cfg.env)
     n_parallel = env_config.pop("n_parallel", 1)
-    max_episode_steps = env_config.pop("max_episode_steps", 2000)
+    max_episode_steps = env_config.pop("max_episode_steps", None)
+    if max_episode_steps is not None:
+        if type(max_episode_steps) is not int or max_episode_steps < 1:
+            raise ValueError("max_episode_steps must be null or a positive integer")
+        # Preserve old fixed-step configurations as a duration budget, so jitter
+        # cannot end an otherwise successful episode early by exhausting a count.
+        env_config["max_episode_time"] = min(
+            env_config.get("max_episode_time", 20.0),
+            max_episode_steps * env_config.get("step_time", 0.01),
+        )
     if force_single_env:
         n_parallel = 1
     if force_non_random:
@@ -207,7 +216,7 @@ def register_and_make_env(
             [
                 lambda: gym.make(
                     "RiktigPatrick-v0",
-                    max_episode_steps=max_episode_steps,
+                    max_episode_steps=-1,  # GymRP enforces the simulated-time limit.
                     disable_env_checker=True,
                     **config_,
                 )
@@ -218,7 +227,7 @@ def register_and_make_env(
 
     return gym.make(
         "RiktigPatrick-v0",
-        max_episode_steps=max_episode_steps,
+        max_episode_steps=-1,
         disable_env_checker=True,
         **config_,
     )
@@ -272,17 +281,41 @@ def tensord2npd(tensor_dict: dict) -> dict:
     return arrays
 
 
-def get_returns(rewards: torch.Tensor, discount: float) -> torch.Tensor:
+def get_returns(
+    rewards: torch.Tensor, discount: float, *, step_times: torch.Tensor | None = None,
+    reference_step_time: float = 0.01,
+) -> torch.Tensor:
+    """Discount each transition by gamma ** (elapsed / nominal interval)."""
+    if not np.isfinite(discount) or not 0 <= discount <= 1:
+        raise ValueError("discount must be between zero and one")
+    if step_times is not None:
+        if step_times.shape != rewards.shape:
+            raise ValueError("Step times and rewards must have matching shapes")
+        if not np.isfinite(reference_step_time) or reference_step_time <= 0:
+            raise ValueError("reference_step_time must be positive and finite")
+        if not torch.isfinite(step_times).all() or (step_times < 0).any():
+            raise ValueError("Step times must be finite and nonnegative")
     if rewards.ndim == 1:
-        return get_returns(rewards.unsqueeze(0), discount)[0]
+        return get_returns(
+            rewards.unsqueeze(0), discount,
+            step_times=None if step_times is None else step_times.unsqueeze(0),
+            reference_step_time=reference_step_time,
+        )[0]
 
     if rewards.ndim != 2:
         raise ValueError(f"Expected 1D or 2D rewards, got shape {rewards.shape}")
 
     returns = torch.zeros_like(rewards)
     running_return = torch.zeros(rewards.shape[0], device=rewards.device)
+    discounts = (
+        None if step_times is None else discount ** (
+            step_times.to(device=rewards.device, dtype=rewards.dtype)
+            / reference_step_time
+        )
+    )
     for i in reversed(range(rewards.shape[1])):
-        running_return = rewards[:, i] + discount * running_return
+        factor = discount if discounts is None else discounts[:, i]
+        running_return = rewards[:, i] + factor * running_return
         returns[:, i] = running_return
     return returns
 
@@ -332,6 +365,7 @@ class EpisodeBuffer:
     values_l: list[torch.Tensor] = field(default_factory=list)
     finished: bool = False
     terminated: bool = False
+    step_times_l: list[float | None] = field(default_factory=list)
 
     def add_step(
         self,
@@ -340,6 +374,7 @@ class EpisodeBuffer:
         reward_t: float,
         logp_t: torch.Tensor,
         value_t: torch.Tensor,
+        step_time: float | None = None,
     ) -> None:
         # reward_t is the reward returned by step(action_t), including the first.
         self.rewards_l.append(reward_t)
@@ -347,6 +382,7 @@ class EpisodeBuffer:
         self.action_l.append(action_t)
         self.logps_l.append(logp_t)
         self.values_l.append(value_t)
+        self.step_times_l.append(step_time)
 
     def finish(
         self, final_obs: dict[StateVarKey, np.ndarray], *, terminated: bool = False
@@ -399,6 +435,21 @@ class EpisodeBuffer:
     def get_rewards(self) -> torch.Tensor:
         return torch.tensor(self.rewards_l)
 
+    @_verify_len(kind="step times")
+    def get_step_times(self) -> np.ndarray:
+        """Explicit simulator durations avoid float32 timestamp subtraction error."""
+        if any(value is None for value in self.step_times_l):
+            times = self.get_observable(Observable.OBS_TIME)[:, 0].astype(np.float64)
+            differences = np.diff(times)
+            values = [dt if value is None else value
+                      for dt, value in zip(differences, self.step_times_l)]
+        else:
+            values = self.step_times_l
+        durations = np.asarray(values, dtype=np.float64)
+        if not np.isfinite(durations).all() or np.any(durations <= 0):
+            raise ValueError("Recorded step times must be positive and finite")
+        return durations
+
     @_verify_len(kind="logps")
     def get_logps(self) -> torch.Tensor:
         return torch.stack(self.logps_l)
@@ -432,6 +483,16 @@ def ebufs2batchd(
         valid_mask[i, :seq_len] = 1.0
 
     return logps, rewards.to(device), values, seq_lens, valid_mask.to(device)
+
+
+def ebufs2step_times(
+    buffers: list[EpisodeBuffer], device: torch.device | str = "cpu"
+) -> torch.Tensor:
+    """Pad realized transition durations alongside the existing reward/value batch."""
+    durations = torch.zeros(len(buffers), max(b.seq_len for b in buffers))
+    for row, buffer in enumerate(buffers):
+        durations[row, :buffer.seq_len] = torch.as_tensor(buffer.get_step_times())
+    return durations.to(device)
 
 
 class Episode:
