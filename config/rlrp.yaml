@@ -51,13 +51,10 @@ checkpoints:
   every: 100  # archive periodic checkpoints, independently of MLflow model logging
 
 curriculum:
-  enabled: true  # balance -> hold_position -> locomotion -> full_control
+  enabled: true  # hold_position -> locomotion -> full_control
   neutral_probability: 0.9  # discrete-head activation; continuous heads use their initial_std
-  consecutive_passes: 3  # strict gates after the balance warm-up
+  consecutive_passes: 3
   survival_fraction: 0.9
-  balance_seconds: 3.0
-  balance_survival_fraction: 0.8
-  balance_consecutive_passes: 1
   hold_seconds: 20.0
   position_mae: 0.05  # meters from the starting position
   hold_velocity_weight: 0.125  # multiply reward/vel for gentle damping during position hold
@@ -107,8 +104,8 @@ env:
   random_scale: 0.01
 
   # All units are SI (International System of Units)
-  max_wheel_vel: 10.0  # rad/s - maximum wheel velocity
-  max_wheel_acc: 500.0  # rad/s² - maximum wheel acceleration
+  max_wheel_vel: 20.0  # rad/s - maximum wheel velocity
+  max_wheel_acc: 150.0  # rad/s² - maximum wheel acceleration
   max_head_vel: 1.0  # rad/s; prototype hardware speed has not been measured
 
 policy:

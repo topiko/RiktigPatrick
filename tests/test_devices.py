@@ -19,7 +19,7 @@ from sim.checkpoints import (
     restore_state,
     save_checkpoint,
 )
-from sim.curriculum import Curriculum
+from sim.curriculum import STAGES, Curriculum
 from sim.devices import evaluation_rng, resolve_device, seed_torch
 from sim.train_agent import make_agent, training_update, validate_policy
 from sim.utils import (
@@ -186,7 +186,7 @@ class CUDAIntegrationTests(unittest.TestCase):
         optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
         env = register_and_make_env(cfg)
         self.addCleanup(env.close)
-        for _ in range(3):
+        for stage in STAGES:
             metrics = training_update(cfg, env, agent, optimizer, 0, curriculum)
             self.assertTrue(all(np.isfinite(v) for v in metrics.values()))
             for action in curriculum.inactive_actions:
@@ -196,7 +196,8 @@ class CUDAIntegrationTests(unittest.TestCase):
                 ))
             state = capture_state(agent, optimizer, 1, curriculum)
             restore_state(agent, optimizer, state, curriculum=curriculum)
-            curriculum.advance(agent, optimizer)
+            if stage != "full_control":
+                curriculum.advance(agent, optimizer)
 
     def test_cuda_rollout_update_and_evaluation_rng(self):
         cfg = config()

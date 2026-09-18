@@ -59,7 +59,7 @@ class PitchRewardTests(unittest.TestCase):
             cfg = config()
             cfg.env.n_parallel = count
             curriculum = Curriculum(cfg)
-            balance_state = curriculum.state_dict()
+            initial_state = curriculum.state_dict()
             agent = make_agent(cfg)
             optimizer = torch.optim.Adam(agent.parameters())
             env = register_and_make_env(cfg)
@@ -96,8 +96,8 @@ class PitchRewardTests(unittest.TestCase):
                             self.assertEqual(raw.terminated, fallen)
                 if stage != "full_control":
                     curriculum.advance(agent, optimizer)
-            # Restoring balance keeps the same free-leaning allowance.
-            curriculum.load_state_dict(balance_state)
+            # Restoring position hold keeps the same free-leaning allowance.
+            curriculum.load_state_dict(initial_state)
             curriculum.prepare_rollout(wrapped, agent, evaluation=True)
             for raw in raw_envs:
                 assert isinstance(raw, GymRP)

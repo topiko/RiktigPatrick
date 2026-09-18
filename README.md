@@ -114,7 +114,7 @@ when resolving them; the lockfile is not currently tracked in this repository.
 ## Training
 
 ```bash
-# Default: four-stage curriculum, 16 synchronously stepped environments
+# Default: three-stage curriculum, 16 synchronously stepped environments
 uv run python -m sim.train_agent
 
 # One environment, same training loop
@@ -309,13 +309,12 @@ image retained and duration rounded to a video frame.
 
 ### Curriculum (default)
 
-`curriculum.enabled=true` starts in **balance**, then advances based on fixed-suite
+`curriculum.enabled=true` starts in **position holding**, then advances based on fixed-suite
 validation. One GRU, critic and four action heads exist throughout; input/output
 shapes stay constant across stages.
 
 | Stage | Active action heads | Objectives |
 |-------|---------------------|------------|
-| `balance` | Common wheel acceleration | Survival and pitch shaping; no velocity penalty |
 | `hold_position` | Common wheel acceleration | Hold the starting position with gentle velocity damping |
 | `locomotion` | Common acceleration + wheel-speed difference | Balance, forward velocity and yaw rate |
 | `full_control` | All four | Locomotion plus horizontal camera elevation and forward neck yaw |
@@ -330,7 +329,7 @@ mean and its configured `initial_std`. Both its mean and exploration parameter
 start with fresh optimizer moments. Inactive continuous heads also issue exactly
 zero, with no gradient into their mean or standard deviation.
 
-**All curriculum stages, including balance, allow free leaning** within
+**All curriculum stages allow free leaning** within
 `curriculum.pitch_deadband=0.08726646259971647` radians (±5°), then apply a quadratic
 penalty. A nonzero torso angle may be needed to place the combined centre of mass
 above the wheel contact line. The curve matches the old pitch penalty at the
@@ -347,16 +346,16 @@ With the default scale this costs approximately 0 at 5°, −0.222 at 10° and �
 `null` selects the original linear penalty. With curriculum disabled,
 `env.pitch_deadband` selects the shaping instead (default `null`).
 
-Balance and position hold both keep steering and head commands at zero. The balance stage
-excludes `reward/vel` and ignores velocity error for promotion, allowing the wheels
-to move as needed to stay upright. Position error is also unpenalized in balance.
+Training begins with survival, pitch shaping and position holding together;
+there is no survival-only warm-up. Steering and head commands start at zero.
 The hold stage targets `x=0` relative to the episode origin, using signed fore/aft
 wheel odometry, plus gentle damping toward `v=0`. With default scales its tracking
 reward is `-abs(x) - 0.5*abs(v)`: `reward/pos=-1` and
 `reward/vel=-4` multiplied by `curriculum.hold_velocity_weight=0.125`.
 This penalizes sustained drift while discouraging oscillation around the origin.
-The transition preserves all policy weights and optimizer moments because it
-enables no new action heads. Both position and velocity are observable throughout.
+Both position and velocity are observable throughout. The wheel controller is trained
+to stay near the origin from the outset, rather than first learning to accelerate
+until reaching its speed limit.
 
 After position hold, each training episode independently samples a command pair from
 `curriculum.forward_velocities=[-0.1,0,0.1]` m/s and
@@ -365,17 +364,13 @@ Validation deterministically covers all pairs, with fixed seeds and small initia
 pitch/mass/geometry variations. Training randomization is enabled by default
 (`env.randomize=true`), using varying training seeds and fixed validation seeds.
 
-Balance is a brief warm-up: promotion needs **one** passing scheduled evaluation
-with **80%** surviving **3 seconds**. Later stages require **three consecutive**
-passing evaluations with **90%** survival and strict tracking limits. Evaluations
-are shared with the guard: `guard.every=25` updates and `guard.episodes=20` episodes
-by default. The warm-up settings are `balance_seconds`,
-`balance_survival_fraction` and `balance_consecutive_passes` under `curriculum`;
-the other stages use `survival_fraction` and `consecutive_passes`.
+Promotion requires **three consecutive** passing evaluations with **90%** survival
+and strict tracking limits, controlled by `curriculum.consecutive_passes` and
+`curriculum.survival_fraction`. Evaluations are shared with the guard:
+`guard.every=25` updates and `guard.episodes=20` episodes by default.
 
 | Promotion | Survival requirement | Tracking-error limits |
 |-----------|----------------------|-----------------------|
-| Balance → Position hold | ≥80% reach 3 s, one passing evaluation | None; position/velocity/yaw errors are diagnostics only |
 | Position hold → Locomotion | ≥90% reach 20 s | Position MAE ≤0.05 m and forward-speed MAE ≤0.05 m/s |
 | Locomotion → Full control | ≥90% reach 20 s | Forward-speed MAE ≤0.05 m/s; yaw-rate MAE ≤0.2 rad/s |
 
@@ -658,7 +653,7 @@ the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assum
 #### Separate MLflow runs per stage
 
 With curriculum and MLflow enabled, the session is a parent run containing nested
-`balance`, `hold_position`, `locomotion` and `full_control` runs as those stages are reached. Each
+`hold_position`, `locomotion` and `full_control` runs as those stages are reached. Each
 child owns its training/validation metrics, policy models, videos, plots and
 checkpoints. The parent holds the overall configuration and build/device tags.
 Reward curves from different objectives are therefore separate.
@@ -719,10 +714,10 @@ load with it disabled. Curriculum resume restores the neutral-action mask withou
 reinitializing learned heads. Changed curriculum criteria/commands or validation
 seed/batch/timing settings reset the streak while retaining the stage.
 
-Curriculum state uses schema version 3. Version-2 `balance` remains balance-only;
-its `stop` stage becomes `hold_position`. Unversioned three-stage `balance` also
-maps to `hold_position`, since it already included a stopping objective. Later
-stage names are retained, and migration resets the promotion streak.
+Curriculum state uses schema version 4. Retired `balance` and `stop` stages in older
+checkpoints map to `hold_position`, so resuming cannot re-enter the removed stage.
+Later stage names are retained. Migration preserves weights and Adam state and
+resets the promotion streak for the new curriculum definition.
 
 Training checkpoints from the earlier policy can automatically gain the two
 appended position inputs. Existing GRU columns and Adam moments are preserved;
@@ -767,8 +762,8 @@ performance rollback, but local checkpoints and numerical update checks remain.
 When `guard/rolled_back=1`, `validation/*` describes the rejected candidate;
 `guard/best_return` describes the recovered reference policy's benchmark score.
 Curriculum also logs `validation/{survival_fraction,position_mae,velocity_mae,yaw_rate_mae}` and
-`curriculum/{stage,success_streak}`. Stage indices are 0 (balance), 1 (position hold),
-2 (locomotion) and 3 (full control).
+`curriculum/{stage,success_streak}`. Stage indices are 0 (position hold),
+1 (locomotion) and 2 (full control).
 
 Non-finite observations, rewards, losses or updates stop training with a recovery
 checkpoint; they are not silently retried indefinitely. Hard kills and power loss
@@ -894,8 +889,8 @@ otherwise:     head_terms = head_pitch_scale * abs(head_joint_pitch)
 reward = total_scale * (balancing_terms + tracking_terms + yaw_terms + head_terms)
 ```
 
-Curriculum stages zero inactive yaw/head components before this final sum, and
-the balance-only stage also zeros the velocity-tracking component.
+Curriculum stages zero inactive yaw/head components before this final sum.
+Position and damped velocity penalties are active from the first training stage.
 
 Scales are the corresponding `reward/*` entries in `config/rlrp.yaml`.
 The position and velocity penalties are `reward/pos` and `reward/vel`; only the

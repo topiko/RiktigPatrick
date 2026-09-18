@@ -1,4 +1,4 @@
-"""Four-stage curriculum: balance, hold position, move/turn and control gaze."""
+"""Three-stage curriculum: hold position, move/turn and control gaze."""
 
 import logging
 from itertools import product
@@ -13,7 +13,7 @@ from sim.rewards import validate_pitch_deadband
 from sim.utils import EpisodeBuffer
 
 LOG = logging.getLogger(__name__)
-STAGES = ("balance", "hold_position", "locomotion", "full_control")
+STAGES = ("hold_position", "locomotion", "full_control")
 HEAD_ACTIONS = (Actions.VEL_HEAD_PITCH, Actions.VEL_HEAD_TURN)
 HEAD_REWARDS = (
     Observable.REWARD_HEAD_PITCH, Observable.REWARD_CAMERA_PITCH,
@@ -22,7 +22,7 @@ HEAD_REWARDS = (
 
 
 class Curriculum:
-    VERSION = 3  # v1 combined balance/stop; v2 added stop; v3 holds position there.
+    VERSION = 4  # Begin with position holding instead of unrestricted balance.
 
     def __init__(self, cfg: DictConfig):
         self.settings = OmegaConf.to_container(cfg.curriculum, resolve=True)
@@ -43,7 +43,7 @@ class Curriculum:
         )))
         if cfg.guard.episodes < len(self.command_pairs):
             raise ValueError("Validation must cover every curriculum command pair")
-        self.stage = "balance"
+        self.stage = STAGES[0]
         self.success_streak = 0
 
     @staticmethod
@@ -85,7 +85,7 @@ class Curriculum:
     def _validate_settings(self):
         c = self.cfg
         validate_pitch_deadband(c.pitch_deadband)
-        durations = (c.balance_seconds, c.hold_seconds, c.locomotion_seconds)
+        durations = (c.hold_seconds, c.locomotion_seconds)
         positive = (
             *durations, c.position_mae, c.velocity_mae, c.yaw_rate_mae
         )
@@ -93,14 +93,10 @@ class Curriculum:
             raise ValueError("Curriculum durations and thresholds must be positive")
         if (
             not 0 < c.neutral_probability < 1
-            or not all(0 < fraction <= 1 for fraction in (
-                c.survival_fraction, c.balance_survival_fraction
-            ))
+            or not 0 < c.survival_fraction <= 1
             or not 0 <= c.hold_velocity_weight <= 1
             or not 0 <= c.startup_seconds < min(durations)
-            or any(type(count) is not int or count < 1 for count in (
-                c.consecutive_passes, c.balance_consecutive_passes
-            ))
+            or type(c.consecutive_passes) is not int or c.consecutive_passes < 1
         ):
             raise ValueError("Invalid curriculum probability, startup or pass count")
         for grid in (c.forward_velocities, c.yaw_rates):
@@ -118,14 +114,12 @@ class Curriculum:
     @property
     def inactive_actions(self) -> tuple[Actions, ...]:
         stationary = (Actions.VEL_WHEEL_DIFF, *HEAD_ACTIONS)
-        return (stationary, stationary, HEAD_ACTIONS, ())[self.index]
+        return (stationary, HEAD_ACTIONS, ())[self.index]
 
     @property
     def disabled_rewards(self) -> tuple[Observable, ...]:
         stationary = (Observable.REWARD_YAW_RATE, *HEAD_REWARDS)
-        return (
-            (Observable.REWARD_VEL, *stationary), stationary, HEAD_REWARDS, ()
-        )[self.index]
+        return (stationary, HEAD_REWARDS, ())[self.index]
 
     def apply_policy(self, agent: Agent):
         agent.inactive_actions = self.inactive_actions
@@ -146,7 +140,7 @@ class Curriculum:
         env.set_attr("tracking_mode", self.tracking_mode)
         env.set_attr("velocity_reward_weight", self.velocity_reward_weight)
         env.set_attr("target_pos", 0.0)
-        if self.stage in ("balance", "hold_position"):
+        if self.stage == "hold_position":
             commands = np.zeros((env.num_envs, 2))
         else:
             indices = (
@@ -164,9 +158,10 @@ class Curriculum:
         }
 
     def validation_metrics(self, buffers: list[EpisodeBuffer]) -> dict[str, float]:
-        seconds = {
-            "balance": self.cfg.balance_seconds, "hold_position": self.cfg.hold_seconds,
-        }.get(self.stage, self.cfg.locomotion_seconds)
+        seconds = (
+            self.cfg.hold_seconds if self.stage == "hold_position"
+            else self.cfg.locomotion_seconds
+        )
         survived, position_errors, velocity_errors, yaw_errors = [], [], [], []
         for buffer in buffers:
             step_times = buffer.get_step_times()
@@ -201,33 +196,23 @@ class Curriculum:
         """Record one scheduled evaluation; a true result requests promotion."""
         if self.stage == "full_control":
             return False
-        warming_up = self.stage == "balance"
-        survival_fraction = (
-            self.cfg.balance_survival_fraction
-            if warming_up else self.cfg.survival_fraction
-        )
-        required_passes = (
-            self.cfg.balance_consecutive_passes
-            if warming_up else self.cfg.consecutive_passes
-        )
         passed = (
-            metrics["validation/survival_fraction"] >= survival_fraction
-            and (self.stage == "balance"
-                 or metrics["validation/velocity_mae"] <= self.cfg.velocity_mae)
+            metrics["validation/survival_fraction"] >= self.cfg.survival_fraction
+            and metrics["validation/velocity_mae"] <= self.cfg.velocity_mae
             and (self.stage != "hold_position"
                  or metrics["validation/position_mae"] <= self.cfg.position_mae)
-            and (self.stage in ("balance", "hold_position")
+            and (self.stage == "hold_position"
                  or metrics["validation/yaw_rate_mae"] <= self.cfg.yaw_rate_mae)
         )
         self.success_streak = self.success_streak + 1 if passed else 0
-        return self.success_streak >= required_passes
+        return self.success_streak >= self.cfg.consecutive_passes
 
     def advance(self, agent: Agent, optimizer: torch.optim.Optimizer):
         if self.stage == "full_control":
             raise ValueError("Already at the final curriculum stage")
         next_stage = STAGES[self.index + 1]
         newly_active = {
-            "hold_position": (), "locomotion": (Actions.VEL_WHEEL_DIFF,),
+            "locomotion": (Actions.VEL_WHEEL_DIFF,),
             "full_control": HEAD_ACTIONS,
         }[next_stage]
         for action in newly_active:
@@ -246,12 +231,13 @@ class Curriculum:
 
     def validate_state(self, state: dict):
         version = state.get("version", 1)
-        if type(version) is not int or version not in (1, 2, self.VERSION):
+        if type(version) is not int or version not in (1, 2, 3, self.VERSION):
             raise ValueError("Unsupported checkpoint curriculum version")
-        stages = STAGES if version == self.VERSION else (
-            ("balance", "locomotion", "full_control") if version == 1
-            else ("balance", "stop", "locomotion", "full_control")
-        )
+        stages = {
+            1: ("balance", "locomotion", "full_control"),
+            2: ("balance", "stop", "locomotion", "full_control"),
+            3: ("balance", *STAGES),
+        }.get(version, STAGES)
         if (
             state.get("stage") not in stages
             or type(state.get("success_streak")) is not int
@@ -264,8 +250,7 @@ class Curriculum:
         version = state.get("version", 1)
         legacy = version != self.VERSION
         self.stage = (
-            "hold_position" if state["stage"] == "stop"
-            or (version == 1 and state["stage"] == "balance") else state["stage"]
+            "hold_position" if state["stage"] in ("balance", "stop") else state["stage"]
         )
         if legacy:
             LOG.info("Migrated curriculum %s -> %s; reset promotion streak",

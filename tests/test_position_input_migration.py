@@ -69,7 +69,7 @@ class PositionInputMigrationTests(unittest.TestCase):
             self.assertEqual(load_checkpoint(path, new, optimizer, curriculum,
                                             learning_rate=0.0001), 1600)
             self.assertEqual(optimizer.param_groups[0]["lr"], 0.0001)
-            self.assertEqual(curriculum.stage, "balance")
+            self.assertEqual(curriculum.stage, "hold_position")
             self.assertEqual(curriculum.success_streak, 0)
             obs: dict[StateVarKey, torch.Tensor] = {
                 StateVar.from_str(key): torch.randn(3, StateVar.from_str(key).dim())

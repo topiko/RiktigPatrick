@@ -160,8 +160,7 @@ class CurriculumTests(unittest.TestCase):
             ):
                 if key in curriculum.disabled_rewards:
                     self.assertEqual(rewards[key], 0)
-            if stage != "balance":
-                self.assertLess(rewards[Observable.REWARD_VEL], 0)
+            self.assertLess(rewards[Observable.REWARD_VEL], 0)
             self.assertEqual(rewards[Observable.REWARD_WHEEL_VEL], 0)
             if stage in ("locomotion", "full_control"):
                 self.assertLess(rewards[Observable.REWARD_YAW_RATE], 0)
@@ -180,7 +179,7 @@ class CurriculumTests(unittest.TestCase):
         cfg, curriculum, agent, optimizer = self.training()
         env = self.env(cfg)
         training_update(cfg, env, agent, optimizer, 0, curriculum)
-        for newly_active in ((), (Actions.VEL_WHEEL_DIFF,), HEAD_ACTIONS):
+        for newly_active in ((Actions.VEL_WHEEL_DIFF,), HEAD_ACTIONS):
             before = deepcopy(agent.state_dict())
             adam = deepcopy(optimizer.state_dict())
             curriculum.advance(agent, optimizer)
@@ -202,12 +201,11 @@ class CurriculumTests(unittest.TestCase):
     def test_commands_cover_pairs_and_evaluation_does_not_consume_training_rng(self):
         cfg, curriculum, agent, optimizer = self.training()
         dummy = SimpleNamespace(num_envs=200, set_attr=Mock())
-        for stage in ("balance", "hold_position"):
-            self.assertEqual(curriculum.stage, stage)
-            commands = curriculum.prepare_rollout(dummy, agent)
-            np.testing.assert_array_equal(commands["target_velocities"], 0)
-            np.testing.assert_array_equal(commands["target_yaw_rates"], 0)
-            curriculum.advance(agent, optimizer)
+        self.assertEqual(curriculum.stage, "hold_position")
+        commands = curriculum.prepare_rollout(dummy, agent)
+        np.testing.assert_array_equal(commands["target_velocities"], 0)
+        np.testing.assert_array_equal(commands["target_yaw_rates"], 0)
+        curriculum.advance(agent, optimizer)
         commands = curriculum.prepare_rollout(dummy, agent)
         actual = set(zip(commands["target_velocities"], commands["target_yaw_rates"]))
         self.assertEqual(actual, set(map(tuple, curriculum.command_pairs)))
@@ -230,7 +228,7 @@ class CurriculumTests(unittest.TestCase):
 
     def test_physical_metrics_include_short_failures_and_distinguish_time_limit(self):
         curriculum = Curriculum(config())
-        duration = curriculum.cfg.balance_seconds
+        duration = curriculum.cfg.hold_seconds
         long = metric_buffer([0, 0.5, 1, duration], [0, 99, 0.02, 0.04])
         short = metric_buffer([0, 0.5], [0, 2], terminated=True)
         metrics = curriculum.validation_metrics([long, short])
@@ -248,20 +246,21 @@ class CurriculumTests(unittest.TestCase):
             curriculum.validation_metrics([late_fall])["validation/survival_fraction"],
             1,
         )
-        for stage in ("hold_position", "locomotion"):
-            curriculum.stage = stage
-            self.assertEqual(
-                curriculum.validation_metrics([late_fall])["validation/survival_fraction"],
-                0,
-            )
+        curriculum.stage = "locomotion"
+        curriculum.cfg.locomotion_seconds = duration + 2
+        self.assertEqual(
+            curriculum.validation_metrics([late_fall])["validation/survival_fraction"],
+            0,
+        )
 
     def test_promotion_needs_consecutive_passes_and_stage_specific_metrics(self):
         _, curriculum, agent, optimizer = self.training()
-        curriculum.cfg.balance_consecutive_passes = 3
-        curriculum.cfg.balance_survival_fraction = 0.9
         good = passing_metrics()
         good["validation/yaw_rate_mae"] = 100
-        good["validation/velocity_mae"] = 100  # Both errors are ignored in balance.
+        good["validation/velocity_mae"] = 100
+        self.assertFalse(curriculum.observe(good))
+        good["validation/velocity_mae"] = 0.04
+        self.assertFalse(curriculum.observe({**good, "validation/position_mae": 1.0}))
         self.assertFalse(curriculum.observe(good))
         self.assertFalse(curriculum.observe(good))
         self.assertFalse(curriculum.observe({
@@ -271,14 +270,6 @@ class CurriculumTests(unittest.TestCase):
         for expected in (False, False, True):
             self.assertEqual(curriculum.observe(good), expected)
         curriculum.advance(agent, optimizer)
-        self.assertEqual(curriculum.stage, "hold_position")
-        self.assertEqual(curriculum.success_streak, 0)
-        self.assertFalse(curriculum.observe(good))  # Forward velocity now matters.
-        good["validation/velocity_mae"] = 0.04
-        self.assertFalse(curriculum.observe({**good, "validation/position_mae": 1.0}))
-        for expected in (False, False, True):
-            self.assertEqual(curriculum.observe(good), expected)  # Yaw still ignored.
-        curriculum.advance(agent, optimizer)
         self.assertEqual(curriculum.stage, "locomotion")
         self.assertFalse(curriculum.observe(good))  # Yaw now matters too.
         for expected in (False, False, True):
@@ -286,15 +277,15 @@ class CurriculumTests(unittest.TestCase):
         curriculum.advance(agent, optimizer)
         self.assertFalse(curriculum.observe(passing_metrics()))
 
-    def test_balance_warmup_is_relaxed_but_later_gates_remain_strict(self):
+    def test_fresh_training_starts_with_position_hold_and_strict_gates(self):
         _, curriculum, agent, optimizer = self.training()
-        warmup = passing_metrics()
-        warmup.update({"validation/survival_fraction": 0.8,
-                       "validation/velocity_mae": 100,
-                       "validation/position_mae": 100,
-                       "validation/yaw_rate_mae": 100})
-        self.assertTrue(curriculum.observe(warmup))
-        curriculum.advance(agent, optimizer)
+        self.assertEqual(curriculum.stage, "hold_position")
+        self.assertEqual(curriculum.index, 0)
+        self.assertNotIn(Observable.REWARD_VEL, curriculum.disabled_rewards)
+        self.assertNotIn(Observable.REWARD_POS, curriculum.disabled_rewards)
+        self.assertEqual(
+            curriculum.inactive_actions, (Actions.VEL_WHEEL_DIFF, *HEAD_ACTIONS)
+        )
         self.assertFalse(curriculum.observe({
             **passing_metrics(), "validation/survival_fraction": 0.8
         }))
@@ -306,7 +297,6 @@ class CurriculumTests(unittest.TestCase):
 
     def test_checkpoint_restores_stage_streak_weights_adam_rng_and_neutral_mask(self):
         cfg, curriculum, agent, optimizer = self.training()
-        curriculum.advance(agent, optimizer)
         curriculum.advance(agent, optimizer)
         training_update(cfg, self.env(cfg), agent, optimizer, 0, curriculum)
         curriculum.success_streak = 2
@@ -335,7 +325,6 @@ class CurriculumTests(unittest.TestCase):
     def test_position_hold_penalizes_drift_with_gentle_velocity_damping(self):
         cfg, curriculum, agent, optimizer = self.training()
         env = self.env(cfg)
-        curriculum.advance(agent, optimizer)
         self.assertEqual(curriculum.stage, "hold_position")
         curriculum.prepare_rollout(env, agent)
         env.reset(seed=1)
@@ -366,18 +355,17 @@ class CurriculumTests(unittest.TestCase):
         curriculum.success_streak = 2
         self.assertEqual(guard.observe(0, 1), "rollback")
         self.assertEqual(curriculum.success_streak, 0)
-        self.assertEqual(curriculum.stage, "balance")
+        self.assertEqual(curriculum.stage, "hold_position")
         curriculum.advance(agent, optimizer)
         with self.assertRaisesRegex(ValueError, "across curriculum stages"):
             guard.observe(0, 2)
         guard.reset_baseline()
         self.assertEqual(guard.observe(10, 2), "best")
         assert guard.best_state is not None
-        self.assertEqual(guard.best_state["curriculum"]["stage"], "hold_position")
+        self.assertEqual(guard.best_state["curriculum"]["stage"], "locomotion")
 
     def test_legacy_checkpoints_keep_their_objective_and_reset_promotion_progress(self):
         cfg, curriculum, agent, optimizer = self.training()
-        curriculum.advance(agent, optimizer)  # The old balance objective was stop.
         training_update(cfg, self.env(cfg), agent, optimizer, 0, curriculum)
         before = capture_state(agent, optimizer, 400, curriculum)
         for old, new in (("balance", "hold_position"), ("locomotion", "locomotion"),
@@ -409,7 +397,9 @@ class CurriculumTests(unittest.TestCase):
     def test_checkpoint_versions_are_validated_before_restoring_weights(self):
         _, curriculum, agent, optimizer = self.training()
         before = capture_state(agent, optimizer, 0, curriculum)
-        for version, stage in ((4, "balance"), (True, "balance"), (1, "stop")):
+        for version, stage in (
+            (5, "hold_position"), (4, "balance"), (True, "balance"), (1, "stop")
+        ):
             invalid = deepcopy(before)
             invalid["curriculum"].update(version=version, stage=stage)
             with (
@@ -421,24 +411,24 @@ class CurriculumTests(unittest.TestCase):
                 capture_state(agent, optimizer, 0, curriculum), before
             )
         legacy = deepcopy(before)
-        del legacy["curriculum"]["version"]
+        legacy["curriculum"]["version"] = 3
         with self.assertRaisesRegex(ValueError, "across curriculum stages"):
             restore_state(agent, optimizer, legacy, curriculum=curriculum,
                           restore_curriculum=False)
 
-    def test_version_two_stop_maps_to_position_hold_but_balance_stays_balance(self):
+    def test_retired_balance_and_stop_checkpoints_map_to_position_hold(self):
         curriculum = Curriculum(config())
-        for old, new in (("balance", "balance"), ("stop", "hold_position")):
+        for version, old in ((1, "balance"), (2, "balance"), (2, "stop"),
+                             (3, "balance"), (3, "hold_position")):
             state = curriculum.state_dict()
-            state.update(version=2, stage=old, success_streak=2)
+            state.update(version=version, stage=old, success_streak=2)
             curriculum.load_state_dict(state)
-            self.assertEqual(curriculum.stage, new)
+            self.assertEqual(curriculum.stage, "hold_position")
             self.assertEqual(curriculum.success_streak, 0)
 
     def test_failed_update_restores_sampled_commands_rng_and_curriculum_progress(self):
         cfg, curriculum, agent, optimizer = self.training()
         env = self.env(cfg)
-        curriculum.advance(agent, optimizer)
         curriculum.advance(agent, optimizer)
         curriculum.success_streak = 2
         before = capture_state(agent, optimizer, 0, curriculum)
@@ -450,7 +440,6 @@ class CurriculumTests(unittest.TestCase):
 
     def test_failed_activation_restores_partially_initialized_heads_and_stage(self):
         cfg, curriculum, agent, optimizer = self.training()
-        curriculum.advance(agent, optimizer)
         curriculum.advance(agent, optimizer)
         curriculum.success_streak = 2
         guard = PolicyGuard(agent, optimizer, curriculum=curriculum)
@@ -505,7 +494,7 @@ class CurriculumTests(unittest.TestCase):
 
         def validate(*args):
             return passing_metrics({
-                "balance": 100, "hold_position": 75, "locomotion": 50,
+                "hold_position": 75, "locomotion": 50,
                 "full_control": 25,
             }[curriculum.stage])
 
@@ -561,7 +550,7 @@ class CurriculumTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "activation") as error:
                 check_policy_guard(cfg, None, agent, guard, 100, curriculum)
         backup = getattr(error.exception, "training_state")
-        self.assertEqual(backup["curriculum"]["stage"], "balance")
+        self.assertEqual(backup["curriculum"]["stage"], "hold_position")
         self.assertTrue(all(
             value.device.type == "cpu" for value in backup["model"].values()
         ))
@@ -575,17 +564,16 @@ class CurriculumTests(unittest.TestCase):
             patch("sim.train_agent.write_checkpoint"),
         ):
             check_policy_guard(cfg, None, agent, guard, 100, curriculum, advance=False)
-        self.assertEqual(curriculum.stage, "balance")
+        self.assertEqual(curriculum.stage, "hold_position")
         self.assertEqual(curriculum.success_streak, 2)
 
     def test_invalid_curriculum_configuration_is_rejected(self):
         for key, value in (
             ("curriculum.neutral_probability", 1.0),
             ("curriculum.consecutive_passes", 0),
-            ("curriculum.balance_consecutive_passes", 0),
-            ("curriculum.balance_consecutive_passes", True),
-            ("curriculum.balance_survival_fraction", 0),
-            ("curriculum.balance_survival_fraction", 1.1),
+            ("curriculum.consecutive_passes", True),
+            ("curriculum.survival_fraction", 0),
+            ("curriculum.survival_fraction", 1.1),
             ("curriculum.hold_seconds", 0),
             ("curriculum.forward_velocities", []),
             ("curriculum.yaw_rates", [float("nan")]),

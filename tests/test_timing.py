@@ -156,6 +156,11 @@ class TimingTests(unittest.TestCase):
 
     def test_jitter_durations_are_exported_and_updates_replay_after_restore(self):
         cfg = config()
+        # Isolate the survival reward's time scaling from movement penalties.
+        for key in (
+            Observable.REWARD_RP_PITCH, Observable.REWARD_POS, Observable.REWARD_VEL
+        ):
+            cfg.reward[key.value] = 0.0
         env = register_and_make_env(cfg)
         assert not isinstance(env, Env)  # This fixture uses a vector environment.
         self.addCleanup(env.close)
