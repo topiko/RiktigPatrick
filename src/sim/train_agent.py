@@ -325,6 +325,16 @@ def main(cfg: DictConfig):
         train(cfg, resources, device=device)
 
 
+def _log_run_config(cfg: DictConfig):
+    """Keep searchable parameters and a complete, resolved YAML in the active run."""
+    resolved = OmegaConf.to_container(cfg, resolve=True)
+    assert isinstance(resolved, dict)
+    mlflow.log_params({str(k): str(v) for k, v in flatten_dict(resolved).items()})
+    mlflow.log_text(
+        OmegaConf.to_yaml(OmegaConf.create(resolved)), "config/resolved.yaml"
+    )
+
+
 def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = None):
     device = resolve_device(cfg.train.device if device is None else device)
     _validate_tbptt_steps(cfg.train.tbptt_steps)
@@ -350,11 +360,7 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
             "training.cuda_version": torch.version.cuda or "none",
         })
 
-        # Log config parameters
-        flat_params = OmegaConf.to_container(cfg, resolve=True)
-        mlflow.log_params(
-            {str(k): str(v) for k, v in flatten_dict(flat_params).items()}
-        )
+        _log_run_config(cfg)
 
     # Create environment
     rp_env = register_and_make_env(cfg)
@@ -621,11 +627,7 @@ def start_stage_run(cfg, agent, curriculum: Curriculum, iteration: int, stage_ru
         return
     stage_runs.close()
     stage_runs.enter_context(mlflow.start_run(run_name=curriculum.stage, nested=True))
-    mlflow.log_params({
-        str(k): str(v) for k, v in flatten_dict(
-            OmegaConf.to_container(cfg, resolve=True)
-        ).items()
-    })
+    _log_run_config(cfg)
     mlflow.set_tags({
         "curriculum.stage": curriculum.stage,
         "curriculum.version": curriculum.VERSION,

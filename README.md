@@ -202,9 +202,12 @@ approximately `limit * std`:
 
 | Head | Physical limit | Initial std | Approximate initial physical std |
 |------|----------------|-------------|----------------------------------|
-| Common wheel acceleration | ±150 rad/s² | 0.10 | 15 rad/s² |
+| Common wheel acceleration | ±150 rad/s² | 0.025 | 3.75 rad/s² |
 | Right-minus-left wheel velocity | ±4 rad/s | 0.10 | 0.4 rad/s |
 | Head pitch and turn | ±1 rad/s each | 0.05 | 0.05 rad/s each |
+
+The acceleration head's `min_std=0.005` allows exploration to approach
+approximately 0.75 rad/s² near zero mean.
 
 The action limits match the current discrete baseline. Sampling is local around
 the mean, rather than assigning probability to unrelated bins. Samples remain
@@ -244,8 +247,8 @@ a local diagnostic conditional on cached hidden states, not a full recurrent
 history replay or a KL-based rejection rule. It costs an extra forward pass at
 probe steps and one batched post-update pass; `0` disables it.
 
-`train.tbptt_steps=32` controls truncated backpropagation through time. At the
-default 0.01 s control timestep, each chunk spans up to **0.32 s**. The GRU's
+`train.tbptt_steps=124` controls truncated backpropagation through time. At the
+default 0.01 s control timestep, each chunk spans up to **1.24 s**. The GRU's
 hidden-state values carry forward continuously; only gradient history is detached
 at chunk boundaries. Memory is reset at the start of an episode.
 
@@ -367,7 +370,7 @@ pitch/mass/geometry variations. Training randomization is enabled by default
 Promotion requires **three consecutive** passing evaluations with **90%** survival
 and strict tracking limits, controlled by `curriculum.consecutive_passes` and
 `curriculum.survival_fraction`. Evaluations are shared with the guard:
-`guard.every=10` updates and `guard.episodes=10` episodes by default.
+`guard.every=10` updates and `guard.episodes=50` episodes by default.
 
 | Promotion | Survival requirement | Tracking-error limits |
 |-----------|----------------------|-----------------------|
@@ -642,6 +645,10 @@ the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assum
 - With MLflow enabled, metrics are logged every `logging.mlflow.push_freq`
   iterations and deployment policy models every `logging.save_freq` iterations.
   Resumable training checkpoints are saved locally even without MLflow (see below).
+- The full composed configuration, including CLI overrides and resolved `${...}`
+  interpolations, is uploaded as **`config/resolved.yaml`** to the parent run and
+  every curriculum stage run. Flattened MLflow parameters remain available for
+  searching and comparing runs.
 - Training metric names are grouped by prefix: `losses/{policy,value,value_weighted,total}`,
   `returns/{mean,min,max,std}`, and `episodes/length/{mean,min,max}`.
 - Head evaluations also log `evaluation/head/{camera_pitch_mae,neck_yaw_mae,
@@ -742,14 +749,14 @@ bitwise-reproducible across CPU/CUDA or different hardware/software versions.
 
 With `guard.enabled=true` (default), training runs a fixed-seed validation batch
 before the first update and every `guard.every=10` updates. The batch has
-`guard.episodes=10` environments and does not render. Curriculum validation uses
+`guard.episodes=50` environments and does not render. Curriculum validation uses
 the fixed command suite and randomized initial conditions described above.
 Without curriculum, it uses the environment's default targets/trajectory and
 randomization settings; training-only target overrides are excluded. Validation preserves training
 RNG and policy mode. A resumed run establishes a fresh benchmark baseline.
 
 Rollback requires **one** score more than **20% and 100 return units**
-below the best, after the best reaches at least 200. These thresholds are configurable
+below the best, after the best reaches at least 500. These thresholds are configurable
 with `guard.patience`, `drop_fraction`, `absolute_drop` and `min_best_return`.
 Rollback restores the best weights and optimizer moments, multiplies the current
 learning rate by `guard.lr_factor=0.95` (down to `guard.min_lr`), and continues at

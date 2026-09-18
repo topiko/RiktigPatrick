@@ -507,6 +507,7 @@ class CurriculumTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as folder,
             patch("sim.train_agent.mlflow.start_run", side_effect=start_child),
             patch("sim.train_agent.mlflow.log_params"),
+            patch("sim.train_agent.mlflow.log_text") as log_config,
             patch("sim.train_agent.mlflow.set_tags", side_effect=tags.append),
             patch("sim.train_agent.mlflow.log_metrics", side_effect=log_metrics),
             patch("sim.train_agent.mlflow.log_artifact", side_effect=log_artifact),
@@ -533,6 +534,11 @@ class CurriculumTests(unittest.TestCase):
             self.assertEqual(children[-2:], ["full_control", "full_control"])
             self.assertEqual(tags[-1]["training.start_iteration"], len(STAGES))
             self.assertEqual(tags[-1]["training.resume_from"], cfg.train.resume_from)
+            self.assertEqual(log_config.call_count, len(STAGES) + 1)
+            for call in log_config.call_args_list:
+                self.assertEqual(call.args[1], "config/resolved.yaml")
+                saved_config = OmegaConf.create(call.args[0])
+                self.assertEqual(saved_config.checkpoints.dir, folder)
         self.assertEqual(active, ["parent"])
 
     def test_promotion_retains_cpu_backup_if_restoration_also_fails(self):
