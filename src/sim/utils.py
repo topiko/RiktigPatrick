@@ -331,6 +331,14 @@ def get_advantages(returns: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
     return advantages
 
 
+def actor_critic_losses(logps, returns, values, valid_mask):
+    """Masked transition means, shared by training and update diagnostics."""
+    advantages = get_advantages(returns, values)
+    actor = -(logps * advantages * valid_mask).sum() / valid_mask.sum()
+    critic = ((values - returns).square() * valid_mask).sum() / valid_mask.sum()
+    return actor, critic
+
+
 def _verify_len(kind: str, with_key: bool = False, offset: int = 0):
     def decorator(fun):
         @wraps(fun)

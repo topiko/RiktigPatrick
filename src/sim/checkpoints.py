@@ -202,6 +202,8 @@ class PolicyGuard:
     A fresh/resumed run establishes a new validation baseline. Rollback restores
     weights AND Adam state, but keeps current RNG/iteration progress so training
     does not replay the exact same samples forever.
+    After a rollback, check every update and require improvement. Consecutive
+    rejected attempts stop recovery instead of repeatedly shrinking the LR.
     """
 
     def __init__(
@@ -209,6 +211,7 @@ class PolicyGuard:
         drop_fraction: float = 0.5, absolute_drop: float = 25.0,
         patience: int = 2, min_best_return: float = 50.0,
         lr_factor: float = 0.5, min_lr: float = 1e-6,
+        recovery_attempts: int = 3,
         curriculum: Curriculum | None = None,
     ):
         if not 0 < drop_fraction < 1 or not 0 < lr_factor < 1:
@@ -217,6 +220,8 @@ class PolicyGuard:
             raise ValueError("Invalid guard patience, absolute_drop or min_lr")
         if not all(math.isfinite(v) for v in (absolute_drop, min_best_return, min_lr)):
             raise ValueError("Guard thresholds must be finite")
+        if type(recovery_attempts) is not int or recovery_attempts < 0:
+            raise ValueError("Guard recovery_attempts must be a nonnegative integer")
         self.agent = agent
         self.optimizer = optimizer
         self.curriculum = curriculum
@@ -226,6 +231,10 @@ class PolicyGuard:
         self.min_best_return = min_best_return
         self.lr_factor = lr_factor
         self.min_lr = min_lr
+        self.recovery_attempts = recovery_attempts
+        self.recovering = False
+        self.recovery_failures = 0
+        self.stop_requested = False
         self.best_state: dict | None = None
         self.best_score: float | None = None
         self.bad_evaluations = 0
@@ -236,6 +245,9 @@ class PolicyGuard:
         self.best_state = None
         self.best_score = None
         self.bad_evaluations = 0
+        self.recovering = False
+        self.recovery_failures = 0
+        self.stop_requested = False
 
     def observe(self, score: float, next_iteration: int) -> str:
         if not math.isfinite(score):
@@ -246,7 +258,14 @@ class PolicyGuard:
             )
             self.best_score = score
             self.bad_evaluations = 0
+            self.recovery_failures = 0
             return "best"
+
+        if self.recovering:
+            self._restore_best(reduce_lr=False)
+            self.recovery_failures += 1
+            self.stop_requested = self.recovery_failures >= self.recovery_attempts
+            return "recovery_stop" if self.stop_requested else "recovery_rejected"
 
         drop = max(abs(self.best_score) * self.drop_fraction, self.absolute_drop)
         degraded = (
@@ -256,6 +275,14 @@ class PolicyGuard:
         if self.bad_evaluations < self.patience:
             return "keep"
 
+        self._restore_best(reduce_lr=True)
+        self.recovering = self.recovery_attempts > 0
+        return "rollback"
+
+    def should_evaluate(self, next_iteration: int, interval: int) -> bool:
+        return self.recovering or next_iteration % interval == 0
+
+    def _restore_best(self, *, reduce_lr: bool):
         assert self.best_state is not None
         previous_rates = [group["lr"] for group in self.optimizer.param_groups]
         restore_state(
@@ -267,7 +294,6 @@ class PolicyGuard:
         for group, previous in zip(self.optimizer.param_groups, previous_rates):
             group["lr"] = min(previous, max(
                 self.min_lr, min(previous, group["lr"]) * self.lr_factor
-            ))
+            )) if reduce_lr else previous
         self.bad_evaluations = 0
         self.rollbacks += 1
-        return "rollback"

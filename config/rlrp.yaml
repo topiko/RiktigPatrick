@@ -13,7 +13,7 @@ logging:
   save_freq: 1000
 
 rl:
-  discount: 0.99
+  discount: 0.995
   value_loss_coef: 0.1  # limit critic influence on the shared recurrent features
 
 reward:
@@ -69,15 +69,16 @@ curriculum:
 guard:
   enabled: true
   compare_deterministic: false  # optional paired diagnostic; gates still use sampled actions
-  every: 25  # shared guard/curriculum evaluation interval; initial evaluation sets baseline
-  episodes: 20  # fixed validation batch; covers all curriculum command pairs
+  every: 10  # shared guard/curriculum evaluation interval; initial evaluation sets baseline
+  episodes: 10  # fixed validation batch; covers all curriculum command pairs
   seed: 1042
-  drop_fraction: 0.25  # rollback after a drop larger than both this fraction and absolute_drop
-  absolute_drop: 25.0
+  drop_fraction: 0.20  # rollback after a drop larger than both this fraction and absolute_drop
+  absolute_drop: 100.0
   patience: 1  # consecutive degraded validation checks
   min_best_return: 200.0  # do not constrain noisy initial learning
   lr_factor: 0.95
   min_lr: 0.000001
+  recovery_attempts: 3  # after rollback, check each update; stop after N rejections (0 disables)
 
 env:
   step_time: 0.01  # seconds

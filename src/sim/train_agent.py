@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import random
@@ -51,6 +52,7 @@ from sim.utils import (
     EpisodeBuffer,
     MiscKeys,
     SingleEnvWrapper,
+    actor_critic_losses,
     ebufs2batchd,
     ebufs2step_times,
     flatten_dict,
@@ -384,6 +386,7 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
         absolute_drop=cfg.guard.absolute_drop, patience=cfg.guard.patience,
         min_best_return=cfg.guard.min_best_return,
         lr_factor=cfg.guard.lr_factor, min_lr=cfg.guard.min_lr,
+        recovery_attempts=cfg.guard.get("recovery_attempts", 3),
         curriculum=curriculum,
     )
     validation_env = (
@@ -442,6 +445,21 @@ def _restore_after_failure(error, before, agent, optimizer, curriculum):
         LOG.exception("In-memory rollback failed; CPU recovery snapshot retained")
 
 
+def training_rollout(cfg, rp_env, agent, seed, curriculum=None, policy_probe=None):
+    """Collect the configured training task for an update or gradient diagnostic."""
+    return rollout(
+        rp_env, agent, seed=seed,
+        target_positions=cfg.train.target_positions,
+        target_trajectories=cfg.train.target_trajectories,
+        target_velocities=cfg.train.target_velocities,
+        head_targets=cfg.train.head_targets,
+        head_trajectories=cfg.train.head_trajectories,
+        tbptt_steps=cfg.train.tbptt_steps,
+        target_yaw_rates=cfg.train.target_yaw_rates,
+        curriculum=curriculum, policy_probe=policy_probe,
+    )
+
+
 def training_update(
     cfg, rp_env, agent, optimizer, iteration: int, curriculum: Curriculum | None = None
 ) -> dict[str, float]:
@@ -459,19 +477,8 @@ def training_update(
         if type(probe_every) is not int or probe_every < 0:
             raise ValueError("train.kl_probe_every must be a nonnegative integer")
         probe = PolicyProbe(agent, probe_every) if probe_every else None
-        episode_buf_l = rollout(
-            rp_env,
-            agent,
-            seed=cfg.seed + iteration,
-            target_positions=cfg.train.target_positions,
-            target_trajectories=cfg.train.target_trajectories,
-            target_velocities=cfg.train.target_velocities,
-            head_targets=cfg.train.head_targets,
-            head_trajectories=cfg.train.head_trajectories,
-            tbptt_steps=cfg.train.tbptt_steps,
-            target_yaw_rates=cfg.train.target_yaw_rates,
-            curriculum=curriculum,
-            policy_probe=probe,
+        episode_buf_l = training_rollout(
+            cfg, rp_env, agent, cfg.seed + iteration, curriculum, probe,
         )
 
         logps, rewards, values, seq_lens, valid_mask = ebufs2batchd(
@@ -483,10 +490,7 @@ def training_update(
             rewards, discount=cfg.rl.discount, step_times=step_times,
             reference_step_time=cfg.env.step_time,
         )
-        advantages = get_advantages(G_t, values)
-
-        policy_loss = -((logps * advantages) * valid_mask).sum() / valid_mask.sum()
-        values_loss = (((values - G_t) ** 2) * valid_mask).sum() / valid_mask.sum()
+        policy_loss, values_loss = actor_critic_losses(logps, G_t, values, valid_mask)
 
         weighted_value_loss = coefficient * values_loss
         loss = policy_loss + weighted_value_loss
@@ -636,6 +640,42 @@ def start_stage_run(cfg, agent, curriculum: Curriculum, iteration: int, stage_ru
     })
 
 
+def _log_guard_decision(guard, decision, score):
+    if decision == "rollback":
+        LOG.warning("Policy degradation: restored best return %.2f; LR now %.3g",
+                    guard.best_score, guard.optimizer.param_groups[0]["lr"])
+        if guard.recovering:
+            LOG.warning("Checking every subsequent update; stopping after %d "
+                        "consecutive non-improving recovery attempts",
+                        guard.recovery_attempts)
+    elif decision in ("recovery_rejected", "recovery_stop"):
+        LOG.warning("Recovery attempt %d/%d rejected: candidate %.2f, best %.2f; "
+                    "restored weights and Adam, kept LR %.3g",
+                    guard.recovery_failures, guard.recovery_attempts, score,
+                    guard.best_score, guard.optimizer.param_groups[0]["lr"])
+
+
+def _write_recovery_stop(cfg, guard, iteration, score, metrics, curriculum):
+    if not guard.stop_requested:
+        return
+    report = {
+        "reason": "recovery_exhausted", "next_iteration": iteration,
+        "stage": curriculum.stage if curriculum is not None else None,
+        "best_iteration": guard.best_state["next_iteration"],
+        "best_return": guard.best_score, "rejected_return": score,
+        "recovery_failures": guard.recovery_failures,
+        "learning_rates": [g["lr"] for g in guard.optimizer.param_groups],
+        "candidate_metrics": metrics,
+    }
+    path = Path(cfg.checkpoints.dir) / "training_stop.json"
+    path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    LOG.warning("Recovery exhausted; stopped with the best policy restored. "
+                "Resume checkpoint: %s; diagnostics: %s",
+                path.with_name("latest.pt"), path)
+    if cfg.logging.mlflow.enabled:
+        mlflow.log_artifact(str(path), artifact_path="checkpoints")
+
+
 def check_policy_guard(
     cfg, env, agent, guard, next_iteration: int,
     curriculum: Curriculum | None = None, stage_runs=None, *, advance: bool = True,
@@ -649,33 +689,36 @@ def check_policy_guard(
         guard.observe(score, next_iteration)
         if cfg.guard.get("enabled", True) else "disabled"
     )
-    if decision == "rollback":
+    rejected = decision in ("rollback", "recovery_rejected", "recovery_stop")
+    if rejected:
         promote = False
     if decision == "best":
         write_checkpoint(cfg, guard.best_state, "best.pt", score)
-    if decision == "rollback":
-        LOG.warning("Policy degradation: restored best return %.2f; LR now %.3g",
-                    guard.best_score, guard.optimizer.param_groups[0]["lr"])
+    _log_guard_decision(guard, decision, score)
     if guard.best_score is not None:
         metrics.update({
             "guard/best_return": guard.best_score,
             "guard/bad_evaluations": guard.bad_evaluations,
             "guard/rollbacks": guard.rollbacks,
-            "guard/rolled_back": int(decision == "rollback"),
+            "guard/rolled_back": int(rejected),
             "guard/learning_rate": guard.optimizer.param_groups[0]["lr"],
+            "guard/recovering": int(guard.recovering),
+            "guard/recovery_failures": guard.recovery_failures,
+            "guard/stop_requested": int(guard.stop_requested),
         })
     if curriculum is not None:
         metrics.update({"curriculum/stage": curriculum.index,
                         "curriculum/success_streak": curriculum.success_streak})
         LOG.info(
-            "Curriculum %s: survival %.0f%%, position MAE %.3f m, "
+            "Curriculum %s%s: survival %.0f%%, position MAE %.3f m, "
             "velocity MAE %.3f m/s, yaw MAE %.3f rad/s; passing evaluations %d",
-            curriculum.stage, 100 * metrics["validation/survival_fraction"],
+            curriculum.stage, " (rejected candidate)" if rejected else "",
+            100 * metrics["validation/survival_fraction"],
             metrics["validation/position_mae"],
             metrics["validation/velocity_mae"], metrics["validation/yaw_rate_mae"],
             curriculum.success_streak,
         )
-    if decision in ("best", "rollback") or curriculum is not None:
+    if decision == "best" or rejected or curriculum is not None:
         # Save progress even without a new best score, including a rollback's LR.
         write_checkpoint(
             cfg, capture_state(agent, guard.optimizer, next_iteration, curriculum),
@@ -685,6 +728,7 @@ def check_policy_guard(
              next_iteration, score, guard.best_score, decision)
     if cfg.logging.mlflow.enabled:
         mlflow.log_metrics(metrics, step=next_iteration)
+    _write_recovery_stop(cfg, guard, next_iteration, score, metrics, curriculum)
     if promote:
         assert curriculum is not None
         before = capture_state(agent, guard.optimizer, next_iteration, curriculum)
@@ -729,6 +773,14 @@ def preserve_training_failure(
         LOG.exception("Could not persist/upload failure artifacts")
 
 
+def _log_training_update(cfg, iteration, metrics):
+    LOG.info("Step %4d: p_l=%.4f, v_l=%.4f, ret=%.2f, mean_ep_len=%.0f",
+             iteration, metrics["losses/policy"], metrics["losses/value"],
+             metrics["returns/mean"], metrics["episodes/length/mean"])
+    if cfg.logging.mlflow.enabled and iteration % cfg.logging.mlflow.push_freq == 0:
+        mlflow.log_metrics(metrics, step=iteration)
+
+
 def run_training_loop(
     cfg, env, video_env, validation_env, agent, optimizer, guard, start,
     curriculum: Curriculum | None = None, stage_runs=None,
@@ -753,19 +805,17 @@ def run_training_loop(
             iteration = next_iteration
             metrics = training_update(cfg, env, agent, optimizer, iteration, curriculum)
             next_iteration = iteration + 1
-            LOG.info("Step %4d: p_l=%.4f, v_l=%.4f, ret=%.2f, mean_ep_len=%.0f",
-                     iteration, metrics["losses/policy"], metrics["losses/value"],
-                     metrics["returns/mean"], metrics["episodes/length/mean"])
-            if (
-                cfg.logging.mlflow.enabled
-                and iteration % cfg.logging.mlflow.push_freq == 0
+            _log_training_update(cfg, iteration, metrics)
+            scheduled = next_iteration % cfg.guard.every == 0
+            if validation_env is not None and guard.should_evaluate(
+                next_iteration, cfg.guard.every
             ):
-                mlflow.log_metrics(metrics, step=iteration)
-            if validation_env is not None and next_iteration % cfg.guard.every == 0:
                 check_policy_guard(
                     cfg, validation_env, agent, guard, next_iteration, curriculum,
-                    stage_runs,
+                    stage_runs, advance=scheduled,
                 )
+                if guard.stop_requested:
+                    break
             if next_iteration % cfg.checkpoints.every == 0:
                 state = capture_state(agent, optimizer, next_iteration, curriculum)
                 write_checkpoint(cfg, state, f"iteration_{iteration:06d}.pt")

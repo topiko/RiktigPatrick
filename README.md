@@ -367,7 +367,7 @@ pitch/mass/geometry variations. Training randomization is enabled by default
 Promotion requires **three consecutive** passing evaluations with **90%** survival
 and strict tracking limits, controlled by `curriculum.consecutive_passes` and
 `curriculum.survival_fraction`. Evaluations are shared with the guard:
-`guard.every=25` updates and `guard.episodes=20` episodes by default.
+`guard.every=10` updates and `guard.episodes=10` episodes by default.
 
 | Promotion | Survival requirement | Tracking-error limits |
 |-----------|----------------------|-----------------------|
@@ -741,19 +741,35 @@ the configured seed. Cross-device continuation is supported, but it is not
 bitwise-reproducible across CPU/CUDA or different hardware/software versions.
 
 With `guard.enabled=true` (default), training runs a fixed-seed validation batch
-before the first update and every `guard.every=25` updates. The batch has
-`guard.episodes=20` environments and does not render. Curriculum validation uses
+before the first update and every `guard.every=10` updates. The batch has
+`guard.episodes=10` environments and does not render. Curriculum validation uses
 the fixed command suite and randomized initial conditions described above.
 Without curriculum, it uses the environment's default targets/trajectory and
 randomization settings; training-only target overrides are excluded. Validation preserves training
 RNG and policy mode. A resumed run establishes a fresh benchmark baseline.
 
-Rollback requires **one** score more than **25% and 25 return units**
-below the best, after the best reaches at least 50. These thresholds are configurable
+Rollback requires **one** score more than **20% and 100 return units**
+below the best, after the best reaches at least 200. These thresholds are configurable
 with `guard.patience`, `drop_fraction`, `absolute_drop` and `min_best_return`.
-Rollback restores the best weights and optimizer moments, halves the current
-learning rate (down to `guard.min_lr`), and continues at the current iteration and
-sampling state. It does not rewind into exactly the same failing sample sequence.
+Rollback restores the best weights and optimizer moments, multiplies the current
+learning rate by `guard.lr_factor=0.95` (down to `guard.min_lr`), and continues at
+the current iteration and sampling state.
+
+**After a rollback, every subsequent update is checked immediately.** A candidate
+must strictly improve the fixed-suite return to be kept. Otherwise the best weights
+and Adam moments are restored, keeping the reduced LR unchanged and advancing the
+training seeds. With `guard.recovery_attempts=3`, three consecutive rejections stop
+training cleanly instead of repeatedly shrinking LR. An improvement clears the
+rejection count; per-update checking remains active until the curriculum stage
+changes. Extra checks do not accelerate the curriculum's scheduled promotion gates.
+Set `guard.recovery_attempts=0` to use the previous periodic rollback behavior.
+
+On exhaustion, `latest.pt` contains the restored best policy and Adam state, current
+LR, current RNG and next attempted iteration. `training_stop.json` records the
+reason, best/candidate scores and rejected candidate's validation metrics. Both are
+uploaded when MLflow is enabled. Resume explicitly with `train.resume_from`; as
+with other resumes, this starts a fresh guard baseline. The stop indicates a lack
+of accepted updates, not successful training.
 
 Metrics are grouped under `validation/returns/*`, `guard/*` and
 `optimization/{gradient_norm,learning_rate}`. Validation step numbers count
@@ -761,6 +777,7 @@ completed updates; zero is the initial benchmark. `guard.enabled=false` disables
 performance rollback, but local checkpoints and numerical update checks remain.
 When `guard/rolled_back=1`, `validation/*` describes the rejected candidate;
 `guard/best_return` describes the recovered reference policy's benchmark score.
+`guard/{recovering,recovery_failures,stop_requested}` records bounded recovery.
 Curriculum also logs `validation/{survival_fraction,position_mae,velocity_mae,yaw_rate_mae}` and
 `curriculum/{stage,success_streak}`. Stage indices are 0 (position hold),
 1 (locomotion) and 2 (full control).
@@ -775,6 +792,40 @@ snapshot can still be saved if an accelerator error prevents in-memory rollback.
 
 See the [review of run 2b502b61](docs/run_2b502b61.md) for the observed degradation
 and checkpoint gaps that motivated these changes.
+
+### Diagnosing harmful updates
+
+Compare independent rollout-batch gradients and their equal-weight average from
+one frozen checkpoint:
+
+```bash
+uv run python -m sim.diagnose_updates /path/to/checkpoints/best.pt \
+  --batches 4 --learning-rate 0.00018 --output /tmp/update_diagnostics.json
+```
+
+The command uses the checkpoint's configuration, restores the same weights and
+Adam state before every candidate, and evaluates on the original guard seeds and
+a second fixed suite. It writes JSON containing batch seeds, actor/critic shared
+gradient norms, gradient cosine similarities, and candidate returns, durations and
+tracking errors. Each batch uses distinct action seeds and non-overlapping
+environment-seed ranges. One rollout graph is retained at a time. Full-length
+diagnostics can take several minutes: four batches require five candidate policies
+plus the baseline to be evaluated on both suites.
+
+The default `--loss actor` excludes the new critic gradient; restored Adam moments
+still contain historical joint-training gradients. `--fresh-adam` tests without
+that history, and `--loss joint` reproduces the normal combined-loss update.
+Gradients are averaged **before** clipping and Adam, not by averaging updated
+weights. The source checkpoint and MLflow run are not modified.
+
+For controlled reward/credit-horizon comparisons, repeat with either
+`--hold-velocity-weight 0` or `--discount 0.999`. These affect gradient collection
+only; evaluation retains the original reward so removing a penalty cannot inflate
+the reported benchmark score directly. The old critic is retained, so these are
+one-step diagnostics, not evidence of convergence under a different objective.
+
+See [the September 18 update diagnosis](docs/update_diagnosis_2026-09-18.md) for
+measured gradient, reward and exploration-noise comparisons.
 
 ### Reading an episode trace
 
