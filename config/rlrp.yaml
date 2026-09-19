@@ -83,10 +83,10 @@ guard:
 
 env:
   step_time: 0.01  # seconds
-  step_time_std: 0.0  # 0 disables jitter; use 0.002 for approximately 2 ms std
+  step_time_std: 0.001  # 0 disables jitter; use 0.002 for approximately 2 ms std
   min_step_time: 0.007  # lower jitter bound; rounded upward to the 2 ms physics grid
   randomize: true  # vary initial pitch and physical parameters during training
-  n_parallel: 16
+  n_parallel: 32
   max_episode_time: 20.0  # seconds, independent of how many policy updates occur
   max_episode_steps: null  # optional legacy duration cap: steps * nominal step_time
   arena_half_size: 20.0  # visual floor extent in meters; plane collisions are infinite
