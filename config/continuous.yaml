@@ -14,7 +14,7 @@ policy:
       type: continuous
       bins: null
       limit: 150.0  # rad/s²
-      initial_std: 0.025  # approximately 3.75 rad/s² near zero
+      initial_std: 0.05  # approximately 7.5 rad/s² near zero
       min_std: 0.005  # approximately 0.75 rad/s² near zero
       max_std: 0.5
     act/wheel_vel_diff:
