@@ -164,14 +164,14 @@ class TrainingSafetyTests(unittest.TestCase):
         self.assertEqual(guard.observe(0, 16), "rollback")
         self.assertEqual(optimizer.param_groups[0]["lr"], 0.0025)
 
-    def test_recovery_rejects_small_drops_and_stops_without_further_lr_decay(self):
+    def test_recovery_rejects_material_drops_without_further_lr_decay(self):
         agent, optimizer = agent_and_optimizer()
         guard = PolicyGuard(agent, optimizer, patience=1, recovery_attempts=2)
         guard.observe(100, 0)
         guard.observe(0, 1)
         self.assertTrue(guard.recovering)
         best = capture_state(agent, optimizer, 1)
-        for score, decision in ((99, "recovery_rejected"), (100, "recovery_stop")):
+        for score, decision in ((49, "recovery_rejected"), (0, "recovery_stop")):
             with torch.no_grad():
                 next(agent.parameters()).add_(1)
             optimizer.state[next(agent.parameters())]["exp_avg"].add_(5)
@@ -184,19 +184,53 @@ class TrainingSafetyTests(unittest.TestCase):
         self.assertTrue(guard.stop_requested)
         self.assertEqual(optimizer.param_groups[0]["lr"], 0.005)
 
+    def test_recovery_accepts_threshold_without_replacing_best_or_rewinding_state(self):
+        # Exercise both the relative-drop and absolute-drop branches of the floor.
+        for best_score, absolute_drop, threshold in ((1000, 100, 700), (100, 50, 50)):
+            with self.subTest(best=best_score):
+                agent, optimizer = agent_and_optimizer()
+                guard = PolicyGuard(agent, optimizer, patience=1,
+                                    drop_fraction=0.3, absolute_drop=absolute_drop)
+                self.assertIsNone(guard.rejection_threshold)
+                guard.observe(best_score, 0)
+                self.assertEqual(guard.rejection_threshold, threshold)
+                guard.observe(threshold - 1, 1)
+                restored = capture_state(agent, optimizer, 1)
+                self.assertEqual(guard.observe(threshold - 1, 2), "recovery_rejected")
+                self.assertEqual(guard.recovery_failures, 1)
+                for score in (best_score - 1, (best_score + threshold) / 2,
+                              threshold, best_score):
+                    with torch.no_grad():
+                        next(agent.parameters()).add_(1)
+                    optimizer.state[next(agent.parameters())]["exp_avg"].add_(5)
+                    torch.rand(3)
+                    candidate = capture_state(agent, optimizer, 3)
+                    self.assertEqual(guard.observe(score, 3), "recovery_accepted")
+                    self.assert_nested_equal(capture_state(agent, optimizer, 3),
+                                             candidate)
+                    self.assertEqual(guard.recovery_failures, 0)
+                    self.assertEqual(guard.best_score, best_score)
+                    self.assertEqual(guard.rejection_threshold, threshold)
+                    self.assertTrue(guard.should_evaluate(3, 10))
+                # Several accepted decreases cannot shift the floor downward.
+                self.assertEqual(guard.observe(threshold - 1, 4), "recovery_rejected")
+                self.assert_nested_equal(agent.state_dict(), restored["model"])
+                self.assert_nested_equal(optimizer.state_dict(), restored["optimizer"])
+
     def test_recovery_accepts_improvements_and_new_stage_resets_monitoring(self):
         agent, optimizer = agent_and_optimizer()
         guard = PolicyGuard(agent, optimizer, patience=1, recovery_attempts=2)
         guard.observe(100, 0)
         guard.observe(0, 1)
-        self.assertEqual(guard.observe(99, 2), "recovery_rejected")
+        self.assertEqual(guard.observe(49, 2), "recovery_rejected")
         with torch.no_grad():
             next(agent.parameters()).add_(1)
         improved = capture_state(agent, optimizer, 3)
         self.assertEqual(guard.observe(101, 3), "best")
         self.assertTrue(guard.recovering)  # A pass must not restart unchecked updates.
         self.assertEqual(guard.recovery_failures, 0)
-        self.assertEqual(guard.observe(100, 4), "recovery_rejected")
+        self.assertEqual(guard.rejection_threshold, 50.5)
+        self.assertEqual(guard.observe(50, 4), "recovery_rejected")
         self.assert_nested_equal(agent.state_dict(), improved["model"])
         guard.reset_baseline()
         self.assertFalse(guard.recovering)
@@ -213,7 +247,7 @@ class TrainingSafetyTests(unittest.TestCase):
             cfg = config(folder)
             cfg.train.max_iterations = 100
             cfg.guard.every = 4
-            scores = [100, 0, 99, 100, 98]
+            scores = [100, 0, 49, 48, 47]
             with (
                 patch("sim.train_agent.validate_policy", side_effect=[
                     {"validation/returns/mean": score} for score in scores
@@ -234,11 +268,47 @@ class TrainingSafetyTests(unittest.TestCase):
             report = json.loads((Path(folder) / "training_stop.json").read_text())
             self.assertEqual(report["reason"], "recovery_exhausted")
             self.assertEqual(report["best_return"], 100)
-            self.assertEqual(report["rejected_return"], 98)
+            self.assertEqual(report["rejected_return"], 47)
+            self.assertEqual(report["rejection_threshold"], 50)
             self.assertEqual(report["recovery_failures"], 3)
             self.assertFalse((Path(folder) / "training_failure.txt").exists())
             self.assertEqual(load_checkpoint(Path(folder) / "latest.pt", agent,
                                              optimizer), 7)
+
+    def test_recovery_keeps_near_best_updates_and_saves_their_progress(self):
+        agent, optimizer = agent_and_optimizer()
+        guard = PolicyGuard(agent, optimizer, patience=1,
+                            drop_fraction=0.3, absolute_drop=100)
+        before = capture_state(agent, optimizer, 0)
+        env = SingleEnvWrapper(OneStepEnv())
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            cfg.train.max_iterations = 7
+            cfg.guard.every = 4
+            with (
+                patch("sim.train_agent.validate_policy", side_effect=[
+                    {"validation/returns/mean": score}
+                    for score in (1185.33, 105.08, 1171.17, 1177.07, 1170.11)
+                ]),
+                self.assertLogs("sim.train_agent", level="INFO"),
+            ):
+                run_training_loop(cfg, env, None, object(), agent, optimizer, guard, 0)
+            self.assertEqual(guard.rollbacks, 1)
+            self.assertEqual(guard.recovery_failures, 0)
+            self.assertFalse(guard.stop_requested)
+            self.assertEqual(guard.best_score, 1185.33)
+            latest = torch.load(Path(folder) / "latest.pt", weights_only=True)["state"]
+            best = torch.load(Path(folder) / "best.pt", weights_only=True)["state"]
+            self.assertEqual(latest["next_iteration"], 7)
+            self.assertEqual(best["next_iteration"], 0)
+            self.assert_nested_equal(best["model"], before["model"])
+            self.assertTrue(any(
+                not torch.equal(value, before["model"][key])
+                for key, value in latest["model"].items()
+            ))
+            self.assert_nested_equal(latest["model"], agent.state_dict())
+            self.assert_nested_equal(latest["optimizer"], optimizer.state_dict())
+            self.assertFalse((Path(folder) / "training_stop.json").exists())
 
     def test_invalid_recovery_attempt_counts_are_rejected(self):
         agent, optimizer = agent_and_optimizer()
@@ -260,6 +330,70 @@ class TrainingSafetyTests(unittest.TestCase):
         self.assertEqual(guard.best_state["next_iteration"], 3)
         with self.assertRaises(FloatingPointError):
             guard.observe(float("nan"), 4)
+
+    def test_disabled_rollback_still_tracks_best_without_restoring_bad_updates(self):
+        agent, optimizer = agent_and_optimizer()
+        guard = PolicyGuard(agent, optimizer, patience=1)
+        self.assertEqual(guard.observe(100, 0, allow_rollback=False), "best")
+        with torch.no_grad():
+            next(agent.parameters()).add_(1)
+        current = capture_state(agent, optimizer, 1)
+        self.assertEqual(guard.observe(-100, 1, allow_rollback=False), "disabled")
+        self.assert_nested_equal(capture_state(agent, optimizer, 1), current)
+        self.assertEqual(guard.best_score, 100)
+        self.assertEqual(guard.rollbacks, 0)
+        self.assertEqual(guard.observe(101, 2, allow_rollback=False), "best")
+        self.assertEqual(guard.best_score, 101)
+
+    def test_best_recording_skips_duplicate_periodic_recording(self):
+        agent, optimizer = agent_and_optimizer()
+        guard = PolicyGuard(agent, optimizer, patience=1)
+        env = SingleEnvWrapper(OneStepEnv())
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            cfg.train.max_iterations = 3
+            cfg.guard.every = 1
+            cfg.guard.enabled = False
+            cfg.logging.plot_freq = 1
+            recordings = []
+
+            def record(*args, **kwargs):
+                saved = torch.load(Path(folder) / "best.pt", weights_only=True)["state"]
+                if kwargs.get("artifact_name"):
+                    torch.testing.assert_close(agent.state_dict(), saved["model"])
+                recordings.append((args[3], kwargs.get("artifact_name")))
+
+            with (
+                patch("sim.train_agent.validate_policy", side_effect=[
+                    {"validation/returns/mean": score} for score in (100, 101, 100, 102)
+                ]),
+                patch("sim.train_agent.evaluate_and_plot", side_effect=record),
+            ):
+                run_training_loop(
+                    cfg, env, object(), object(), agent, optimizer, guard, 0,
+                )
+            self.assertEqual(recordings, [
+                (0, "best_iter_000000"), (1, "best_iter_000001"),
+                (1, None),  # Periodic evaluation of the non-best update at iteration 1.
+                (3, "best_iter_000003"),
+            ])
+
+    def test_best_recording_switch_disables_event_recordings(self):
+        agent, optimizer = agent_and_optimizer()
+        with tempfile.TemporaryDirectory() as folder:
+            cfg = config(folder)
+            cfg.logging.record_best = False
+            cfg.train.max_iterations = 0
+            with (
+                patch("sim.train_agent.validate_policy", return_value={
+                    "validation/returns/mean": 100.0,
+                }),
+                patch("sim.train_agent.evaluate_and_plot") as record,
+            ):
+                run_training_loop(cfg, None, object(), object(), agent, optimizer,
+                                  PolicyGuard(agent, optimizer), 0)
+            record.assert_not_called()
+            self.assertTrue((Path(folder) / "best.pt").is_file())
 
     def test_nonfinite_reward_gradient_and_optimizer_updates_are_rolled_back(self):
         for failure in ("reward", "gradient", "optimizer"):

@@ -202,8 +202,8 @@ class PolicyGuard:
     A fresh/resumed run establishes a new validation baseline. Rollback restores
     weights AND Adam state, but keeps current RNG/iteration progress so training
     does not replay the exact same samples forever.
-    After a rollback, check every update and require improvement. Consecutive
-    rejected attempts stop recovery instead of repeatedly shrinking the LR.
+    After a rollback, check every update against the same degradation threshold.
+    Consecutive rejected attempts stop recovery instead of repeatedly shrinking LR.
     """
 
     def __init__(
@@ -249,7 +249,9 @@ class PolicyGuard:
         self.recovery_failures = 0
         self.stop_requested = False
 
-    def observe(self, score: float, next_iteration: int) -> str:
+    def observe(
+        self, score: float, next_iteration: int, *, allow_rollback: bool = True
+    ) -> str:
         if not math.isfinite(score):
             raise FloatingPointError("Non-finite validation return")
         if self.best_score is None or score > self.best_score:
@@ -261,16 +263,21 @@ class PolicyGuard:
             self.recovery_failures = 0
             return "best"
 
+        if not allow_rollback:
+            return "disabled"
+
+        threshold = self.rejection_threshold
+        assert threshold is not None
+        degraded = self.best_score >= self.min_best_return and score < threshold
         if self.recovering:
+            if not degraded:
+                self.recovery_failures = 0
+                return "recovery_accepted"
             self._restore_best(reduce_lr=False)
             self.recovery_failures += 1
             self.stop_requested = self.recovery_failures >= self.recovery_attempts
             return "recovery_stop" if self.stop_requested else "recovery_rejected"
 
-        drop = max(abs(self.best_score) * self.drop_fraction, self.absolute_drop)
-        degraded = (
-            self.best_score >= self.min_best_return and score < self.best_score - drop
-        )
         self.bad_evaluations = self.bad_evaluations + 1 if degraded else 0
         if self.bad_evaluations < self.patience:
             return "keep"
@@ -278,6 +285,13 @@ class PolicyGuard:
         self._restore_best(reduce_lr=True)
         self.recovering = self.recovery_attempts > 0
         return "rollback"
+
+    @property
+    def rejection_threshold(self) -> float | None:
+        if self.best_score is None:
+            return None
+        drop = max(abs(self.best_score) * self.drop_fraction, self.absolute_drop)
+        return self.best_score - drop
 
     def should_evaluate(self, next_iteration: int, interval: int) -> bool:
         return self.recovering or next_iteration % interval == 0

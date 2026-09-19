@@ -122,7 +122,8 @@ uv run python -m sim.train_agent env.n_parallel=1
 
 # Short run without rendering
 uv run python -m sim.train_agent env.n_parallel=2 \
-  env.max_episode_time=0.2 train.max_iterations=2 logging.plot_freq=0
+  env.max_episode_time=0.2 train.max_iterations=2 \
+  logging.plot_freq=0 logging.record_best=false
 ```
 
 The Hydra configuration is located automatically relative to the script.
@@ -623,12 +624,27 @@ the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assum
 ### Plots, videos and checkpoints
 
 - `logging.plot_freq`: evaluate and save plots/videos every N iterations,
-  including iteration zero; `0` disables evaluation rendering.
+  including iteration zero; `0` disables periodic recording.
+- `logging.record_best=true`: also save a video, plot and CSV immediately after
+  each new validation-best checkpoint, including initial/resumed and new-stage
+  baselines. This works with periodic recording disabled. To disable all rendering,
+  set both `logging.plot_freq=0` and `logging.record_best=false`.
 - Plots and numeric CSV episode traces go to `plots/`; videos go to `video/`,
   relative to the run's working directory. Directories are created automatically.
 - Matching artifacts share a training-iteration name, such as
   `train_iter_000400.mp4`, `train_iter_000400.png` and `train_iter_000400.csv`.
   The number matches the zero-based training iteration, not a recording counter.
+- Best-policy artifacts instead use names such as
+  `best_hold_position_iter_000400.mp4/.png/.csv` (or `best_iter_000400` without a
+  curriculum). Their number counts completed updates, matching `best.pt` and
+  validation metrics. Stage names prevent collisions at promotions. These files
+  evaluate the saved best weights in a separate single-episode rollout; they do
+  not reproduce the entire validation batch. With MLflow enabled, they belong to
+  the stage that earned the best score, before any head activation or stage change.
+- Each new best adds a rendered evaluation, so frequent improvements increase
+  logging time. If that update is also due for periodic recording, it is recorded
+  only once. Best tracking and recording continue with `guard.enabled=false`;
+  that setting disables performance rollback, not best-policy selection.
 - Each evaluation saves and, with MLflow enabled, uploads the matching PNG, CSV
   and MP4. These describe the same evaluation episode, not every training rollout.
 - Tracking plots follow the selected mode: position, velocity, or no tracking
@@ -755,25 +771,40 @@ Without curriculum, it uses the environment's default targets/trajectory and
 randomization settings; training-only target overrides are excluded. Validation preserves training
 RNG and policy mode. A resumed run establishes a fresh benchmark baseline.
 
-Rollback requires **one** score more than **20% and 100 return units**
-below the best, after the best reaches at least 500. These thresholds are configurable
-with `guard.patience`, `drop_fraction`, `absolute_drop` and `min_best_return`.
+Once the best return reaches `guard.min_best_return`, rollback requires
+`guard.patience` consecutive scheduled scores below this rejection threshold:
+
+```text
+threshold = best_return - max(abs(best_return) * guard.drop_fraction,
+                              guard.absolute_drop)
+```
+
+Both the relative and absolute drop limits must therefore be exceeded.
 Rollback restores the best weights and optimizer moments, multiplies the current
 learning rate by `guard.lr_factor=0.95` (down to `guard.min_lr`), and continues at
 the current iteration and sampling state.
 
-**After a rollback, every subsequent update is checked immediately.** A candidate
-must strictly improve the fixed-suite return to be kept. Otherwise the best weights
-and Adam moments are restored, keeping the reduced LR unchanged and advancing the
-training seeds. With `guard.recovery_attempts=3`, three consecutive rejections stop
-training cleanly instead of repeatedly shrinking LR. An improvement clears the
-rejection count; per-update checking remains active until the curriculum stage
-changes. Extra checks do not accelerate the curriculum's scheduled promotion gates.
+**After a rollback, every subsequent update is checked immediately against the
+same threshold.** Candidates at or above it are accepted, even without a new best.
+Acceptance retains the current weights and Adam moments, saves progress to
+`latest.pt`, and clears the consecutive rejection count. Only a new record replaces
+`best.pt` and triggers best-policy recordings. The floor stays anchored to the best
+return and rises with new records; accepted declines cannot move it downward.
+
+Candidates below the floor restore the best weights and Adam moments, keeping the
+reduced LR unchanged and advancing training seeds. With `guard.recovery_attempts=3`,
+three consecutive such rejections stop training cleanly. Per-update checking remains
+active until the curriculum stage changes. Extra checks do not accelerate the
+curriculum's scheduled promotion gates.
 Set `guard.recovery_attempts=0` to use the previous periodic rollback behavior.
+
+For example, best return 1185.33, `drop_fraction=0.30` and `absolute_drop=100` give
+a floor of **829.73**. Recovery scores around 1170 are accepted.
 
 On exhaustion, `latest.pt` contains the restored best policy and Adam state, current
 LR, current RNG and next attempted iteration. `training_stop.json` records the
-reason, best/candidate scores and rejected candidate's validation metrics. Both are
+reason, rejection threshold, best/candidate scores and rejected candidate's
+validation metrics. Both are
 uploaded when MLflow is enabled. Resume explicitly with `train.resume_from`; as
 with other resumes, this starts a fresh guard baseline. The stop indicates a lack
 of accepted updates, not successful training.
@@ -785,6 +816,7 @@ performance rollback, but local checkpoints and numerical update checks remain.
 When `guard/rolled_back=1`, `validation/*` describes the rejected candidate;
 `guard/best_return` describes the recovered reference policy's benchmark score.
 `guard/{recovering,recovery_failures,stop_requested}` records bounded recovery.
+`guard/rejection_threshold` reports the shared acceptance floor.
 Curriculum also logs `validation/{survival_fraction,position_mae,velocity_mae,yaw_rate_mae}` and
 `curriculum/{stage,success_streak}`. Stage indices are 0 (position hold),
 1 (locomotion) and 2 (full control).

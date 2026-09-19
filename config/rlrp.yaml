@@ -9,7 +9,8 @@ logging:
     enabled: false
     push_freq: 10
 
-  plot_freq: 100  # Generate plots/videos every N iterations; 0 disables both
+  plot_freq: 100  # Periodic plots/videos every N iterations; 0 disables periodic recording
+  record_best: true  # Also record video, plot and CSV whenever validation finds a new best
   save_freq: 1000
 
 rl:

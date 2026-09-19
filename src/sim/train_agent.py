@@ -397,7 +397,8 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
     )
     validation_env = (
         make_validation_env(cfg, resources, curriculum)
-        if cfg.guard.enabled or curriculum is not None else None
+        if cfg.guard.enabled or curriculum is not None
+        or cfg.logging.get("record_best", True) else None
     )
     stage_runs = (
         resources.enter_context(ExitStack())
@@ -647,14 +648,18 @@ def _log_guard_decision(guard, decision, score):
         LOG.warning("Policy degradation: restored best return %.2f; LR now %.3g",
                     guard.best_score, guard.optimizer.param_groups[0]["lr"])
         if guard.recovering:
-            LOG.warning("Checking every subsequent update; stopping after %d "
-                        "consecutive non-improving recovery attempts",
-                        guard.recovery_attempts)
+            LOG.warning("Checking every subsequent update against rejection threshold "
+                        "%.2f; stopping after %d consecutive degraded attempts",
+                        guard.rejection_threshold, guard.recovery_attempts)
     elif decision in ("recovery_rejected", "recovery_stop"):
-        LOG.warning("Recovery attempt %d/%d rejected: candidate %.2f, best %.2f; "
-                    "restored weights and Adam, kept LR %.3g",
+        LOG.warning("Recovery attempt %d/%d rejected: candidate %.2f below %.2f "
+                    "(best %.2f); restored weights and Adam, kept LR %.3g",
                     guard.recovery_failures, guard.recovery_attempts, score,
-                    guard.best_score, guard.optimizer.param_groups[0]["lr"])
+                    guard.rejection_threshold, guard.best_score,
+                    guard.optimizer.param_groups[0]["lr"])
+    elif decision == "recovery_accepted":
+        LOG.info("Recovery candidate accepted: %.2f >= %.2f (best %.2f)",
+                 score, guard.rejection_threshold, guard.best_score)
 
 
 def _write_recovery_stop(cfg, guard, iteration, score, metrics, curriculum):
@@ -665,6 +670,7 @@ def _write_recovery_stop(cfg, guard, iteration, score, metrics, curriculum):
         "stage": curriculum.stage if curriculum is not None else None,
         "best_iteration": guard.best_state["next_iteration"],
         "best_return": guard.best_score, "rejected_return": score,
+        "rejection_threshold": guard.rejection_threshold,
         "recovery_failures": guard.recovery_failures,
         "learning_rates": [g["lr"] for g in guard.optimizer.param_groups],
         "candidate_metrics": metrics,
@@ -678,18 +684,33 @@ def _write_recovery_stop(cfg, guard, iteration, score, metrics, curriculum):
         mlflow.log_artifact(str(path), artifact_path="checkpoints")
 
 
+def _record_best_policy(cfg, video_env, agent, iteration, curriculum, decision):
+    if (
+        decision != "best" or video_env is None
+        or not cfg.logging.get("record_best", True)
+    ):
+        return False
+    stage = f"{curriculum.stage}_" if curriculum is not None else ""
+    evaluate_and_plot(
+        cfg, video_env, agent, iteration, curriculum,
+        artifact_name=f"best_{stage}iter_{iteration:06d}",
+    )
+    return True
+
+
 def check_policy_guard(
     cfg, env, agent, guard, next_iteration: int,
     curriculum: Curriculum | None = None, stage_runs=None, *, advance: bool = True,
+    video_env=None,
 ):
+    """Validate and save progress; return whether the current policy was recorded."""
     metrics = validate_policy(cfg, env, agent, curriculum)
     score = metrics["validation/returns/mean"]
     promote = (
         curriculum.observe(metrics) if curriculum is not None and advance else False
     )
-    decision = (
-        guard.observe(score, next_iteration)
-        if cfg.guard.get("enabled", True) else "disabled"
+    decision = guard.observe(
+        score, next_iteration, allow_rollback=cfg.guard.get("enabled", True)
     )
     rejected = decision in ("rollback", "recovery_rejected", "recovery_stop")
     if rejected:
@@ -700,6 +721,7 @@ def check_policy_guard(
     if guard.best_score is not None:
         metrics.update({
             "guard/best_return": guard.best_score,
+            "guard/rejection_threshold": guard.rejection_threshold,
             "guard/bad_evaluations": guard.bad_evaluations,
             "guard/rollbacks": guard.rollbacks,
             "guard/rolled_back": int(rejected),
@@ -720,7 +742,7 @@ def check_policy_guard(
             metrics["validation/velocity_mae"], metrics["validation/yaw_rate_mae"],
             curriculum.success_streak,
         )
-    if decision == "best" or rejected or curriculum is not None:
+    if decision in ("best", "recovery_accepted") or rejected or curriculum is not None:
         # Save progress even without a new best score, including a rollback's LR.
         write_checkpoint(
             cfg, capture_state(agent, guard.optimizer, next_iteration, curriculum),
@@ -731,6 +753,9 @@ def check_policy_guard(
     if cfg.logging.mlflow.enabled:
         mlflow.log_metrics(metrics, step=next_iteration)
     _write_recovery_stop(cfg, guard, next_iteration, score, metrics, curriculum)
+    recorded = _record_best_policy(
+        cfg, video_env, agent, next_iteration, curriculum, decision,
+    )
     if promote:
         assert curriculum is not None
         before = capture_state(agent, guard.optimizer, next_iteration, curriculum)
@@ -750,10 +775,11 @@ def check_policy_guard(
             "latest.pt",
         )
         # Establish a comparable baseline before learning under the new objective.
-        check_policy_guard(
+        recorded = check_policy_guard(
             cfg, env, agent, guard, next_iteration, curriculum, stage_runs,
-            advance=False,
-        )
+            advance=False, video_env=video_env,
+        ) or recorded
+    return recorded
 
 
 def preserve_training_failure(
@@ -798,7 +824,7 @@ def run_training_loop(
         if validation_env is not None:
             check_policy_guard(
                 cfg, validation_env, agent, guard, start, curriculum, stage_runs,
-                advance=False,
+                advance=False, video_env=video_env,
             )
         while (
             cfg.train.max_iterations is None
@@ -809,12 +835,13 @@ def run_training_loop(
             next_iteration = iteration + 1
             _log_training_update(cfg, iteration, metrics)
             scheduled = next_iteration % cfg.guard.every == 0
+            best_recorded = False
             if validation_env is not None and guard.should_evaluate(
                 next_iteration, cfg.guard.every
             ):
-                check_policy_guard(
+                best_recorded = check_policy_guard(
                     cfg, validation_env, agent, guard, next_iteration, curriculum,
-                    stage_runs, advance=scheduled,
+                    stage_runs, advance=scheduled, video_env=video_env,
                 )
                 if guard.stop_requested:
                     break
@@ -822,8 +849,9 @@ def run_training_loop(
                 state = capture_state(agent, optimizer, next_iteration, curriculum)
                 write_checkpoint(cfg, state, f"iteration_{iteration:06d}.pt")
                 write_checkpoint(cfg, state, "latest.pt")
-            if video_env is not None and iteration % cfg.logging.plot_freq == 0:
-                evaluate_and_plot(cfg, video_env, agent, iteration, curriculum)
+            _record_periodic_policy(
+                cfg, video_env, agent, iteration, curriculum, best_recorded,
+            )
             if cfg.logging.mlflow.enabled and iteration % cfg.logging.save_freq == 0:
                 mlflow.pytorch.log_model(
                     agent, name=f"agent_{iteration:04d}", step=iteration
@@ -841,8 +869,18 @@ def run_training_loop(
         raise
 
 
+def _record_periodic_policy(
+    cfg, video_env, agent, iteration, curriculum, best_recorded,
+):
+    if (
+        video_env is not None and not best_recorded and cfg.logging.plot_freq > 0
+        and iteration % cfg.logging.plot_freq == 0
+    ):
+        evaluate_and_plot(cfg, video_env, agent, iteration, curriculum)
+
+
 def make_video_env(cfg: DictConfig, resources: ExitStack) -> SingleEnvWrapper | None:
-    if cfg.logging.plot_freq <= 0:
+    if cfg.logging.plot_freq <= 0 and not cfg.logging.get("record_best", True):
         return None
     env = register_and_make_env(cfg, force_single_env=True, force_non_random=True)
     assert isinstance(env, Env)
@@ -854,9 +892,9 @@ def make_video_env(cfg: DictConfig, resources: ExitStack) -> SingleEnvWrapper | 
 
 def evaluate_and_plot(
     cfg: DictConfig, env: SingleEnvWrapper, agent: Agent, i: int,
-    curriculum: Curriculum | None = None,
+    curriculum: Curriculum | None = None, *, artifact_name: str | None = None,
 ):
-    artifact_name = f"train_iter_{i:06d}"
+    artifact_name = artifact_name or f"train_iter_{i:06d}"
     env.name_prefix = artifact_name
     buffers = evaluation_rollout(env, agent, cfg.seed + i + 10000, curriculum)
     _, rewards, values, _, _ = ebufs2batchd(buffers, device=agent.device)

@@ -501,6 +501,15 @@ class CurriculumTests(unittest.TestCase):
         def log_metrics(metrics, **kwargs):
             logged_metrics.append((active[-1], metrics.copy()))
 
+        recordings = []
+
+        def record_best(cfg, video_env, agent, iteration, current, *, artifact_name):
+            saved = torch.load(Path(cfg.checkpoints.dir) / "best.pt", weights_only=True)
+            self.assertEqual(saved["state"]["curriculum"]["stage"], active[-1])
+            self.assertEqual(current.stage, active[-1])
+            torch.testing.assert_close(saved["state"]["model"], agent.state_dict())
+            recordings.append((active[-1], artifact_name))
+
         update_metrics = {"losses/policy": 1., "losses/value": 2., "returns/mean": 3.,
                           "episodes/length/mean": 4.}
         with (
@@ -514,10 +523,11 @@ class CurriculumTests(unittest.TestCase):
             patch.object(mlflow_pytorch, "log_model") as log_model,
             patch("sim.train_agent.validate_policy", side_effect=validate),
             patch("sim.train_agent.training_update", return_value=update_metrics),
+            patch("sim.train_agent.evaluate_and_plot", side_effect=record_best),
             ExitStack() as stages,
         ):
             cfg.checkpoints.dir = folder
-            run_training_loop(cfg, None, None, object(), agent, optimizer, guard, 0,
+            run_training_loop(cfg, None, object(), object(), agent, optimizer, guard, 0,
                               curriculum, stages)
             self.assertEqual(children, list(STAGES))
             self.assertEqual(set(artifact_stages), set(STAGES))
@@ -527,6 +537,10 @@ class CurriculumTests(unittest.TestCase):
             self.assertEqual(training_stages, list(STAGES))
             self.assertEqual(log_model.call_count, len(STAGES))
             self.assertEqual(guard.best_score, 25)
+            self.assertEqual(recordings, [
+                (stage, f"best_{stage}_iter_{index:06d}")
+                for index, stage in enumerate(STAGES)
+            ])
             latest = torch.load(Path(folder) / "latest.pt", weights_only=True)["state"]
             self.assertEqual(latest["curriculum"]["stage"], "full_control")
             cfg.train.resume_from = str(Path(folder) / "latest.pt")
