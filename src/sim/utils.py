@@ -281,11 +281,8 @@ def tensord2npd(tensor_dict: dict) -> dict:
     return arrays
 
 
-def get_returns(
-    rewards: torch.Tensor, discount: float, *, step_times: torch.Tensor | None = None,
-    reference_step_time: float = 0.01,
-) -> torch.Tensor:
-    """Discount each transition by gamma ** (elapsed / nominal interval)."""
+def _return_discounts(rewards, discount, step_times, reference_step_time):
+    """Validate timing and construct elapsed-time discount factors when needed."""
     if not np.isfinite(discount) or not 0 <= discount <= 1:
         raise ValueError("discount must be between zero and one")
     if step_times is not None:
@@ -295,28 +292,62 @@ def get_returns(
             raise ValueError("reference_step_time must be positive and finite")
         if not torch.isfinite(step_times).all() or (step_times < 0).any():
             raise ValueError("Step times must be finite and nonnegative")
-    if rewards.ndim == 1:
-        return get_returns(
-            rewards.unsqueeze(0), discount,
-            step_times=None if step_times is None else step_times.unsqueeze(0),
-            reference_step_time=reference_step_time,
-        )[0]
-
-    if rewards.ndim != 2:
-        raise ValueError(f"Expected 1D or 2D rewards, got shape {rewards.shape}")
-
-    returns = torch.zeros_like(rewards)
-    running_return = torch.zeros(rewards.shape[0], device=rewards.device)
-    discounts = (
+    return (
         None if step_times is None else discount ** (
             step_times.to(device=rewards.device, dtype=rewards.dtype)
             / reference_step_time
         )
     )
+
+
+def get_returns(
+    rewards: torch.Tensor, discount: float, *, step_times: torch.Tensor | None = None,
+    reference_step_time: float = 0.01,
+    bootstrap_values: torch.Tensor | None = None,
+    valid_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Discount rewards and an optional detached continuation value per episode.
+
+    Supply valid_mask for padded batches: padding neither discounts the continuation
+    value nor contributes rewards, and its returned targets remain zero.
+    """
+    if rewards.ndim == 1:
+        return get_returns(
+            rewards.unsqueeze(0), discount,
+            step_times=None if step_times is None else step_times.unsqueeze(0),
+            reference_step_time=reference_step_time,
+            bootstrap_values=(
+                None if bootstrap_values is None else bootstrap_values.reshape(-1)
+            ),
+            valid_mask=None if valid_mask is None else valid_mask.unsqueeze(0),
+        )[0]
+
+    if rewards.ndim != 2:
+        raise ValueError(f"Expected 1D or 2D rewards, got shape {rewards.shape}")
+
+    if valid_mask is not None:
+        if valid_mask.shape != rewards.shape:
+            raise ValueError("valid_mask must match the reward batch")
+        valid_mask = valid_mask.to(device=rewards.device, dtype=torch.bool)
+    returns = torch.zeros_like(rewards)
+    running_return = rewards.new_zeros(rewards.shape[0])
+    if bootstrap_values is not None:
+        if bootstrap_values.shape != (rewards.shape[0],):
+            raise ValueError("Expected one bootstrap value per episode")
+        if not torch.isfinite(bootstrap_values).all():
+            raise ValueError("Bootstrap values must be finite")
+        running_return = bootstrap_values.detach().to(rewards)
+    discounts = _return_discounts(rewards, discount, step_times, reference_step_time)
     for i in reversed(range(rewards.shape[1])):
         factor = discount if discounts is None else discounts[:, i]
-        running_return = rewards[:, i] + factor * running_return
-        returns[:, i] = running_return
+        target = rewards[:, i] + factor * running_return
+        if valid_mask is None:
+            running_return = target
+            returns[:, i] = running_return
+        else:
+            keep = valid_mask[:, i]
+            running_return = torch.where(keep, target, running_return)
+            returns[:, i] = torch.where(keep, running_return, 0.0)
     return returns
 
 
@@ -373,6 +404,8 @@ class EpisodeBuffer:
     values_l: list[torch.Tensor] = field(default_factory=list)
     finished: bool = False
     terminated: bool = False
+    truncated: bool = False
+    bootstrap_value: float = 0.0
     step_times_l: list[float | None] = field(default_factory=list)
 
     def add_step(
@@ -393,12 +426,20 @@ class EpisodeBuffer:
         self.step_times_l.append(step_time)
 
     def finish(
-        self, final_obs: dict[StateVarKey, np.ndarray], *, terminated: bool = False
+        self, final_obs: dict[StateVarKey, np.ndarray], *, terminated: bool = False,
+        truncated: bool = False, bootstrap_value: float = 0.0,
     ) -> None:
+        if not np.isfinite(bootstrap_value):
+            raise ValueError("Bootstrap value must be finite")
         self.obs_l.append(final_obs)
 
         self.finished = True
         self.terminated = terminated
+        self.truncated = truncated
+        # A fall takes precedence when termination coincides with a time limit.
+        self.bootstrap_value = (
+            float(bootstrap_value) if truncated and not terminated else 0.0
+        )
 
         if len(self.rewards_l) != len(self.obs_l) - 1:
             raise ValueError(
@@ -491,6 +532,12 @@ def ebufs2batchd(
         valid_mask[i, :seq_len] = 1.0
 
     return logps, rewards.to(device), values, seq_lens, valid_mask.to(device)
+
+
+def ebufs2bootstrap_values(
+    buffers: list[EpisodeBuffer], device: torch.device | str = "cpu",
+) -> torch.Tensor:
+    return torch.tensor([b.bootstrap_value for b in buffers], device=device)
 
 
 def ebufs2step_times(

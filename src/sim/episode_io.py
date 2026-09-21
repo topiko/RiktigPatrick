@@ -20,8 +20,8 @@ def save_episode_csv(
 
     Row t contains observation_t, action_t, and transition/reward = reward_(t+1).
     Observation reward/* fields describe the incoming reward at that observation.
-    The final row contains only the final observation; transition/policy fields
-    are blank. Vector channels are expanded as name[0], name[1], etc.
+    The final row contains the final observation and episode-ending metadata;
+    transition/policy fields are blank. Vector channels expand as name[0], etc.
     """
     steps = buffer.seq_len
     rows = steps + 1
@@ -48,6 +48,12 @@ def save_episode_csv(
     )
     add_stream("policy/return", returns, steps)
     add_stream("policy/advantage", advantages, steps)
+    for name, value in (
+        ("terminated", float(buffer.terminated)),
+        ("truncated", float(buffer.truncated)),
+        ("bootstrap_value", buffer.bootstrap_value),
+    ):
+        columns[f"episode/{name}"] = [None] * steps + [value]
 
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as stream:

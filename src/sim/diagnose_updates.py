@@ -34,6 +34,7 @@ from sim.utils import (
     SingleEnvWrapper,
     actor_critic_losses,
     ebufs2batchd,
+    ebufs2bootstrap_values,
     ebufs2step_times,
     get_returns,
     register_and_make_env,
@@ -68,6 +69,8 @@ def collect_gradients(cfg, env, agent, curriculum, seed, loss):
         rewards, cfg.rl.discount,
         step_times=ebufs2step_times(buffers, device=agent.device),
         reference_step_time=cfg.env.step_time,
+        bootstrap_values=ebufs2bootstrap_values(buffers, agent.device),
+        valid_mask=mask,
     )
     actor, critic = actor_critic_losses(logps, returns, values, mask)
     named = list(agent.named_parameters())
@@ -165,6 +168,7 @@ def compare_updates(
         "loss": loss, "fresh_adam": fresh_adam,
         "learning_rate": optimizer.param_groups[0]["lr"],
         "training_discount": training_cfg.rl.discount,
+        "bootstrap_time_limits": training_cfg.rl.get("bootstrap_time_limits", False),
         "training_hold_velocity_weight": (
             training_cfg.curriculum.hold_velocity_weight if curriculum else None
         ),

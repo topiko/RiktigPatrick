@@ -29,6 +29,9 @@ from sim.utils import (
 def config() -> DictConfig:
     cfg = OmegaConf.load(Path(__file__).resolve().parents[1] / "config/rlrp.yaml")
     assert isinstance(cfg, DictConfig)
+    # These fixtures assert exact transition counts and fixed-step reward values.
+    cfg.env.step_time = 0.01
+    cfg.env.step_time_std = 0.0
     return cfg
 
 

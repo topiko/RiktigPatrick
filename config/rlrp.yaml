@@ -15,6 +15,7 @@ logging:
 
 rl:
   discount: 0.995
+  bootstrap_time_limits: true  # detached V(final state) at time limits; falls use zero
   value_loss_coef: 0.1  # limit critic influence on the shared recurrent features
 
 reward:

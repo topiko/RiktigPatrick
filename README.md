@@ -268,6 +268,38 @@ activation memory still grows with episode length. If memory becomes a bottlenec
 a future optimization is no-grad collection followed by chunked replay/backward,
 freeing each chunk's graph immediately while retaining full-episode return targets.
 
+### Optional time-limit bootstrapping
+
+`env.max_episode_time=20.0` is the rollout duration limit.
+`rl.bootstrap_time_limits=true` enables time-limit bootstrapping by default.
+To use observed rewards only, with zero continuation value at both falls and
+time limits, opt out:
+
+```bash
+uv run python -m sim.train_agent --config-name continuous \
+  rl.bootstrap_time_limits=false
+```
+
+With the flag enabled, only a time-limit truncation adds the critic's estimate of
+continued reward. A fall always uses zero, including a fall on the last timed step:
+
+```text
+G_last = reward_last + discount**(last_step_duration / nominal_step_time) * V_final
+```
+
+`V_final` is evaluated from the actual final observation and the carried GRU hidden
+state, before resetting memory. It is detached from gradients and requires no extra
+action sample. Padding is excluded from both rewards and continuation discounting.
+Turning the flag off restores the zero-tail calculation; policy/checkpoint shapes
+do not change.
+
+The option affects training targets and plotted/CSV returns and advantages.
+MLflow `returns/*`, validation scores and curriculum gates still use actual observed
+rewards and physical errors. The CSV's final row includes the ending flags and the
+continuation value used. The curriculum's required survival durations are configured
+separately by `curriculum.hold_seconds` and `curriculum.locomotion_seconds` (20 seconds
+by default).
+
 ### Control-interval jitter
 
 MuJoCo integrates at a fixed **2 ms**. `env.step_time=0.01` is the nominal control
@@ -653,8 +685,8 @@ the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assum
 - Head tracking adds target/estimated/actual camera elevation and target/measured
   neck-yaw plots. `env.camera_view` selects `external`, `head`, or `both` (default:
   overview left, head camera right). Paired views use 320×240 pixels each.
-- For headless rendering on systems with EGL support, prefix the command with
-  `MUJOCO_GL=egl MPLBACKEND=Agg`.
+- On headless compute machines, use the [EGL launch settings](#headless-rendering-egl)
+  below for off-screen video and plot generation.
 - MLflow is disabled by default. Enable it with
   `logging.mlflow.enabled=true` and set `MLFLOW_TRACKING_URI`; optional credentials
   can be supplied in the environment or a local `.env` file.
@@ -672,6 +704,32 @@ the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assum
 - `policy.restore_id` accepts an MLflow **logged model ID** to restore an agent.
   Use `curriculum.enabled=false`; all heads are enabled and optimizer state and
   iteration count start fresh. Full curriculum resume uses `train.resume_from`.
+
+#### Headless rendering (EGL)
+
+On a machine without a desktop display, select EGL explicitly before launching
+training:
+
+```bash
+MUJOCO_GL=egl PYOPENGL_PLATFORM=egl MPLBACKEND=Agg \
+  uv run python -m sim.train_agent --config-name continuous
+```
+
+- `MUJOCO_GL=egl` selects MuJoCo/dm_control's off-screen EGL renderer.
+- `PYOPENGL_PLATFORM=egl` selects the matching backend for PyOpenGL.
+- `MPLBACKEND=Agg` lets Matplotlib save plots without a display.
+
+Set these variables in the launch shell **before Python starts**, because graphics
+backends are selected during imports. Restart an existing process after changing
+them. The machine must have working EGL libraries and graphics-driver support.
+
+An error such as `an OpenGL platform library has not been loaded into this process`
+when creating `MjrContext` indicates a rendering-context problem. Check the launch
+settings above and the machine's EGL installation.
+
+Best-policy recording also requires a rendering context, even with periodic plots
+disabled. To train without rendering, set both `logging.plot_freq=0` and
+`logging.record_best=false`.
 
 #### Separate MLflow runs per stage
 
@@ -884,6 +942,8 @@ There are **T+1 rows for T actions**. At row t:
   `policy/advantage` correspond to the observation/action at t.
 
 The final row preserves the final observation and incoming reward diagnostics.
+It also records `episode/terminated`, `episode/truncated` and
+`episode/bootstrap_value` (zero when bootstrapping is disabled or the robot fell).
 Its action, transition-reward and policy columns are blank. This format can be
 loaded with `pandas.read_csv()` for numerical inspection without a model checkpoint.
 

@@ -54,6 +54,7 @@ from sim.utils import (
     SingleEnvWrapper,
     actor_critic_losses,
     ebufs2batchd,
+    ebufs2bootstrap_values,
     ebufs2step_times,
     flatten_dict,
     get_advantages,
@@ -230,6 +231,23 @@ def add_head_targets(
     return obs_d
 
 
+@torch.no_grad()
+def _final_bootstrap_values(agent, observations, hidden, time_limited):
+    """Evaluate final states before hidden resets; do not sample another action."""
+    result = np.zeros(len(time_limited), dtype=np.float32)
+    if not time_limited.any():
+        return result
+    inputs = npd2tensord(
+        {key: observations[key][time_limited] for key in agent.inputs}, agent.device,
+    )
+    keep = torch.as_tensor(time_limited, device=agent.device)
+    final_hidden = None if hidden is None else hidden.detach()[:, keep]
+    _, values, _ = agent.forward(inputs, final_hidden)
+    require_finite(values, "time-limit bootstrap values")
+    result[time_limited] = values[:, 0].cpu().numpy()
+    return result
+
+
 def rollout(
     rp_env: SingleEnvWrapper | SyncVectorEnv,
     agent: Agent,
@@ -245,10 +263,13 @@ def rollout(
     evaluation: bool = False,
     deterministic: bool = False,
     policy_probe: PolicyProbe | None = None,
+    bootstrap_time_limits: bool = False,
 ) -> list[EpisodeBuffer]:
     """Collect episodes, optionally detaching recurrent history every N steps."""
     if tbptt_steps is not None:
         _validate_tbptt_steps(tbptt_steps)
+    if type(bootstrap_time_limits) is not bool:
+        raise ValueError("bootstrap_time_limits must be a boolean")
     if curriculum is not None:
         commands = curriculum.prepare_rollout(rp_env, agent, evaluation=evaluation)
         target_velocities = commands["target_velocities"]
@@ -283,6 +304,12 @@ def rollout(
             raise FloatingPointError(f"Non-finite reward, rollout seed {seed}")
 
         done = (terminated | truncated) & active
+        bootstrap = (
+            _final_bootstrap_values(
+                agent, next_obs_d, h, active & truncated & ~terminated,
+            )
+            if bootstrap_time_limits else np.zeros(num_envs, dtype=np.float32)
+        )
 
         for env_idx in np.flatnonzero(active):
             episode_buffers[env_idx].add_step(
@@ -300,6 +327,8 @@ def rollout(
             episode_buffers[env_idx].finish(
                 _take_idx_from_d(next_obs_d, env_idx),
                 terminated=bool(terminated[env_idx]),
+                truncated=bool(truncated[env_idx]),
+                bootstrap_value=float(bootstrap[env_idx]),
             )
 
         # If an episode is done, mark it as inactive and zero out its hidden state
@@ -464,6 +493,7 @@ def training_rollout(cfg, rp_env, agent, seed, curriculum=None, policy_probe=Non
         tbptt_steps=cfg.train.tbptt_steps,
         target_yaw_rates=cfg.train.target_yaw_rates,
         curriculum=curriculum, policy_probe=policy_probe,
+        bootstrap_time_limits=cfg.rl.get("bootstrap_time_limits", False),
     )
 
 
@@ -496,6 +526,8 @@ def training_update(
         G_t = get_returns(
             rewards, discount=cfg.rl.discount, step_times=step_times,
             reference_step_time=cfg.env.step_time,
+            bootstrap_values=ebufs2bootstrap_values(episode_buf_l, agent.device),
+            valid_mask=valid_mask,
         )
         policy_loss, values_loss = actor_critic_losses(logps, G_t, values, valid_mask)
 
@@ -569,7 +601,7 @@ def make_validation_env(
 
 def evaluation_rollout(
     env, agent: Agent, seed: int, curriculum: Curriculum | None = None,
-    *, deterministic: bool = False,
+    *, deterministic: bool = False, bootstrap_time_limits: bool = False,
 ) -> list[EpisodeBuffer]:
     """Use eval() without gradients and isolate all evaluation random streams."""
     was_training = agent.training
@@ -579,6 +611,7 @@ def evaluation_rollout(
             return rollout(
                 env, agent, seed=seed, curriculum=curriculum, evaluation=True,
                 deterministic=deterministic,
+                bootstrap_time_limits=bootstrap_time_limits,
             )
     finally:
         agent.train(was_training)
@@ -896,8 +929,11 @@ def evaluate_and_plot(
 ):
     artifact_name = artifact_name or f"train_iter_{i:06d}"
     env.name_prefix = artifact_name
-    buffers = evaluation_rollout(env, agent, cfg.seed + i + 10000, curriculum)
-    _, rewards, values, _, _ = ebufs2batchd(buffers, device=agent.device)
+    buffers = evaluation_rollout(
+        env, agent, cfg.seed + i + 10000, curriculum,
+        bootstrap_time_limits=cfg.rl.get("bootstrap_time_limits", False),
+    )
+    _, rewards, values, _, valid_mask = ebufs2batchd(buffers, device=agent.device)
     if cfg.env.step_time_std > 0:
         env.recorded_frames = resample_video_frames(
             env.recorded_frames, buffers[0].get_step_times(), env.frames_per_sec
@@ -913,6 +949,8 @@ def evaluate_and_plot(
         rewards, discount=cfg.rl.discount,
         step_times=ebufs2step_times(buffers, device=agent.device),
         reference_step_time=cfg.env.step_time,
+        bootstrap_values=ebufs2bootstrap_values(buffers, agent.device),
+        valid_mask=valid_mask,
     )
     advantages = get_advantages(returns, values)
     eps = Episode(

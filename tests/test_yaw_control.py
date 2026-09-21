@@ -31,6 +31,9 @@ WHEEL_ACTIONS: list[str] = [Actions.ACC_BOTH_WHEELS, Actions.VEL_WHEEL_DIFF]
 def config():
     cfg = OmegaConf.load(Path(__file__).resolve().parents[1] / "config/rlrp.yaml")
     assert isinstance(cfg, DictConfig)
+    # Reward assertions here use nominal-duration transitions; jitter has its own suite.
+    cfg.env.step_time = 0.01
+    cfg.env.step_time_std = 0.0
     cfg.env.n_parallel = 3
     cfg.env.max_episode_steps = 4
     cfg.train.tbptt_steps = 2
