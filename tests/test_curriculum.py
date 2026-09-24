@@ -25,6 +25,7 @@ from sim.curriculum import HEAD_ACTIONS, HEAD_REWARDS, STAGES, Curriculum
 from sim.train_agent import (
     check_policy_guard,
     curriculum_run_name,
+    get_plot_keys,
     make_agent,
     make_validation_env,
     run_training_loop,
@@ -496,6 +497,18 @@ class CurriculumTests(unittest.TestCase):
         )
         self.assertEqual(curriculum.stage, "locomotion")
         self.assertEqual(agent.inactive_actions, HEAD_ACTIONS)
+
+    def test_velocity_curriculum_plots_target_and_current_position(self):
+        cfg, curriculum, agent, optimizer = self.training()
+        curriculum.advance(agent, optimizer)
+        curriculum.advance(agent, optimizer)
+        keys = get_plot_keys(cfg, agent, curriculum)
+        self.assertIn(
+            (Observable.OBS_TIME, (Target.TARGET_POS, DerivedObs.CURRENT_POS)), keys
+        )
+        self.assertIn(
+            (Observable.OBS_TIME, (Target.TARGET_VEL, DerivedObs.CURRENT_VEL)), keys
+        )
 
     def test_resumed_stage_names_include_a_compact_resume_label(self):
         cfg = config()

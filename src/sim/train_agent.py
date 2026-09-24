@@ -1103,6 +1103,8 @@ def get_plot_keys(
         (Observable.OBS_TIME, TRACKING_INPUTS[kind])
         for kind in tracking_modes if TRACKING_INPUTS[kind]
     )
+    if curriculum is not None and mode == "velocity":
+        plot_keys.append((Observable.OBS_TIME, TRACKING_INPUTS["position"]))
     if cfg.env.yaw_tracking:
         plot_keys.append((Observable.OBS_TIME, YAW_INPUTS))
     if cfg.env.head_tracking:
