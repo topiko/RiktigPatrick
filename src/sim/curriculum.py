@@ -9,6 +9,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from nn_ctrl.nns import Agent, continuous_action_settings
 from riktigpatric.patrick import Actions, DerivedObs, Observable, Target
+from riktigpatric.trajectory import PositionTrajectory
 from sim.rewards import validate_pitch_deadband
 from sim.utils import EpisodeBuffer
 
@@ -142,7 +143,6 @@ class Curriculum:
         env.set_attr("pitch_deadband", self.cfg.pitch_deadband)
         env.set_attr("tracking_mode", self.tracking_mode)
         env.set_attr("velocity_reward_weight", self.velocity_reward_weight)
-        env.set_attr("target_pos", 0.0)
         if self.stage == "hold_position":
             commands = np.zeros((env.num_envs, 2))
         else:
@@ -155,6 +155,12 @@ class Curriculum:
                 if evaluation else np.random.randint(len(pairs), size=env.num_envs)
             )
             commands = pairs[indices]
+        duration = self.cfg.locomotion_seconds
+        trajectories = [
+            PositionTrajectory(((0.0, 0.0), (duration, float(velocity * duration))))
+            for velocity in commands[:, 0]
+        ]
+        env.set_attr("target_trajectory", trajectories)
         return {
             "target_velocities": commands[:, 0],
             "target_yaw_rates": commands[:, 1],

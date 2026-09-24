@@ -211,6 +211,16 @@ class CurriculumTests(unittest.TestCase):
         commands = curriculum.prepare_rollout(dummy, agent)
         actual = set(zip(commands["target_velocities"], commands["target_yaw_rates"]))
         self.assertEqual(actual, set(map(tuple, curriculum.straight_line_pairs)))
+        curriculum.prepare_rollout(dummy, agent, evaluation=True)
+        trajectories = next(
+            call.args[1] for call in reversed(dummy.set_attr.call_args_list)
+            if call.args[0] == "target_trajectory"
+        )
+        self.assertEqual(
+            [trajectory.position_at(curriculum.cfg.locomotion_seconds)
+             for trajectory in trajectories[:3]],
+            [-2.0, 0.0, 2.0],
+        )
         curriculum.advance(agent, optimizer)
         commands = curriculum.prepare_rollout(dummy, agent)
         actual = set(zip(commands["target_velocities"], commands["target_yaw_rates"]))
