@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import random
+import re
 import traceback
 from collections.abc import Sequence
 from contextlib import ExitStack
@@ -354,6 +355,66 @@ def main(cfg: DictConfig):
         train(cfg, resources, device=device)
 
 
+def resolve_resume_path(value: str, checkpoint_dir: str | Path) -> Path:
+    """Resolve a local path, an MLflow child best, or a parent's latest child."""
+    local = Path(value).expanduser()
+    if local.exists() or re.fullmatch(r"[0-9a-fA-F]{32}", value) is None:
+        return local
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    if not tracking_uri:
+        raise ValueError(
+            "MLflow run-ID resume requires MLFLOW_TRACKING_URI"
+        )
+    mlflow.set_tracking_uri(tracking_uri)
+    client = mlflow.MlflowClient()
+    run = client.get_run(value)
+    for artifact_name in ("best.pt", "latest.pt"):
+        if any(artifact.path == f"checkpoints/{artifact_name}"
+               for artifact in client.list_artifacts(value, "checkpoints")):
+            break
+    else:
+        children = client.search_runs(
+            [run.info.experiment_id],
+            filter_string=f"tags.mlflow.parentRunId = '{value}'",
+            order_by=["attribute.start_time DESC"],
+            max_results=100,
+        )
+        for child in children:
+            if any(
+                artifact.path == "checkpoints/latest.pt"
+                for artifact in client.list_artifacts(child.info.run_id, "checkpoints")
+            ):
+                value = child.info.run_id
+                artifact_name = "latest.pt"
+                break
+        else:
+            raise FileNotFoundError(
+                f"MLflow run {value} has no checkpoint or resumable child run"
+            )
+    destination = Path(checkpoint_dir) / "resume_runs" / value
+    destination.mkdir(parents=True, exist_ok=True)
+    downloaded = mlflow.artifacts.download_artifacts(
+        run_id=value, artifact_path=f"checkpoints/{artifact_name}",
+        dst_path=str(destination),
+    )
+    LOG.info("Resolved MLflow run %s to %s", value, downloaded)
+    return Path(downloaded)
+
+
+def mlflow_resume_parent(value: str) -> str | None:
+    """Return the original parent run for an MLflow run-ID resume request."""
+    if re.fullmatch(r"[0-9a-fA-F]{32}", value) is None:
+        return None
+    tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
+    if not tracking_uri:
+        raise ValueError(
+            "MLflow run-ID resume requires MLFLOW_TRACKING_URI"
+        )
+    mlflow.set_tracking_uri(tracking_uri)
+    source = mlflow.MlflowClient().get_run(value)
+    return source.data.tags.get("mlflow.parentRunId", value)
+
+
 def _log_run_config(cfg: DictConfig):
     """Keep searchable parameters and a complete, resolved YAML in the active run."""
     resolved = OmegaConf.to_container(cfg, resolve=True)
@@ -362,6 +423,31 @@ def _log_run_config(cfg: DictConfig):
     mlflow.log_text(
         OmegaConf.to_yaml(OmegaConf.create(resolved)), "config/resolved.yaml"
     )
+
+
+def _start_training_mlflow(cfg, resources, device):
+    if (tracking_uri := os.getenv("MLFLOW_TRACKING_URI")) is None:
+        raise ValueError("MLFLOW_TRACKING_URI is not set")
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(cfg.logging.mlflow.experiment_name)
+    resume_parent = (
+        mlflow_resume_parent(str(cfg.train.resume_from))
+        if cfg.train.resume_from is not None else None
+    )
+    if resume_parent is None:
+        resources.enter_context(mlflow.start_run())
+    else:
+        LOG.info("Resuming MLflow child under parent run %s", resume_parent)
+        resources.enter_context(mlflow.start_run(run_id=resume_parent))
+    mlflow.set_tags({
+        "training.device": str(device),
+        "training.pytorch_version": str(torch.__version__),
+        "training.cuda_version": torch.version.cuda or "none",
+    })
+    if resume_parent is None:
+        _log_run_config(cfg)
+    else:
+        LOG.info("Keeping immutable parameters on resumed parent %s", resume_parent)
 
 
 def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = None):
@@ -378,18 +464,13 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
     curriculum = Curriculum(cfg) if cfg.curriculum.enabled else None
     # Setup MLflow if enabled
     if cfg.logging.mlflow.enabled:
-        if (tracking_uri := os.getenv("MLFLOW_TRACKING_URI")) is None:
-            raise ValueError("MLFLOW_TRACKING_URI is not set")
-        mlflow.set_tracking_uri(tracking_uri)
-        mlflow.set_experiment(cfg.logging.mlflow.experiment_name)
-        resources.enter_context(mlflow.start_run())
-        mlflow.set_tags({
-            "training.device": str(device),
-            "training.pytorch_version": str(torch.__version__),
-            "training.cuda_version": torch.version.cuda or "none",
-        })
+        _start_training_mlflow(cfg, resources, device)
 
-        _log_run_config(cfg)
+    resume_path = None
+    if cfg.train.resume_from is not None:
+        resume_path = resolve_resume_path(
+            str(cfg.train.resume_from), cfg.checkpoints.dir
+        )
 
     # Create environment
     rp_env = register_and_make_env(cfg)
@@ -407,9 +488,9 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
              agent.device, agent.rnn.hidden_size, agent.rnn.num_layers)
     optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
     next_iteration = 0
-    if cfg.train.resume_from is not None:
+    if resume_path is not None:
         next_iteration = load_checkpoint(
-            cfg.train.resume_from, agent, optimizer, curriculum,
+            resume_path, agent, optimizer, curriculum,
             learning_rate=cfg.train.resume_lr,
         )
         LOG.info("Resumed at iteration %d; Adam LR %.3g",
@@ -655,12 +736,24 @@ def _validation_metrics(buffers, curriculum: Curriculum | None):
     return metrics
 
 
+def curriculum_run_name(cfg: DictConfig, stage: str) -> str:
+    value = cfg.train.resume_from
+    if value is None:
+        return stage
+    label = str(value)
+    if re.fullmatch(r"[0-9a-fA-F]{32}", label) is None:
+        label = Path(label).name
+    return f"{stage} resumed_from={label}"
+
+
 def start_stage_run(cfg, agent, curriculum: Curriculum, iteration: int, stage_runs):
     """Close the completed child run, keeping the overall session's parent open."""
     if stage_runs is None:
         return
     stage_runs.close()
-    stage_runs.enter_context(mlflow.start_run(run_name=curriculum.stage, nested=True))
+    stage_runs.enter_context(mlflow.start_run(
+        run_name=curriculum_run_name(cfg, curriculum.stage), nested=True
+    ))
     _log_run_config(cfg)
     mlflow.set_tags({
         "curriculum.stage": curriculum.stage,

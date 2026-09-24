@@ -24,6 +24,7 @@ from sim.checkpoints import (
 from sim.curriculum import HEAD_ACTIONS, HEAD_REWARDS, STAGES, Curriculum
 from sim.train_agent import (
     check_policy_guard,
+    curriculum_run_name,
     make_agent,
     make_validation_env,
     run_training_loop,
@@ -179,6 +180,7 @@ class CurriculumTests(unittest.TestCase):
         cfg, curriculum, agent, optimizer = self.training()
         env = self.env(cfg)
         training_update(cfg, env, agent, optimizer, 0, curriculum)
+        curriculum.advance(agent, optimizer)
         for newly_active in ((Actions.VEL_WHEEL_DIFF,), HEAD_ACTIONS):
             before = deepcopy(agent.state_dict())
             adam = deepcopy(optimizer.state_dict())
@@ -205,6 +207,10 @@ class CurriculumTests(unittest.TestCase):
         commands = curriculum.prepare_rollout(dummy, agent)
         np.testing.assert_array_equal(commands["target_velocities"], 0)
         np.testing.assert_array_equal(commands["target_yaw_rates"], 0)
+        curriculum.advance(agent, optimizer)
+        commands = curriculum.prepare_rollout(dummy, agent)
+        actual = set(zip(commands["target_velocities"], commands["target_yaw_rates"]))
+        self.assertEqual(actual, set(map(tuple, curriculum.straight_line_pairs)))
         curriculum.advance(agent, optimizer)
         commands = curriculum.prepare_rollout(dummy, agent)
         actual = set(zip(commands["target_velocities"], commands["target_yaw_rates"]))
@@ -270,8 +276,11 @@ class CurriculumTests(unittest.TestCase):
         for expected in (False, False, True):
             self.assertEqual(curriculum.observe(good), expected)
         curriculum.advance(agent, optimizer)
+        self.assertEqual(curriculum.stage, "straight_line")
+        for expected in (False, False, True):
+            self.assertEqual(curriculum.observe(good), expected)
+        curriculum.advance(agent, optimizer)
         self.assertEqual(curriculum.stage, "locomotion")
-        self.assertFalse(curriculum.observe(good))  # Yaw now matters too.
         for expected in (False, False, True):
             self.assertEqual(curriculum.observe(passing_metrics()), expected)
         curriculum.advance(agent, optimizer)
@@ -289,7 +298,7 @@ class CurriculumTests(unittest.TestCase):
         self.assertFalse(curriculum.observe({
             **passing_metrics(), "validation/survival_fraction": 0.8
         }))
-        for stage in ("hold_position", "locomotion"):
+        for stage in ("hold_position", "straight_line", "locomotion"):
             self.assertEqual(curriculum.stage, stage)
             for expected in (False, False, True):
                 self.assertEqual(curriculum.observe(passing_metrics()), expected)
@@ -308,12 +317,14 @@ class CurriculumTests(unittest.TestCase):
             np.random.rand(5)
             self.assertEqual(load_checkpoint(path, agent, optimizer, curriculum), 17)
         self.assert_state_equal(capture_state(agent, optimizer, 17, curriculum), before)
-        self.assertEqual(agent.inactive_actions, HEAD_ACTIONS)
+        self.assertEqual(
+            agent.inactive_actions, (Actions.VEL_WHEEL_DIFF, *HEAD_ACTIONS)
+        )
         changed = deepcopy(cfg)
         changed.guard.seed += 1
         restarted = Curriculum(changed)
         restarted.load_state_dict(before["curriculum"])
-        self.assertEqual(restarted.stage, "locomotion")
+        self.assertEqual(restarted.stage, "straight_line")
         self.assertEqual(restarted.success_streak, 0)
         with self.assertRaisesRegex(ValueError, "curriculum.enabled"):
             restore_state(agent, optimizer, before)
@@ -362,18 +373,25 @@ class CurriculumTests(unittest.TestCase):
         guard.reset_baseline()
         self.assertEqual(guard.observe(10, 2), "best")
         assert guard.best_state is not None
-        self.assertEqual(guard.best_state["curriculum"]["stage"], "locomotion")
+        self.assertEqual(guard.best_state["curriculum"]["stage"], "straight_line")
 
     def test_legacy_checkpoints_keep_their_objective_and_reset_promotion_progress(self):
         cfg, curriculum, agent, optimizer = self.training()
         training_update(cfg, self.env(cfg), agent, optimizer, 0, curriculum)
         before = capture_state(agent, optimizer, 400, curriculum)
-        for old, new in (("balance", "hold_position"), ("locomotion", "locomotion"),
-                         ("full_control", "full_control")):
-            with self.subTest(stage=old), tempfile.TemporaryDirectory() as folder:
+        for version, old, new in (
+            (1, "balance", "hold_position"), (1, "locomotion", "straight_line"),
+            (2, "stop", "hold_position"), (3, "hold_position", "hold_position"),
+            (3, "locomotion", "straight_line"), (4, "hold_position", "hold_position"),
+            (4, "locomotion", "straight_line"), (4, "full_control", "full_control"),
+        ):
+            with (
+                self.subTest(version=version, stage=old),
+                tempfile.TemporaryDirectory() as folder,
+            ):
                 legacy = deepcopy(before)
                 progress = legacy["curriculum"]
-                del progress["version"]
+                progress["version"] = version
                 del progress["settings"]["hold_seconds"]
                 progress.update(stage=old, success_streak=2)
                 path = save_checkpoint(Path(folder) / "legacy.pt", legacy, {})
@@ -398,7 +416,8 @@ class CurriculumTests(unittest.TestCase):
         _, curriculum, agent, optimizer = self.training()
         before = capture_state(agent, optimizer, 0, curriculum)
         for version, stage in (
-            (5, "hold_position"), (4, "balance"), (True, "balance"), (1, "stop")
+            (6, "hold_position"), (5, "balance"), (4, "balance"),
+            (True, "balance"), (1, "stop")
         ):
             invalid = deepcopy(before)
             invalid["curriculum"].update(version=version, stage=stage)
@@ -416,14 +435,17 @@ class CurriculumTests(unittest.TestCase):
             restore_state(agent, optimizer, legacy, curriculum=curriculum,
                           restore_curriculum=False)
 
-    def test_retired_balance_and_stop_checkpoints_map_to_position_hold(self):
+    def test_retired_stages_map_to_new_straight_line_flow(self):
         curriculum = Curriculum(config())
-        for version, old in ((1, "balance"), (2, "balance"), (2, "stop"),
-                             (3, "balance"), (3, "hold_position")):
+        for version, old, new in (
+            (1, "balance", "hold_position"), (2, "balance", "hold_position"),
+            (2, "stop", "hold_position"), (3, "balance", "hold_position"),
+            (3, "hold_position", "hold_position"), (4, "locomotion", "straight_line"),
+        ):
             state = curriculum.state_dict()
             state.update(version=version, stage=old, success_streak=2)
             curriculum.load_state_dict(state)
-            self.assertEqual(curriculum.stage, "hold_position")
+            self.assertEqual(curriculum.stage, new)
             self.assertEqual(curriculum.success_streak, 0)
 
     def test_failed_update_restores_sampled_commands_rng_and_curriculum_progress(self):
@@ -440,6 +462,7 @@ class CurriculumTests(unittest.TestCase):
 
     def test_failed_activation_restores_partially_initialized_heads_and_stage(self):
         cfg, curriculum, agent, optimizer = self.training()
+        curriculum.advance(agent, optimizer)
         curriculum.advance(agent, optimizer)
         curriculum.success_streak = 2
         guard = PolicyGuard(agent, optimizer, curriculum=curriculum)
@@ -463,6 +486,21 @@ class CurriculumTests(unittest.TestCase):
         )
         self.assertEqual(curriculum.stage, "locomotion")
         self.assertEqual(agent.inactive_actions, HEAD_ACTIONS)
+
+    def test_resumed_stage_names_include_a_compact_resume_label(self):
+        cfg = config()
+        self.assertEqual(curriculum_run_name(cfg, "hold_position"), "hold_position")
+        run_id = "a" * 32
+        cfg.train.resume_from = run_id
+        self.assertEqual(
+            curriculum_run_name(cfg, "hold_position"),
+            f"hold_position resumed_from={run_id}",
+        )
+        cfg.train.resume_from = "/tmp/checkpoints/latest.pt"
+        self.assertEqual(
+            curriculum_run_name(cfg, "locomotion"),
+            "locomotion resumed_from=latest.pt",
+        )
 
     def test_stage_runs_own_metrics_artifacts_and_resume_starts_a_fresh_child(self):
         cfg, curriculum, agent, optimizer = self.training()
@@ -494,7 +532,7 @@ class CurriculumTests(unittest.TestCase):
 
         def validate(*args):
             return passing_metrics({
-                "hold_position": 75, "locomotion": 50,
+                "hold_position": 75, "straight_line": 60, "locomotion": 50,
                 "full_control": 25,
             }[curriculum.stage])
 
@@ -545,7 +583,9 @@ class CurriculumTests(unittest.TestCase):
             self.assertEqual(latest["curriculum"]["stage"], "full_control")
             cfg.train.resume_from = str(Path(folder) / "latest.pt")
             start_stage_run(cfg, agent, curriculum, len(STAGES), stages)
-            self.assertEqual(children[-2:], ["full_control", "full_control"])
+            self.assertEqual(children[-2:], [
+                "full_control", "full_control resumed_from=latest.pt",
+            ])
             self.assertEqual(tags[-1]["training.start_iteration"], len(STAGES))
             self.assertEqual(tags[-1]["training.resume_from"], cfg.train.resume_from)
             self.assertEqual(log_config.call_count, len(STAGES) + 1)

@@ -1,13 +1,14 @@
 """Training recovery must preserve weights, Adam state, RNG, and episode alignment."""
 
 import json
+import os
 import random
 import tempfile
 import unittest
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -25,8 +26,11 @@ from sim.checkpoints import (
 )
 from sim.envs.rp_env import GymRP
 from sim.train_agent import (
+    _start_training_mlflow,
     get_policy_inputs,
     make_validation_env,
+    mlflow_resume_parent,
+    resolve_resume_path,
     run_training_loop,
     training_update,
     validate_policy,
@@ -309,6 +313,112 @@ class TrainingSafetyTests(unittest.TestCase):
             self.assert_nested_equal(latest["model"], agent.state_dict())
             self.assert_nested_equal(latest["optimizer"], optimizer.state_dict())
             self.assertFalse((Path(folder) / "training_stop.json").exists())
+
+    def test_mlflow_run_id_resume_downloads_best_and_uses_original_parent(self):
+        run_id = "a" * 32
+        parent_id = "b" * 32
+        with tempfile.TemporaryDirectory() as folder:
+            downloaded = Path(folder) / "best.pt"
+            with (
+                patch.dict(os.environ, {"MLFLOW_TRACKING_URI": "sqlite:///test"}),
+                patch("sim.train_agent.mlflow.set_tracking_uri"),
+                patch("sim.train_agent.mlflow.MlflowClient") as client_class,
+                patch("sim.train_agent.mlflow.artifacts.download_artifacts",
+                      return_value=str(downloaded)) as download,
+            ):
+                client = client_class.return_value
+                client.get_run.return_value = Mock(
+                    data=Mock(tags={"mlflow.parentRunId": parent_id})
+                )
+                client.list_artifacts.return_value = [
+                    Mock(path="checkpoints/best.pt")
+                ]
+                self.assertEqual(mlflow_resume_parent(run_id), parent_id)
+                self.assertEqual(resolve_resume_path(run_id, folder), downloaded)
+                client.get_run.assert_called_with(run_id)
+                client.list_artifacts.assert_called_with(run_id, "checkpoints")
+                download.assert_called_once_with(
+                    run_id=run_id, artifact_path="checkpoints/best.pt",
+                    dst_path=f"{folder}/resume_runs/{run_id}",
+                )
+                self.assertTrue(Path(folder, "resume_runs", run_id).is_dir())
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            self.assertRaisesRegex(ValueError, "MLFLOW_TRACKING_URI"),
+        ):
+            mlflow_resume_parent(run_id)
+
+    def test_parent_run_resume_uses_latest_child_checkpoint(self):
+        parent_id = "b" * 32
+        child_id = "c" * 32
+        with tempfile.TemporaryDirectory() as folder:
+            downloaded = Path(folder) / "latest.pt"
+            with (
+                patch.dict(os.environ, {"MLFLOW_TRACKING_URI": "sqlite:///test"}),
+                patch("sim.train_agent.mlflow.set_tracking_uri"),
+                patch("sim.train_agent.mlflow.MlflowClient") as client_class,
+                patch("sim.train_agent.mlflow.artifacts.download_artifacts",
+                      return_value=str(downloaded)) as download,
+            ):
+                client = client_class.return_value
+                client.get_run.return_value = Mock(
+                    info=Mock(experiment_id="22"),
+                    data=Mock(tags={}),
+                )
+                child = Mock(info=Mock(run_id=child_id))
+
+                def list_artifacts(run_id, path):
+                    self.assertEqual(path, "checkpoints")
+                    return (
+                        [Mock(path="checkpoints/latest.pt")]
+                        if run_id == child_id else []
+                    )
+
+                client.list_artifacts.side_effect = list_artifacts
+                client.search_runs.return_value = [child]
+                self.assertEqual(resolve_resume_path(parent_id, folder), downloaded)
+                client.search_runs.assert_called_once_with(
+                    ["22"],
+                    filter_string=f"tags.mlflow.parentRunId = '{parent_id}'",
+                    order_by=["attribute.start_time DESC"],
+                    max_results=100,
+                )
+                download.assert_called_once_with(
+                    run_id=child_id, artifact_path="checkpoints/latest.pt",
+                    dst_path=f"{folder}/resume_runs/{child_id}",
+                )
+
+    def test_resumed_parent_keeps_immutable_mlflow_params(self):
+        run_id = "a" * 32
+        parent_id = "b" * 32
+        cfg = OmegaConf.load(Path(__file__).resolve().parents[1] / "config/rlrp.yaml")
+        cfg.train.device = "cpu"
+        cfg.train.resume_from = run_id
+        cfg.logging.mlflow.enabled = True
+        with (
+            patch.dict(os.environ, {"MLFLOW_TRACKING_URI": "sqlite:///test"}),
+            patch("sim.train_agent.mlflow.set_tracking_uri"),
+            patch("sim.train_agent.mlflow.set_experiment"),
+            patch(
+                "sim.train_agent.mlflow.start_run", return_value=nullcontext()
+            ) as start,
+            patch("sim.train_agent.mlflow.set_tags"),
+            patch("sim.train_agent._log_run_config") as log_config,
+            patch("sim.train_agent.mlflow.MlflowClient") as client_class,
+        ):
+            client_class.return_value.get_run.return_value = Mock(
+                data=Mock(tags={"mlflow.parentRunId": parent_id})
+            )
+            with ExitStack() as resources:
+                _start_training_mlflow(cfg, resources, torch.device("cpu"))
+        start.assert_called_once_with(run_id=parent_id)
+        log_config.assert_not_called()
+
+    def test_local_resume_paths_are_returned_unchanged(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "latest.pt"
+            path.write_bytes(b"checkpoint")
+            self.assertEqual(resolve_resume_path(str(path), folder), path)
 
     def test_invalid_recovery_attempt_counts_are_rejected(self):
         agent, optimizer = agent_and_optimizer()

@@ -1,4 +1,4 @@
-"""Three-stage curriculum: hold position, move/turn and control gaze."""
+"""Four-stage curriculum: hold position, move straight, move/turn and control gaze."""
 
 import logging
 from itertools import product
@@ -13,7 +13,7 @@ from sim.rewards import validate_pitch_deadband
 from sim.utils import EpisodeBuffer
 
 LOG = logging.getLogger(__name__)
-STAGES = ("hold_position", "locomotion", "full_control")
+STAGES = ("hold_position", "straight_line", "locomotion", "full_control")
 HEAD_ACTIONS = (Actions.VEL_HEAD_PITCH, Actions.VEL_HEAD_TURN)
 HEAD_REWARDS = (
     Observable.REWARD_HEAD_PITCH, Observable.REWARD_CAMERA_PITCH,
@@ -22,7 +22,7 @@ HEAD_REWARDS = (
 
 
 class Curriculum:
-    VERSION = 4  # Begin with position holding instead of unrestricted balance.
+    VERSION = 5  # Add straight-line tracking before differential steering.
 
     def __init__(self, cfg: DictConfig):
         self.settings = OmegaConf.to_container(cfg.curriculum, resolve=True)
@@ -41,6 +41,9 @@ class Curriculum:
         self.command_pairs = np.array(list(product(
             self.cfg.forward_velocities, self.cfg.yaw_rates
         )))
+        self.straight_line_pairs = np.array([
+            (velocity, 0.0) for velocity in self.cfg.forward_velocities
+        ])
         if cfg.guard.episodes < len(self.command_pairs):
             raise ValueError("Validation must cover every curriculum command pair")
         self.stage = STAGES[0]
@@ -114,12 +117,12 @@ class Curriculum:
     @property
     def inactive_actions(self) -> tuple[Actions, ...]:
         stationary = (Actions.VEL_WHEEL_DIFF, *HEAD_ACTIONS)
-        return (stationary, HEAD_ACTIONS, ())[self.index]
+        return (stationary, stationary, HEAD_ACTIONS, ())[self.index]
 
     @property
     def disabled_rewards(self) -> tuple[Observable, ...]:
         stationary = (Observable.REWARD_YAW_RATE, *HEAD_REWARDS)
-        return (stationary, HEAD_REWARDS, ())[self.index]
+        return (stationary, stationary, HEAD_REWARDS, ())[self.index]
 
     def apply_policy(self, agent: Agent):
         agent.inactive_actions = self.inactive_actions
@@ -143,13 +146,15 @@ class Curriculum:
         if self.stage == "hold_position":
             commands = np.zeros((env.num_envs, 2))
         else:
-            indices = (
-                np.arange(env.num_envs) % len(self.command_pairs)
-                if evaluation else np.random.randint(
-                    len(self.command_pairs), size=env.num_envs
-                )
+            pairs = (
+                self.straight_line_pairs if self.stage == "straight_line"
+                else self.command_pairs
             )
-            commands = self.command_pairs[indices]
+            indices = (
+                np.arange(env.num_envs) % len(pairs)
+                if evaluation else np.random.randint(len(pairs), size=env.num_envs)
+            )
+            commands = pairs[indices]
         return {
             "target_velocities": commands[:, 0],
             "target_yaw_rates": commands[:, 1],
@@ -201,7 +206,7 @@ class Curriculum:
             and metrics["validation/velocity_mae"] <= self.cfg.velocity_mae
             and (self.stage != "hold_position"
                  or metrics["validation/position_mae"] <= self.cfg.position_mae)
-            and (self.stage == "hold_position"
+            and (self.stage in ("hold_position", "straight_line")
                  or metrics["validation/yaw_rate_mae"] <= self.cfg.yaw_rate_mae)
         )
         self.success_streak = self.success_streak + 1 if passed else 0
@@ -212,6 +217,7 @@ class Curriculum:
             raise ValueError("Already at the final curriculum stage")
         next_stage = STAGES[self.index + 1]
         newly_active = {
+            "straight_line": (),
             "locomotion": (Actions.VEL_WHEEL_DIFF,),
             "full_control": HEAD_ACTIONS,
         }[next_stage]
@@ -231,12 +237,13 @@ class Curriculum:
 
     def validate_state(self, state: dict):
         version = state.get("version", 1)
-        if type(version) is not int or version not in (1, 2, 3, self.VERSION):
+        if type(version) is not int or version not in (1, 2, 3, 4, self.VERSION):
             raise ValueError("Unsupported checkpoint curriculum version")
         stages = {
             1: ("balance", "locomotion", "full_control"),
             2: ("balance", "stop", "locomotion", "full_control"),
-            3: ("balance", *STAGES),
+            3: ("balance", "hold_position", "locomotion", "full_control"),
+            4: ("hold_position", "locomotion", "full_control"),
         }.get(version, STAGES)
         if (
             state.get("stage") not in stages
@@ -249,9 +256,12 @@ class Curriculum:
         self.validate_state(state)
         version = state.get("version", 1)
         legacy = version != self.VERSION
-        self.stage = (
-            "hold_position" if state["stage"] in ("balance", "stop") else state["stage"]
-        )
+        if state["stage"] in ("balance", "stop"):
+            self.stage = "hold_position"
+        elif legacy and state["stage"] == "locomotion":
+            self.stage = "straight_line"
+        else:
+            self.stage = state["stage"]
         if legacy:
             LOG.info("Migrated curriculum %s -> %s; reset promotion streak",
                      state["stage"], self.stage)

@@ -114,7 +114,7 @@ when resolving them; the lockfile is not currently tracked in this repository.
 ## Training
 
 ```bash
-# Default: three-stage curriculum, 16 synchronously stepped environments
+# Default: four-stage curriculum, 16 synchronously stepped environments
 uv run python -m sim.train_agent
 
 # One environment, same training loop
@@ -346,12 +346,13 @@ image retained and duration rounded to a video frame.
 ### Curriculum (default)
 
 `curriculum.enabled=true` starts in **position holding**, then advances based on fixed-suite
-validation. One GRU, critic and four action heads exist throughout; input/output
-shapes stay constant across stages.
+validation through straight-line tracking before enabling steering. One GRU, critic
+and four action heads exist throughout; input/output shapes stay constant across stages.
 
 | Stage | Active action heads | Objectives |
 |-------|---------------------|------------|
 | `hold_position` | Common wheel acceleration | Hold the starting position with gentle velocity damping |
+| `straight_line` | Common wheel acceleration | Track forward velocity without steering or yaw reward |
 | `locomotion` | Common acceleration + wheel-speed difference | Balance, forward velocity and yaw rate |
 | `full_control` | All four | Locomotion plus horizontal camera elevation and forward neck yaw |
 
@@ -393,9 +394,12 @@ Both position and velocity are observable throughout. The wheel controller is tr
 to stay near the origin from the outset, rather than first learning to accelerate
 until reaching its speed limit.
 
-After position hold, each training episode independently samples a command pair from
-`curriculum.forward_velocities=[-0.1,0,0.1]` m/s and
-`curriculum.yaw_rates=[-0.5,0,0.5]` rad/s. Gaze references remain `[0,0]`.
+After position hold, the straight-line stage samples only
+`curriculum.forward_velocities=[-0.1,0,0.1]` m/s and keeps yaw targets at zero.
+The differential steering head remains inactive and receives no gradient. Only
+after straight-line promotion does the locomotion stage sample independent
+`curriculum.forward_velocities` and `curriculum.yaw_rates` pairs. Gaze references
+remain `[0,0]`.
 Validation deterministically covers all pairs, with fixed seeds and small initial
 pitch/mass/geometry variations. Training randomization is enabled by default
 (`env.randomize=true`), using varying training seeds and fixed validation seeds.
@@ -407,7 +411,8 @@ and strict tracking limits, controlled by `curriculum.consecutive_passes` and
 
 | Promotion | Survival requirement | Tracking-error limits |
 |-----------|----------------------|-----------------------|
-| Position hold → Locomotion | ≥90% reach 20 s | Position MAE ≤0.05 m and forward-speed MAE ≤0.05 m/s |
+| Position hold → Straight line | ≥90% reach 20 s | Position MAE ≤0.05 m and forward-speed MAE ≤0.05 m/s |
+| Straight line → Locomotion | ≥90% reach 20 s | Forward-speed MAE ≤0.05 m/s; yaw-rate error is diagnostic only |
 | Locomotion → Full control | ≥90% reach 20 s | Forward-speed MAE ≤0.05 m/s; yaw-rate MAE ≤0.2 rad/s |
 
 These are tunable `curriculum.*` settings, not measured guarantees. MAEs omit the
@@ -734,12 +739,14 @@ disabled. To train without rendering, set both `logging.plot_freq=0` and
 #### Separate MLflow runs per stage
 
 With curriculum and MLflow enabled, the session is a parent run containing nested
-`hold_position`, `locomotion` and `full_control` runs as those stages are reached. Each
-child owns its training/validation metrics, policy models, videos, plots and
+`hold_position`, `straight_line`, `locomotion` and `full_control` runs as those stages
+are reached. Each
 checkpoints. The parent holds the overall configuration and build/device tags.
 Reward curves from different objectives are therefore separate.
 
-Child tags include `curriculum.version`, `curriculum.stage`, `curriculum.stage_index`, inactive actions,
+Child run names include `resumed_from=<run-id>` when training resumes from an MLflow
+run, making continued sessions easy to distinguish. Child tags include
+`curriculum.version`, `curriculum.stage`, `curriculum.stage_index`, inactive actions,
 disabled rewards, `training.start_iteration` and `training.resume_from`. A resumed
 process starts a new parent session and a **fresh child for the restored stage**,
 tagged with its source checkpoint; it does not append to an old stage's curves.
@@ -776,10 +783,22 @@ uv run python -m sim.train_agent train.resume_from=/path/to/checkpoints/latest.p
 # Resume the strongest saved benchmark policy, including its Adam state
 uv run python -m sim.train_agent train.resume_from=/path/to/checkpoints/best.pt
 
+# Resume directly from an MLflow run ID; downloads checkpoints/best.pt automatically
+uv run python -m sim.train_agent --config-name continuous \
+  train.resume_from=e7e94e9de3e34d89a9b1b1653c06c877
+
 # Resume an older continuous policy with a deliberately smaller optimizer step
 uv run python -m sim.train_agent --config-name continuous \
   train.resume_from=/path/to/checkpoints/best.pt train.resume_lr=0.0001
 ```
+
+`train.resume_from` accepts a local path or a 32-character MLflow run ID. A
+child run ID requires `MLFLOW_TRACKING_URI` and downloads that run's
+`checkpoints/best.pt`; a parent run ID searches its child runs by start time and
+downloads the newest child's `checkpoints/latest.pt`. The file is stored under
+`checkpoints/resume_runs/<resolved-run-id>/`. When MLflow logging is enabled, the
+resumed stage is attached under the source run's original parent when that run has
+one. Local-path resumes start a new parent run.
 
 `train.resume_from` and `policy.restore_id` are mutually exclusive. The former
 restores optimizer LR and progress; the latter loads policy weights with a new
@@ -795,10 +814,11 @@ load with it disabled. Curriculum resume restores the neutral-action mask withou
 reinitializing learned heads. Changed curriculum criteria/commands or validation
 seed/batch/timing settings reset the streak while retaining the stage.
 
-Curriculum state uses schema version 4. Retired `balance` and `stop` stages in older
-checkpoints map to `hold_position`, so resuming cannot re-enter the removed stage.
-Later stage names are retained. Migration preserves weights and Adam state and
-resets the promotion streak for the new curriculum definition.
+Curriculum state uses schema version 5. Older `balance` and `stop` stages map to
+`hold_position`; older `locomotion` checkpoints map to `straight_line` so steering
+is relearned after the new intermediate stage. Later stage names are retained.
+Migration preserves weights and Adam state and resets the promotion streak for
+the new curriculum definition.
 
 Training checkpoints from the earlier policy can automatically gain the two
 appended position inputs. Existing GRU columns and Adam moments are preserved;

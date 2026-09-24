@@ -180,6 +180,8 @@ class ContinuousPolicyTests(unittest.TestCase):
         wheel = agent.action_heads[Actions.ACC_BOTH_WHEELS.value]
         wheel_before = {k: v.clone() for k, v in wheel.state_dict().items()}
         curriculum.advance(agent, optimizer)
+        self.assertIn(Actions.VEL_WHEEL_DIFF, agent.inactive_actions)
+        curriculum.advance(agent, optimizer)
         self.assertAlmostEqual(yaw.std.item(), 0.1, places=6)
         torch.testing.assert_close(yaw.weight, torch.zeros_like(yaw.weight))
         torch.testing.assert_close(yaw.bias, torch.zeros_like(yaw.bias))
