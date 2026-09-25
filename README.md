@@ -395,11 +395,12 @@ to stay near the origin from the outset, rather than first learning to accelerat
 until reaching its speed limit.
 
 After position hold, the straight-line stage samples only
-`curriculum.forward_velocities=[-0.1,0,0.1]` m/s and keeps yaw targets at zero.
-The differential steering head remains inactive and receives no gradient. Only
-after straight-line promotion does the locomotion stage sample independent
-`curriculum.forward_velocities` and `curriculum.yaw_rates` pairs. Gaze references
-remain `[0,0]`.
+`curriculum.straight_line_forward_velocities=[0.0025,0,-0.0025]` m/s, or roughly
+5 cm over 20 seconds, and keeps yaw targets at zero. The differential steering head
+remains inactive and receives no gradient. Only after straight-line promotion does
+the locomotion stage sample independent `curriculum.forward_velocities` and
+`curriculum.yaw_rates` pairs. Gaze references remain `[0,0]`. A red MuJoCo marker
+shows the current position reference in recorded videos.
 Validation deterministically covers all pairs, with fixed seeds and small initial
 pitch/mass/geometry variations. Training randomization is enabled by default
 (`env.randomize=true`), using varying training seeds and fixed validation seeds.
@@ -794,8 +795,10 @@ uv run python -m sim.train_agent --config-name continuous \
 
 `train.resume_from` accepts a local path or a 32-character MLflow run ID. A
 child run ID requires `MLFLOW_TRACKING_URI` and downloads that run's
-`checkpoints/best.pt`; a parent run ID searches its child runs by start time and
-downloads the newest child's `checkpoints/latest.pt`. The file is stored under
+`checkpoints/best.pt`; a parent run ID searches its child runs, selects the child
+with the highest recorded `guard/best_return`, and downloads that child's
+`checkpoints/best.pt`. If no child has metrics, it falls back to the newest child
+with a `checkpoints/latest.pt`. The file is stored under
 `checkpoints/resume_runs/<resolved-run-id>/`. When MLflow logging is enabled, the
 resumed stage is attached under the source run's original parent when that run has
 one. Local-path resumes start a new parent run.
@@ -814,7 +817,7 @@ load with it disabled. Curriculum resume restores the neutral-action mask withou
 reinitializing learned heads. Changed curriculum criteria/commands or validation
 seed/batch/timing settings reset the streak while retaining the stage.
 
-Curriculum state uses schema version 5. Older `balance` and `stop` stages map to
+Curriculum state uses schema version 6. Older `balance` and `stop` stages map to
 `hold_position`; older `locomotion` checkpoints map to `straight_line` so steering
 is relearned after the new intermediate stage. Later stage names are retained.
 Migration preserves weights and Adam state and resets the promotion streak for

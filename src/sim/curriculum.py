@@ -23,7 +23,7 @@ HEAD_REWARDS = (
 
 
 class Curriculum:
-    VERSION = 5  # Add straight-line tracking before differential steering.
+    VERSION = 6  # Use a separate low-speed command grid for straight-line tracking.
 
     def __init__(self, cfg: DictConfig):
         self.settings = OmegaConf.to_container(cfg.curriculum, resolve=True)
@@ -43,7 +43,8 @@ class Curriculum:
             self.cfg.forward_velocities, self.cfg.yaw_rates
         )))
         self.straight_line_pairs = np.array([
-            (velocity, 0.0) for velocity in self.cfg.forward_velocities
+            (velocity, 0.0)
+            for velocity in self.cfg.straight_line_forward_velocities
         ])
         if cfg.guard.episodes < len(self.command_pairs):
             raise ValueError("Validation must cover every curriculum command pair")
@@ -103,7 +104,9 @@ class Curriculum:
             or type(c.consecutive_passes) is not int or c.consecutive_passes < 1
         ):
             raise ValueError("Invalid curriculum probability, startup or pass count")
-        for grid in (c.forward_velocities, c.yaw_rates):
+        for grid in (
+            c.forward_velocities, c.straight_line_forward_velocities, c.yaw_rates
+        ):
             values = np.asarray(grid, dtype=np.float64)
             if (
                 values.ndim != 1 or not len(values) or not np.isfinite(values).all()
@@ -243,13 +246,14 @@ class Curriculum:
 
     def validate_state(self, state: dict):
         version = state.get("version", 1)
-        if type(version) is not int or version not in (1, 2, 3, 4, self.VERSION):
+        if type(version) is not int or version not in (1, 2, 3, 4, 5, self.VERSION):
             raise ValueError("Unsupported checkpoint curriculum version")
         stages = {
             1: ("balance", "locomotion", "full_control"),
             2: ("balance", "stop", "locomotion", "full_control"),
             3: ("balance", "hold_position", "locomotion", "full_control"),
             4: ("hold_position", "locomotion", "full_control"),
+            5: STAGES,
         }.get(version, STAGES)
         if (
             state.get("stage") not in stages

@@ -71,6 +71,23 @@ class ActiveSimulationTests(unittest.TestCase):
         np.testing.assert_array_equal(state.derived_obs[DerivedObs.CURRENT_POS], [0.0])
         np.testing.assert_array_equal(state.targets[Target.TARGET_POS], [0.5])
 
+    def test_target_marker_tracks_the_position_reference(self):
+        env = GymRP(
+            actions=[Actions.ACC_BOTH_WHEELS],
+            target_trajectory=((0.0, 0.0), (1.0, 0.2)),
+            max_episode_time=1.0,
+        )
+        self.addCleanup(env.close)
+        obs, _ = env.reset(seed=1)
+        np.testing.assert_allclose(env.target_marker.pos, [0.0, 0.0, 0.01])
+        obs, _, _, _, _ = env.step(
+            {Actions.ACC_BOTH_WHEELS: np.array([0.0])}
+        )
+        np.testing.assert_allclose(
+            env.target_marker.pos,
+            [obs[Target.TARGET_POS][0], 0.0, 0.01],
+        )
+
     def test_environment_observations_rewards_and_history_are_current(self):
         env = GymRP(
             actions=[Actions.ACC_BOTH_WHEELS], record=True, target_pos=0.5,

@@ -220,7 +220,7 @@ class CurriculumTests(unittest.TestCase):
         self.assertEqual(
             [trajectory.position_at(curriculum.cfg.locomotion_seconds)
              for trajectory in trajectories[:3]],
-            [-2.0, 0.0, 2.0],
+            [0.05, 0.0, -0.05],
         )
         curriculum.advance(agent, optimizer)
         commands = curriculum.prepare_rollout(dummy, agent)
@@ -427,8 +427,8 @@ class CurriculumTests(unittest.TestCase):
         _, curriculum, agent, optimizer = self.training()
         before = capture_state(agent, optimizer, 0, curriculum)
         for version, stage in (
-            (6, "hold_position"), (5, "balance"), (4, "balance"),
-            (True, "balance"), (1, "stop")
+            (7, "hold_position"), (6, "balance"), (5, "balance"),
+            (4, "balance"), (True, "balance"), (1, "stop")
         ):
             invalid = deepcopy(before)
             invalid["curriculum"].update(version=version, stage=stage)
@@ -452,6 +452,7 @@ class CurriculumTests(unittest.TestCase):
             (1, "balance", "hold_position"), (2, "balance", "hold_position"),
             (2, "stop", "hold_position"), (3, "balance", "hold_position"),
             (3, "hold_position", "hold_position"), (4, "locomotion", "straight_line"),
+            (5, "straight_line", "straight_line"),
         ):
             state = curriculum.state_dict()
             state.update(version=version, stage=old, success_streak=2)

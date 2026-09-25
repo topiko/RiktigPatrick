@@ -594,6 +594,14 @@ class GymRP(gymnasium.Env):
             group=3,
         )
         spawn_site.attach(rp.model).add("freejoint")
+        target_marker = arena.worldbody.add(
+            "body", name="target_marker", mocap=True, pos=[0.0, 0.0, 0.01]
+        )
+        target_marker.add(
+            "geom", name="target_marker_geom", type="sphere", size=[0.012],
+            rgba=[1.0, 0.1, 0.1, 0.8], mass=0,
+            contype=0, conaffinity=0, group=2,
+        )
         overview = arena.find("camera", "overview")
         overview.mode = "targetbodycom"
         overview.target = rp.model.find("body", "torso")
@@ -620,6 +628,7 @@ class GymRP(gymnasium.Env):
         # Make environment:
         physics = mjcf.Physics.from_mjcf_model(arena)
         physics.model.opt.timestep = self.simul_timestep
+        self.target_marker = physics.bind(target_marker)
 
         return physics
 
@@ -762,6 +771,9 @@ class GymRP(gymnasium.Env):
             Observable.REWARD_HEAD_YAW: yaw,
         }
 
+    def _update_target_marker(self):
+        self.target_marker.pos = [float(self.state.target_pos), 0.0, 0.01]
+
     def reset(
         self, options: Optional[Any] = None, seed: int | None = None
     ) -> tuple[dict, dict]:
@@ -774,6 +786,7 @@ class GymRP(gymnasium.Env):
         self._elapsed_substeps = 0
         self.dm_env = self._reset_env(seed)
         self.state.reset(self._read_sensors())
+        self._update_target_marker()
         # Reset has an initial observation, but no action or transition reward.
         initial_rewards = dict.fromkeys(self.reward_scales, 0.0)
         return self._get_obs(initial_rewards), {}
@@ -903,6 +916,7 @@ class GymRP(gymnasium.Env):
         # Keep acquisition, shared processing, reward and recording explicit.
         measurements = self._read_sensors()
         self.state.update(measurements)
+        self._update_target_marker()
         terminated = self.terminated
         rewards = self._calculate_rewards(
             self.state, terminated=terminated,

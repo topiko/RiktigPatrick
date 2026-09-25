@@ -348,7 +348,7 @@ class TrainingSafetyTests(unittest.TestCase):
         ):
             mlflow_resume_parent(run_id)
 
-    def test_parent_run_resume_uses_latest_child_checkpoint(self):
+    def test_parent_run_resume_uses_latest_child_checkpoint_when_scores_missing(self):
         parent_id = "b" * 32
         child_id = "c" * 32
         with tempfile.TemporaryDirectory() as folder:
@@ -375,6 +375,7 @@ class TrainingSafetyTests(unittest.TestCase):
                     )
 
                 client.list_artifacts.side_effect = list_artifacts
+                client.get_metric_history.return_value = []
                 client.search_runs.return_value = [child]
                 self.assertEqual(resolve_resume_path(parent_id, folder), downloaded)
                 client.search_runs.assert_called_once_with(
@@ -386,6 +387,48 @@ class TrainingSafetyTests(unittest.TestCase):
                 download.assert_called_once_with(
                     run_id=child_id, artifact_path="checkpoints/latest.pt",
                     dst_path=f"{folder}/resume_runs/{child_id}",
+                )
+
+    def test_parent_run_resume_uses_best_child_checkpoint(self):
+        parent_id = "b" * 32
+        best_id = "c" * 32
+        latest_id = "d" * 32
+        with tempfile.TemporaryDirectory() as folder:
+            downloaded = Path(folder) / "best.pt"
+            with (
+                patch.dict(os.environ, {"MLFLOW_TRACKING_URI": "sqlite:///test"}),
+                patch("sim.train_agent.mlflow.set_tracking_uri"),
+                patch("sim.train_agent.mlflow.MlflowClient") as client_class,
+                patch("sim.train_agent.mlflow.artifacts.download_artifacts",
+                      return_value=str(downloaded)) as download,
+            ):
+                client = client_class.return_value
+                client.get_run.return_value = Mock(
+                    info=Mock(experiment_id="22"), data=Mock(tags={}),
+                )
+                best = Mock(info=Mock(run_id=best_id))
+                latest = Mock(info=Mock(run_id=latest_id))
+                client.search_runs.return_value = [latest, best]
+
+                def artifacts(run_id, path):
+                    self.assertEqual(path, "checkpoints")
+                    return (
+                        [] if run_id == parent_id
+                        else [Mock(path="checkpoints/best.pt")]
+                    )
+
+                client.list_artifacts.side_effect = artifacts
+
+                def history(run_id, metric_name):
+                    if metric_name == "guard/best_return":
+                        return [Mock(value=1903.0 if run_id == best_id else 1358.0)]
+                    return []
+
+                client.get_metric_history.side_effect = history
+                self.assertEqual(resolve_resume_path(parent_id, folder), downloaded)
+                download.assert_called_once_with(
+                    run_id=best_id, artifact_path="checkpoints/best.pt",
+                    dst_path=f"{folder}/resume_runs/{best_id}",
                 )
 
     def test_resumed_parent_keeps_immutable_mlflow_params(self):

@@ -355,8 +355,39 @@ def main(cfg: DictConfig):
         train(cfg, resources, device=device)
 
 
+def _best_run_score(client, run_id: str) -> float | None:
+    for metric_name in ("guard/best_return", "validation/returns/mean"):
+        history = client.get_metric_history(run_id, metric_name)
+        if history:
+            return max(metric.value for metric in history)
+    return None
+
+
+def _has_checkpoint(client, run_id: str, artifact_name: str) -> bool:
+    return any(
+        artifact.path == f"checkpoints/{artifact_name}"
+        for artifact in client.list_artifacts(run_id, "checkpoints")
+    )
+
+
+def _select_parent_child(client, children) -> tuple[str, str] | None:
+    best_children = []
+    for child in children:
+        if _has_checkpoint(client, child.info.run_id, "best.pt"):
+            score = _best_run_score(client, child.info.run_id)
+            if score is not None:
+                best_children.append((score, child))
+    if best_children:
+        _, selected = max(best_children, key=lambda item: item[0])
+        return selected.info.run_id, "best.pt"
+    for child in children:
+        if _has_checkpoint(client, child.info.run_id, "latest.pt"):
+            return child.info.run_id, "latest.pt"
+    return None
+
+
 def resolve_resume_path(value: str, checkpoint_dir: str | Path) -> Path:
-    """Resolve a local path, an MLflow child best, or a parent's latest child."""
+    """Resolve a local path, an MLflow child best, or a parent's best child."""
     local = Path(value).expanduser()
     if local.exists() or re.fullmatch(r"[0-9a-fA-F]{32}", value) is None:
         return local
@@ -368,10 +399,10 @@ def resolve_resume_path(value: str, checkpoint_dir: str | Path) -> Path:
     mlflow.set_tracking_uri(tracking_uri)
     client = mlflow.MlflowClient()
     run = client.get_run(value)
-    for artifact_name in ("best.pt", "latest.pt"):
-        if any(artifact.path == f"checkpoints/{artifact_name}"
-               for artifact in client.list_artifacts(value, "checkpoints")):
-            break
+    if _has_checkpoint(client, value, "best.pt"):
+        artifact_name = "best.pt"
+    elif _has_checkpoint(client, value, "latest.pt"):
+        artifact_name = "latest.pt"
     else:
         children = client.search_runs(
             [run.info.experiment_id],
@@ -379,18 +410,12 @@ def resolve_resume_path(value: str, checkpoint_dir: str | Path) -> Path:
             order_by=["attribute.start_time DESC"],
             max_results=100,
         )
-        for child in children:
-            if any(
-                artifact.path == "checkpoints/latest.pt"
-                for artifact in client.list_artifacts(child.info.run_id, "checkpoints")
-            ):
-                value = child.info.run_id
-                artifact_name = "latest.pt"
-                break
-        else:
+        selected = _select_parent_child(client, children)
+        if selected is None:
             raise FileNotFoundError(
                 f"MLflow run {value} has no checkpoint or resumable child run"
             )
+        value, artifact_name = selected
     destination = Path(checkpoint_dir) / "resume_runs" / value
     destination.mkdir(parents=True, exist_ok=True)
     downloaded = mlflow.artifacts.download_artifacts(
