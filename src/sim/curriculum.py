@@ -92,7 +92,8 @@ class Curriculum:
         validate_pitch_deadband(c.pitch_deadband)
         durations = (c.hold_seconds, c.locomotion_seconds)
         positive = (
-            *durations, c.position_mae, c.velocity_mae, c.yaw_rate_mae
+            *durations, c.position_mae, c.straight_line_position_mae,
+            c.velocity_mae, c.yaw_rate_mae
         )
         if not all(np.isfinite(v) and v > 0 for v in positive):
             raise ValueError("Curriculum durations and thresholds must be positive")
@@ -133,7 +134,10 @@ class Curriculum:
 
     @property
     def tracking_mode(self) -> str:
-        return "position_velocity" if self.stage == "hold_position" else "velocity"
+        return (
+            "position_velocity"
+            if self.stage in ("hold_position", "straight_line") else "velocity"
+        )
 
     @property
     def velocity_reward_weight(self) -> float:
@@ -210,11 +214,18 @@ class Curriculum:
         """Record one scheduled evaluation; a true result requests promotion."""
         if self.stage == "full_control":
             return False
+        position_limit = (
+            self.cfg.position_mae if self.stage == "hold_position"
+            else self.cfg.straight_line_position_mae
+        )
+        position_passed = (
+            self.stage not in ("hold_position", "straight_line")
+            or metrics["validation/position_mae"] <= position_limit
+        )
         passed = (
             metrics["validation/survival_fraction"] >= self.cfg.survival_fraction
             and metrics["validation/velocity_mae"] <= self.cfg.velocity_mae
-            and (self.stage != "hold_position"
-                 or metrics["validation/position_mae"] <= self.cfg.position_mae)
+            and position_passed
             and (self.stage in ("hold_position", "straight_line")
                  or metrics["validation/yaw_rate_mae"] <= self.cfg.yaw_rate_mae)
         )

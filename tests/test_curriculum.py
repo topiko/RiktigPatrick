@@ -152,6 +152,7 @@ class CurriculumTests(unittest.TestCase):
                     self.assertNotIn(parameter, optimizer.state)
             raw = env.envs[0].unwrapped
             state = raw.state
+            state.derived_obs[DerivedObs.CURRENT_POS][:] = 0.1
             state.derived_obs[DerivedObs.CURRENT_VEL][:] = 0.2
             state.derived_obs[DerivedObs.YAW_RATE][:] = 0.7
             state.obs.set_observable(Observable.TRUE_CAMERA_PITCH, np.array([0.3]))
@@ -164,6 +165,10 @@ class CurriculumTests(unittest.TestCase):
                     self.assertEqual(rewards[key], 0)
             self.assertLess(rewards[Observable.REWARD_VEL], 0)
             self.assertEqual(rewards[Observable.REWARD_WHEEL_VEL], 0)
+            if stage in ("hold_position", "straight_line"):
+                self.assertLess(rewards[Observable.REWARD_POS], 0)
+            else:
+                self.assertEqual(rewards[Observable.REWARD_POS], 0)
             if stage in ("locomotion", "full_control"):
                 self.assertLess(rewards[Observable.REWARD_YAW_RATE], 0)
             if stage == "full_control":
@@ -288,6 +293,9 @@ class CurriculumTests(unittest.TestCase):
             self.assertEqual(curriculum.observe(good), expected)
         curriculum.advance(agent, optimizer)
         self.assertEqual(curriculum.stage, "straight_line")
+        self.assertFalse(curriculum.observe({
+            **good, "validation/position_mae": 0.03
+        }))
         for expected in (False, False, True):
             self.assertEqual(curriculum.observe(good), expected)
         curriculum.advance(agent, optimizer)
@@ -365,10 +373,16 @@ class CurriculumTests(unittest.TestCase):
             self.assertAlmostEqual(rewards[Observable.REWARD_VEL], -0.1)
             self.assertEqual(rewards[Observable.REWARD_WHEEL_VEL], 0)
         curriculum.advance(agent, optimizer)
-        curriculum.prepare_rollout(env, agent)
+        curriculum.prepare_rollout(env, agent, evaluation=True)
+        env.reset(seed=1)
+        state = raw.state
+        state.derived_obs[DerivedObs.CURRENT_POS][:] = 0.8
+        state.derived_obs[DerivedObs.CURRENT_VEL][:] = 0.2
         rewards = raw._calculate_rewards(state, terminated=False)
-        self.assertEqual(rewards[Observable.REWARD_POS], 0)
-        self.assertAlmostEqual(rewards[Observable.REWARD_VEL], -0.8)
+        self.assertAlmostEqual(rewards[Observable.REWARD_POS], -0.8)
+        self.assertAlmostEqual(
+            rewards[Observable.REWARD_VEL], -4 * abs(0.2 - state.target_vel)
+        )
 
     def test_guard_rollbacks_are_stage_local_and_clear_promotion_streak(self):
         _, curriculum, agent, optimizer = self.training()

@@ -79,13 +79,15 @@ class ActiveSimulationTests(unittest.TestCase):
         )
         self.addCleanup(env.close)
         obs, _ = env.reset(seed=1)
-        np.testing.assert_allclose(env.target_marker.pos, [0.0, 0.0, 0.01])
+        np.testing.assert_allclose(
+            env.dm_env.data.mocap_pos[env.target_marker.mocapid], [0.0, 0.0, 0.04]
+        )
         obs, _, _, _, _ = env.step(
             {Actions.ACC_BOTH_WHEELS: np.array([0.0])}
         )
         np.testing.assert_allclose(
-            env.target_marker.pos,
-            [obs[Target.TARGET_POS][0], 0.0, 0.01],
+            env.dm_env.data.mocap_pos[env.target_marker.mocapid],
+            [obs[Target.TARGET_POS][0], 0.0, 0.04],
         )
 
     def test_environment_observations_rewards_and_history_are_current(self):

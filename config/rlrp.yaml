@@ -34,9 +34,9 @@ reward:
 
 train:
   device: auto  # auto selects CUDA when available; cpu, cuda, or cuda:N also supported
-  policy_lr: 0.0003
+  policy_lr: 0.0001
   grad_clip: 500.0
-  tbptt_steps: 256  # detach recurrent gradient history every N rollout steps
+  tbptt_steps: 128  # detach recurrent gradient history every N rollout steps
   max_iterations: null  # null trains until interrupted
   resume_from: null  # full local/MLflow-downloaded .pt checkpoint (weights + Adam + RNG)
   resume_lr: null  # optional explicit Adam LR override after loading a checkpoint
@@ -59,6 +59,7 @@ curriculum:
   survival_fraction: 0.9
   hold_seconds: 20.0
   position_mae: 0.05  # meters from the starting position
+  straight_line_position_mae: 0.02
   hold_velocity_weight: 0.125  # multiply reward/vel for gentle damping during position hold
   locomotion_seconds: 20.0
   startup_seconds: 1.0  # tracking-error allowance at episode start

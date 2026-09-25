@@ -595,12 +595,12 @@ class GymRP(gymnasium.Env):
         )
         spawn_site.attach(rp.model).add("freejoint")
         target_marker = arena.worldbody.add(
-            "body", name="target_marker", mocap=True, pos=[0.0, 0.0, 0.01]
+            "body", name="target_marker", mocap=True, pos=[0.0, 0.0, 0.04]
         )
         target_marker.add(
-            "geom", name="target_marker_geom", type="sphere", size=[0.012],
-            rgba=[1.0, 0.1, 0.1, 0.8], mass=0,
-            contype=0, conaffinity=0, group=2,
+            "geom", name="target_marker_geom", type="sphere", size=[0.03],
+            rgba=[1.0, 0.0, 0.0, 1.0], mass=0,
+            contype=0, conaffinity=0, group=0,
         )
         overview = arena.find("camera", "overview")
         overview.mode = "targetbodycom"
@@ -772,7 +772,10 @@ class GymRP(gymnasium.Env):
         }
 
     def _update_target_marker(self):
-        self.target_marker.pos = [float(self.state.target_pos), 0.0, 0.01]
+        self.dm_env.data.mocap_pos[self.target_marker.mocapid] = [
+            float(self.state.target_pos), 0.0, 0.04
+        ]
+        self.dm_env.forward()
 
     def reset(
         self, options: Optional[Any] = None, seed: int | None = None

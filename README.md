@@ -396,8 +396,10 @@ until reaching its speed limit.
 
 After position hold, the straight-line stage samples only
 `curriculum.straight_line_forward_velocities=[0.0025,0,-0.0025]` m/s, or roughly
-5 cm over 20 seconds, and keeps yaw targets at zero. The differential steering head
-remains inactive and receives no gradient. Only after straight-line promotion does
+5 cm over 20 seconds, and keeps yaw targets at zero. Position tracking is active in
+this stage, so the policy is rewarded for following the moving reference as well as
+matching its velocity. The differential steering head remains inactive and receives
+no gradient. Only after straight-line promotion does
 the locomotion stage sample independent `curriculum.forward_velocities` and
 `curriculum.yaw_rates` pairs. Gaze references remain `[0,0]`. A red MuJoCo marker
 shows the current position reference in recorded videos.
@@ -413,7 +415,7 @@ and strict tracking limits, controlled by `curriculum.consecutive_passes` and
 | Promotion | Survival requirement | Tracking-error limits |
 |-----------|----------------------|-----------------------|
 | Position hold → Straight line | ≥90% reach 20 s | Position MAE ≤0.05 m and forward-speed MAE ≤0.05 m/s |
-| Straight line → Locomotion | ≥90% reach 20 s | Forward-speed MAE ≤0.05 m/s; yaw-rate error is diagnostic only |
+| Straight line → Locomotion | ≥90% reach 20 s | Position MAE ≤0.02 m and forward-speed MAE ≤0.05 m/s; yaw-rate error is diagnostic only |
 | Locomotion → Full control | ≥90% reach 20 s | Forward-speed MAE ≤0.05 m/s; yaw-rate MAE ≤0.2 rad/s |
 
 These are tunable `curriculum.*` settings, not measured guarantees. MAEs omit the
