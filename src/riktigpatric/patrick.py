@@ -24,6 +24,8 @@ from riktigpatric.trajectory import (
 
 LOG = logging.getLogger("rp_logger")
 G = 9.81
+POSITION_ERROR_SCALE = 0.1
+VELOCITY_ERROR_SCALE = 0.2
 SPEEDSCALE = 5
 MINTHETA = -28
 MAXTHETA = 50
@@ -176,6 +178,8 @@ class Target(str, Enum):
 class DerivedObs(str, Enum):
     CURRENT_POS = "derived/pos"  # fore/aft wheel odometry, meters
     CURRENT_VEL = "derived/vel"  # signed wheel-odometry velocity, m/s
+    POSITION_ERROR = "derived/position_error"
+    VELOCITY_ERROR = "derived/velocity_error"
     YAW_RATE = "derived/yaw_rate"  # gyro body-Z rate, positive left, rad/s
     CAMERA_PITCH_WORLD = "derived/camera_pitch_world"  # estimated elevation, rad
 
@@ -188,6 +192,8 @@ class DerivedObs(str, Enum):
         if self in {
             DerivedObs.CURRENT_POS,
             DerivedObs.CURRENT_VEL,
+            DerivedObs.POSITION_ERROR,
+            DerivedObs.VELOCITY_ERROR,
             DerivedObs.YAW_RATE,
             DerivedObs.CAMERA_PITCH_WORLD,
         }:
@@ -364,6 +370,8 @@ class State:
         self.derived_obs: dict[DerivedObs, np.ndarray] = {
             DerivedObs.CURRENT_POS: np.array([0.0]),
             DerivedObs.CURRENT_VEL: np.array([0.0]),
+            DerivedObs.POSITION_ERROR: np.array([0.0]),
+            DerivedObs.VELOCITY_ERROR: np.array([0.0]),
             DerivedObs.YAW_RATE: np.array([0.0]),
         }
         self.targets: dict[Target, np.ndarray] = {
@@ -449,6 +457,22 @@ class State:
         self._head_trajectory = trajectory
         self._update_target()
 
+    def _update_tracking_errors(self):
+        position_error = (
+            self.derived_obs[DerivedObs.CURRENT_POS][0]
+            - self.targets[Target.TARGET_POS][0]
+        )
+        velocity_error = (
+            self.derived_obs[DerivedObs.CURRENT_VEL][0]
+            - self.targets[Target.TARGET_VEL][0]
+        )
+        self.derived_obs[DerivedObs.POSITION_ERROR] = np.tanh(
+            np.array([position_error / POSITION_ERROR_SCALE], dtype=np.float32)
+        )
+        self.derived_obs[DerivedObs.VELOCITY_ERROR] = np.tanh(
+            np.array([velocity_error / VELOCITY_ERROR_SCALE], dtype=np.float32)
+        )
+
     def _update_target(self):
         if self._target_trajectory is not None:
             position = self._target_trajectory.position_at(self.prev_t)
@@ -505,6 +529,7 @@ class State:
         self._update_camera_pose()
         self.prev_t = obs_t
         self._update_target()
+        self._update_tracking_errors()
 
     def snapshot(self) -> dict[StateVarKey, np.ndarray]:
         """Return owned policy-state arrays, without action/reward bookkeeping."""
@@ -600,6 +625,7 @@ class State:
                 obs.to_dict().get(Observable.GYRO, np.zeros(3))[2:3].copy()
             ),
         }
+        self._update_tracking_errors()
         self._update_camera_pose()
 
         self._history = []

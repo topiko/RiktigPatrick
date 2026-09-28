@@ -89,6 +89,10 @@ class ActiveSimulationTests(unittest.TestCase):
             env.dm_env.data.mocap_pos[env.target_marker.mocapid],
             [obs[Target.TARGET_POS][0], 0.0, 0.04],
         )
+        np.testing.assert_allclose(
+            obs[DerivedObs.POSITION_ERROR],
+            np.tanh((obs[DerivedObs.CURRENT_POS] - obs[Target.TARGET_POS]) / 0.1),
+        )
 
     def test_environment_observations_rewards_and_history_are_current(self):
         env = GymRP(
@@ -442,8 +446,8 @@ class ActiveSimulationTests(unittest.TestCase):
         self.assertIsNone(cfg.train.target_trajectories)
         self.assertIsNone(cfg.env.target_trajectory)
         for mode, expected in (
-            ("velocity", {Target.TARGET_VEL.value, DerivedObs.CURRENT_VEL.value}),
-            ("position", {Target.TARGET_POS.value, DerivedObs.CURRENT_POS.value}),
+            ("velocity", {Target.TARGET_VEL.value, DerivedObs.VELOCITY_ERROR.value}),
+            ("position", {DerivedObs.POSITION_ERROR.value}),
             ("none", set()),
         ):
             cfg.env.tracking_mode = mode
@@ -511,6 +515,11 @@ class ActiveSimulationTests(unittest.TestCase):
             np.testing.assert_allclose(
                 obs[Observable.REWARD_VEL][:, 0],
                 -4 * abs(obs[DerivedObs.CURRENT_VEL][:, 0] - targets), atol=1e-7,
+            )
+            np.testing.assert_allclose(
+                obs[DerivedObs.VELOCITY_ERROR][:, 0],
+                np.tanh((obs[DerivedObs.CURRENT_VEL][:, 0] - targets) / 0.2),
+                atol=1e-7,
             )
             np.testing.assert_array_equal(obs[Observable.REWARD_POS], 0.0)
             np.testing.assert_array_equal(obs[Observable.REWARD_WHEEL_VEL], 0.0)
@@ -586,7 +595,11 @@ class ActiveSimulationTests(unittest.TestCase):
             cfg.env.tracking_mode = mode
             agent = Agent(get_policy_inputs(cfg), cfg.policy.actions)
             keys = get_plot_keys(cfg, agent)
-            plotted = {key for _, row in keys for key in row}
+            plotted = {
+                key
+                for row in keys
+                for key in (row[1] + row[2] if len(row) == 3 else row[1])
+            }
             self.assertEqual(plotted & all_tracking, expected_tracking)
             self.assertIn(Observable.REWARD_TOTAL, plotted)
             self.assertEqual(Observable.REWARD_POS in plotted, mode == "position")

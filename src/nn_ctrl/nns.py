@@ -51,6 +51,7 @@ def _get_obs_decoder(input_: StateVarKey) -> tuple[nn.Module, int]:
         return nn.Linear(1, 8), 8  # Single time value -> 8 features
     if input_ in (
         DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL,
+        DerivedObs.POSITION_ERROR, DerivedObs.VELOCITY_ERROR,
         Target.TARGET_POS, Target.TARGET_VEL,
         Target.YAW_RATE, DerivedObs.YAW_RATE,
         DerivedObs.CAMERA_PITCH_WORLD, Target.CAMERA_PITCH_WORLD, Target.HEAD_YAW_NECK,

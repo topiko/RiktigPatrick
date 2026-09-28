@@ -306,7 +306,11 @@ class HeadTrackingTests(unittest.TestCase):
             self.assertEqual(Target.CAMERA_PITCH_WORLD.value in inputs, enabled)
             self.assertEqual(Target.HEAD_YAW_NECK.value in inputs, enabled)
             agent = Agent(inputs, self.cfg.policy.actions)
-            plotted = {key for _, row in get_plot_keys(self.cfg, agent) for key in row}
+            plotted = {
+                key
+                for row in get_plot_keys(self.cfg, agent)
+                for key in (row[1] + row[2] if len(row) == 3 else row[1])
+            }
             self.assertEqual(Target.CAMERA_PITCH_WORLD in plotted, enabled)
             self.assertEqual(Observable.REWARD_CAMERA_PITCH in plotted, enabled)
             self.assertEqual(Observable.REWARD_HEAD_PITCH in plotted, not enabled)

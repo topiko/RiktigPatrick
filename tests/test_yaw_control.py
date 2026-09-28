@@ -240,7 +240,11 @@ class YawControlTests(unittest.TestCase):
             cfg.env.yaw_tracking = enabled
             inputs = get_policy_inputs(cfg)
             agent = Agent(inputs, cfg.policy.actions)
-            plotted = {key for _, row in get_plot_keys(cfg, agent) for key in row}
+            plotted = {
+                key
+                for row in get_plot_keys(cfg, agent)
+                for key in (row[1] + row[2] if len(row) == 3 else row[1])
+            }
             self.assertEqual(Target.YAW_RATE.value in inputs, enabled)
             self.assertEqual(Observable.REWARD_YAW_RATE in plotted, enabled)
             env = GymRP(

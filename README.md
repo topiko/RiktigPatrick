@@ -79,7 +79,7 @@ See [fixes.md](fixes.md) for the cleanup findings and before/after pseudocode.
 | `src/sim/devices.py` | CPU/CUDA selection and isolated evaluation RNG streams |
 | `src/sim/timing.py` | Seeded control-interval jitter on the fixed physics grid |
 | `src/sim/checkpoints.py` | Portable training snapshots and validation rollback |
-| `src/sim/checkpoint_migrations.py` | Preserve old policies when adding position inputs |
+| `src/sim/checkpoint_migrations.py` | Legacy checkpoint input migrations |
 | `src/sim/policy_probe.py` | Sampled conditional policy-change diagnostics |
 | `src/sim/curriculum.py` | Stage masks, command sampling and physical promotion gates |
 | `src/sim/plot_utils.py` | Episode plots |
@@ -441,9 +441,9 @@ requiring a return to the episode's starting position. Select the objective with
 
 | Mode | Policy tracking inputs | Tracking reward |
 |------|------------------------|-----------------|
-| `velocity` (default) | `target/vel`, `derived/vel` | Absolute velocity error in m/s |
-| `position` | `target/pos`, `derived/pos` | Absolute position error in meters |
-| `position_velocity` | Both position and velocity pairs | Position error plus velocity error |
+| `velocity` (default) | `target/vel`, `derived/velocity_error` | Velocity error in m/s |
+| `position` | `derived/position_error` | Position error in meters |
+| `position_velocity` | `target/vel`, both tracking errors | Position error plus velocity error |
 | `none` | No tracking inputs | No position/velocity-reference penalty |
 
 All locomotion modes retain balancing and the selected head/yaw objectives. Position and `none` modes
@@ -687,9 +687,10 @@ the confirmed −28°/+50° neck-pitch and ±40° yaw ranges, and modeling assum
   that setting disables performance rollback, not best-policy selection.
 - Each evaluation saves and, with MLflow enabled, uploads the matching PNG, CSV
   and MP4. These describe the same evaluation episode, not every training rollout.
-- Tracking plots follow the selected mode: position, velocity, or no tracking
-  plot for `none`. Inactive reward terms are omitted from plots; CSV traces keep
-  all observation and reward fields.
+- Tracking plots keep raw target/observed position and velocity traces, with the
+  normalized tracking error on a secondary y-axis. `none` has no tracking plot.
+  Inactive reward terms are omitted from plots; CSV traces keep all observation
+  and reward fields.
 - Head tracking adds target/estimated/actual camera elevation and target/measured
   neck-yaw plots. `env.camera_view` selects `external`, `head`, or `both` (default:
   overview left, head camera right). Paired views use 320×240 pixels each.
@@ -825,13 +826,10 @@ is relearned after the new intermediate stage. Later stage names are retained.
 Migration preserves weights and Adam state and resets the promotion streak for
 the new curriculum definition.
 
-Training checkpoints from the earlier policy can automatically gain the two
-appended position inputs. Existing GRU columns and Adam moments are preserved;
-new GRU input columns and their moments start at zero, so the additional inputs
-initially have no influence on the controller. New encoders can then learn during
-training. This narrow migration requires matching old inputs, action specifications,
-hidden size and layer count; unrelated architecture changes are rejected. Full
-MLflow model restores still require an exact input/action specification.
+Policy tracking inputs now use bounded errors rather than absolute position
+references. Checkpoints created with the earlier raw position inputs are rejected;
+start a fresh run after this input change. Curriculum resume of compatible
+checkpoints still restores the stage, streak, weights and Adam state.
 
 Promotion archives `stage_<name>_complete.pt`, enables the next heads, and resets
 the guard baseline. New-stage validation establishes its own `best.pt`; guard
@@ -987,10 +985,12 @@ The active simulation and agent use SI units:
 | `sens/gyro` | Gyroscope | rad/s, 3 |
 | `sens/acc` | Accelerometer | m/s², 3 |
 | `env/obs_time` | Episode time | s, 1 |
-| `target/pos` | Current position reference | m, 1 |
-| `derived/pos` | Wheel odometry | m, 1 |
+| `target/pos` | Current position reference; plot/diagnostic only | m, 1 |
+| `derived/pos` | Wheel odometry; plot/diagnostic only | m, 1 |
 | `target/vel` | Desired signed forward velocity | m/s, 1 |
-| `derived/vel` | Signed forward velocity from wheel odometry | m/s, 1 |
+| `derived/vel` | Signed forward velocity from wheel odometry; plot/diagnostic only | m/s, 1 |
+| `derived/position_error` | `tanh((derived/pos - target/pos) / 0.1)` | normalized, 1 |
+| `derived/velocity_error` | `tanh((derived/vel - target/vel) / 0.2)` | normalized, 1 |
 | `target/yaw_rate` | Desired body-Z angular rate, positive left | rad/s, 1 |
 | `derived/yaw_rate` | Measured body-Z angular rate from gyro | rad/s, 1 |
 | `target/camera_pitch_world` | Desired optical-axis elevation above horizon | rad, 1 |
@@ -999,12 +999,12 @@ The active simulation and agent use SI units:
 | `simul/camera_pitch_world` | Actual camera elevation, scoring/diagnostics only | rad, 1 |
 
 `policy.inputs` lists eight common sensor/time fields (12 scalar channels).
-`get_policy_inputs()` appends the selected task's two fields: velocity or position
-tracking uses 14 scalar input channels, while `none` uses 12. Head tracking adds
-six channels (two targets, estimated camera elevation, roll, two joint rates),
-giving 20 channels. Yaw-rate tracking adds its target and measured rate, giving
-22 channels. Curriculum policies append position reference and odometry, giving
-**24 default input channels**. Simulation truth is not added to the NN.
+`get_policy_inputs()` appends bounded tracking errors and the velocity command:
+velocity tracking uses 14 scalar input channels, position tracking uses 13, and
+`none` uses 12. Head tracking adds six channels (two targets, estimated camera
+elevation, roll, two joint rates). Yaw-rate tracking adds its target and measured
+rate. Curriculum policies add the position error as well, giving **23 default
+input channels**. Simulation truth is not added to the NN.
 Unused target/state fields remain available in environment observations and plots.
 Each policy input has a learned linear encoder. Their outputs feed
 a shared 64-unit GRU, layer normalization, action heads and a value head.

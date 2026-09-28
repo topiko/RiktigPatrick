@@ -22,6 +22,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from nn_ctrl.nns import Agent, ContinuousHead
 from riktigpatric.patrick import (
+    POSITION_ERROR_SCALE,
+    VELOCITY_ERROR_SCALE,
     Actions,
     DerivedObs,
     Observable,
@@ -72,10 +74,14 @@ HYDRA_CONFIG_DIR = os.getenv(
     "HYDRA_CONFIG_DIR", str(Path(__file__).resolve().parents[2] / "config")
 )
 
-PlotKey = tuple[
-    StateVarKey | Actions,
-    tuple[StateVarKey | Actions | MiscKeys, ...],
-]
+PlotKey = (
+    tuple[StateVarKey | Actions, tuple[StateVarKey | Actions | MiscKeys, ...]]
+    | tuple[
+        StateVarKey | Actions,
+        tuple[StateVarKey | Actions | MiscKeys, ...],
+        tuple[StateVarKey | Actions | MiscKeys, ...],
+    ]
+)
 
 PLOTKS = [
     (Observable.OBS_TIME, (Observable.RP_PITCH, Observable.TRUE_PITCH)),
@@ -99,6 +105,15 @@ TRACKING_INPUTS = {
     "none": (),
 }
 
+POLICY_TRACKING_INPUTS = {
+    "position": (DerivedObs.POSITION_ERROR,),
+    "velocity": (Target.TARGET_VEL, DerivedObs.VELOCITY_ERROR),
+    "position_velocity": (
+        Target.TARGET_VEL, DerivedObs.POSITION_ERROR, DerivedObs.VELOCITY_ERROR,
+    ),
+    "none": (),
+}
+
 HEAD_INPUTS = (
     Target.CAMERA_PITCH_WORLD, Target.HEAD_YAW_NECK, DerivedObs.CAMERA_PITCH_WORLD,
     Observable.RP_ROLL, Observable.HEAD_PITCH_VEL, Observable.HEAD_TURN_VEL,
@@ -106,16 +121,44 @@ HEAD_INPUTS = (
 
 YAW_INPUTS = (Target.YAW_RATE, DerivedObs.YAW_RATE)
 
+TRACKING_PLOT_ROWS = {
+    "position": (
+        (Target.TARGET_POS, DerivedObs.CURRENT_POS),
+        (DerivedObs.POSITION_ERROR,),
+    ),
+    "velocity": (
+        (Target.TARGET_VEL, DerivedObs.CURRENT_VEL),
+        (DerivedObs.VELOCITY_ERROR,),
+    ),
+    "position_velocity": (
+        (Target.TARGET_POS, DerivedObs.CURRENT_POS),
+        (DerivedObs.POSITION_ERROR,),
+    ),
+}
+
+
+def _tracking_plot_keys(mode: str, include_position: bool) -> list[PlotKey]:
+    kinds = ("position", "velocity") if mode == "position_velocity" else (mode,)
+    rows = [TRACKING_PLOT_ROWS[kind] for kind in kinds if kind in TRACKING_PLOT_ROWS]
+    if include_position and mode == "velocity":
+        rows.append(TRACKING_PLOT_ROWS["position"])
+    return [
+        (Observable.OBS_TIME, primary, secondary)
+        for primary, secondary in rows
+    ]
+
 
 def get_policy_inputs(cfg: DictConfig) -> list[str]:
     """Append task inputs to the shared sensor inputs, independently of the agent."""
     return list(dict.fromkeys([
         *cfg.policy.inputs,
-        *[key.value for key in TRACKING_INPUTS[cfg.env.tracking_mode]],
+        *[key.value for key in POLICY_TRACKING_INPUTS[cfg.env.tracking_mode]],
         *[key.value for key in HEAD_INPUTS if cfg.env.head_tracking],
         *[key.value for key in YAW_INPUTS if cfg.env.yaw_tracking],
-        *[key.value for key in TRACKING_INPUTS["position"]
-          if cfg.get("curriculum", {}).get("enabled", False)],
+        *([
+            DerivedObs.POSITION_ERROR.value,
+            DerivedObs.VELOCITY_ERROR.value,
+        ] if cfg.get("curriculum", {}).get("enabled", False) else []),
     ]))
 
 
@@ -138,6 +181,23 @@ def _zero_hidden_state(
         return h
     done_t = torch.from_numpy(done.astype(bool)).to(device=h.device)
     return torch.where(done_t.view(1, -1, 1), torch.zeros_like(h), h)
+
+
+def _update_error_observations(obs_d):
+    if not {
+        DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL,
+        Target.TARGET_POS, Target.TARGET_VEL,
+    } <= obs_d.keys():
+        return obs_d
+    obs_d[DerivedObs.POSITION_ERROR] = np.tanh(
+        (obs_d[DerivedObs.CURRENT_POS] - obs_d[Target.TARGET_POS])
+        / POSITION_ERROR_SCALE
+    ).astype(np.float32)
+    obs_d[DerivedObs.VELOCITY_ERROR] = np.tanh(
+        (obs_d[DerivedObs.CURRENT_VEL] - obs_d[Target.TARGET_VEL])
+        / VELOCITY_ERROR_SCALE
+    ).astype(np.float32)
+    return obs_d
 
 
 def add_targets(
@@ -165,13 +225,15 @@ def add_targets(
             ],
             dtype=np.float32,
         )
-        return obs_d
+        return _update_error_observations(obs_d)
     key, attribute, values = (
         (Target.TARGET_VEL, "target_vel", target_velocities)
         if target_velocities is not None
         else (Target.TARGET_POS, "target_pos", target_positions)
     )
-    return _add_scalar_targets(obs_d, rp_env, key, attribute, values)
+    return _update_error_observations(
+        _add_scalar_targets(obs_d, rp_env, key, attribute, values)
+    )
 
 
 def _add_scalar_targets(obs_d, rp_env, key, attribute, values):
@@ -1121,15 +1183,7 @@ def get_plot_keys(
     """Plot the selected tracking task, policy inputs, and active reward terms."""
     plot_keys: list[PlotKey] = list(PLOTKS)
     mode = curriculum.tracking_mode if curriculum is not None else cfg.env.tracking_mode
-    tracking_modes = (
-        ("position", "velocity") if mode == "position_velocity" else (mode,)
-    )
-    plot_keys.extend(
-        (Observable.OBS_TIME, TRACKING_INPUTS[kind])
-        for kind in tracking_modes if TRACKING_INPUTS[kind]
-    )
-    if curriculum is not None and mode == "velocity":
-        plot_keys.append((Observable.OBS_TIME, TRACKING_INPUTS["position"]))
+    plot_keys.extend(_tracking_plot_keys(mode, curriculum is not None))
     if cfg.env.yaw_tracking:
         plot_keys.append((Observable.OBS_TIME, YAW_INPUTS))
     if cfg.env.head_tracking:
@@ -1142,7 +1196,11 @@ def get_plot_keys(
         ])
     seen_observables = {
         Observable.OBS_TIME.value,
-        *[key.value for _, keys in plot_keys for key in keys],
+        *[
+            key.value
+            for row in plot_keys
+            for key in (row[1] + row[2] if len(row) == 3 else row[1])
+        ],
     }
     for observable in agent.inputs:
         if observable not in seen_observables:

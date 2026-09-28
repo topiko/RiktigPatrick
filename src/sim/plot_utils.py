@@ -35,6 +35,11 @@ def plot_episode(
     eps: Episode,
     keys: list[
         tuple[StateVarKey | Actions, tuple[StateVarKey | Actions | MiscKeys, ...]]
+        | tuple[
+            StateVarKey | Actions,
+            tuple[StateVarKey | Actions | MiscKeys, ...],
+            tuple[StateVarKey | Actions | MiscKeys, ...],
+        ]
     ],
     figw: float = 22,
     rowh: float = 3,
@@ -48,19 +53,30 @@ def plot_episode(
     if nrows == 1:
         axes = [axes]  # Ensure axes is always a list for consistency
 
-    for ax, (xkey, ykeys) in zip(axes, keys):
-        if not ykeys:
+    for ax, row in zip(axes, keys):
+        xkey, primary = row[:2]
+        secondary = row[2] if len(row) == 3 else ()
+        if not primary and not secondary:
             continue
-        for ykey in ykeys:
+        for ykey in primary:
             plot_stream(eps, xkey, ykey, ax)
-
+        handles, labels = ax.get_legend_handles_labels()
+        if secondary:
+            twin = ax.twinx()
+            twin.spines.top.set_visible(False)
+            for ykey in secondary:
+                plot_stream(eps, xkey, ykey, twin)
+            twin_handles, twin_labels = twin.get_legend_handles_labels()
+            handles += twin_handles
+            labels += twin_labels
+        title_key = (primary or secondary)[-1]
         ax.set_title(
-            f"{ykey.value} vs {xkey.value}",
+            f"{title_key.value} vs {xkey.value}",
             fontsize=10,
             fontweight="bold",
             loc="left",
         )
-        ax.legend(frameon=False, loc="upper right", fontsize=8)
+        ax.legend(handles, labels, frameon=False, loc="upper right", fontsize=8)
 
     axes[-1].set_xlabel("Time [s]")
 

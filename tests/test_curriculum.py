@@ -225,7 +225,8 @@ class CurriculumTests(unittest.TestCase):
         self.assertEqual(
             [trajectory.position_at(curriculum.cfg.locomotion_seconds)
              for trajectory in trajectories[:3]],
-            [0.05, 0.0, -0.05],
+            [float(velocity * curriculum.cfg.locomotion_seconds)
+             for velocity, _ in curriculum.straight_line_pairs],
         )
         curriculum.advance(agent, optimizer)
         commands = curriculum.prepare_rollout(dummy, agent)
@@ -361,8 +362,8 @@ class CurriculumTests(unittest.TestCase):
         raw = env.envs[0].unwrapped
         state = raw.state
         self.assertEqual(state.target_pos, 0)
-        self.assertIn(Target.TARGET_POS.value, agent.inputs)
-        self.assertIn(DerivedObs.CURRENT_POS.value, agent.inputs)
+        self.assertIn(DerivedObs.POSITION_ERROR.value, agent.inputs)
+        self.assertIn(DerivedObs.VELOCITY_ERROR.value, agent.inputs)
         state.derived_obs[DerivedObs.CURRENT_VEL][:] = 0.2
         for sensor in (Observable.LEFT_WHEEL_VEL, Observable.RIGHT_WHEEL_VEL):
             state.obs.set_observable(sensor, np.array([4.0]))
@@ -519,10 +520,14 @@ class CurriculumTests(unittest.TestCase):
         curriculum.advance(agent, optimizer)
         keys = get_plot_keys(cfg, agent, curriculum)
         self.assertIn(
-            (Observable.OBS_TIME, (Target.TARGET_POS, DerivedObs.CURRENT_POS)), keys
+            (Observable.OBS_TIME,
+             (Target.TARGET_POS, DerivedObs.CURRENT_POS),
+             (DerivedObs.POSITION_ERROR,)), keys
         )
         self.assertIn(
-            (Observable.OBS_TIME, (Target.TARGET_VEL, DerivedObs.CURRENT_VEL)), keys
+            (Observable.OBS_TIME,
+             (Target.TARGET_VEL, DerivedObs.CURRENT_VEL),
+             (DerivedObs.VELOCITY_ERROR,)), keys
         )
 
     def test_resumed_stage_names_include_a_compact_resume_label(self):
