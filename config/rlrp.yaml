@@ -34,9 +34,9 @@ reward:
 
 train:
   device: auto  # auto selects CUDA when available; cpu, cuda, or cuda:N also supported
-  policy_lr: 0.0001
+  policy_lr: 0.0005
   grad_clip: 500.0
-  tbptt_steps: 128  # detach recurrent gradient history every N rollout steps
+  tbptt_steps: 256  # detach recurrent gradient history every N rollout steps
   max_iterations: null  # null trains until interrupted
   resume_from: null  # full local/MLflow-downloaded .pt checkpoint (weights + Adam + RNG)
   resume_lr: null  # optional explicit Adam LR override after loading a checkpoint
@@ -71,7 +71,7 @@ curriculum:
   yaw_rates: [-0.5, 0.0, 0.5]
 
 guard:
-  enabled: false
+  enabled: true
   compare_deterministic: false  # optional paired diagnostic; gates still use sampled actions
   every: 10  # shared guard/curriculum evaluation interval; initial evaluation sets baseline
   episodes: 50  # fixed validation batch; covers all curriculum command pairs
