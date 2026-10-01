@@ -261,6 +261,7 @@ class PolicyGuard:
             self.best_score = score
             self.bad_evaluations = 0
             self.recovery_failures = 0
+            self.recovering = False
             return "best"
 
         if not allow_rollback:
@@ -272,6 +273,7 @@ class PolicyGuard:
         if self.recovering:
             if not degraded:
                 self.recovery_failures = 0
+                self.recovering = False
                 return "recovery_accepted"
             self._restore_best(reduce_lr=False)
             self.recovery_failures += 1

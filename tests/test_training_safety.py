@@ -188,7 +188,7 @@ class TrainingSafetyTests(unittest.TestCase):
         self.assertTrue(guard.stop_requested)
         self.assertEqual(optimizer.param_groups[0]["lr"], 0.005)
 
-    def test_recovery_accepts_threshold_without_replacing_best_or_rewinding_state(self):
+    def test_recovery_acceptance_returns_to_periodic_validation(self):
         # Exercise both the relative-drop and absolute-drop branches of the floor.
         for best_score, absolute_drop, threshold in ((1000, 100, 700), (100, 50, 50)):
             with self.subTest(best=best_score):
@@ -200,26 +200,22 @@ class TrainingSafetyTests(unittest.TestCase):
                 self.assertEqual(guard.rejection_threshold, threshold)
                 guard.observe(threshold - 1, 1)
                 restored = capture_state(agent, optimizer, 1)
-                self.assertEqual(guard.observe(threshold - 1, 2), "recovery_rejected")
-                self.assertEqual(guard.recovery_failures, 1)
-                for score in (best_score - 1, (best_score + threshold) / 2,
-                              threshold, best_score):
-                    with torch.no_grad():
-                        next(agent.parameters()).add_(1)
-                    optimizer.state[next(agent.parameters())]["exp_avg"].add_(5)
-                    torch.rand(3)
-                    candidate = capture_state(agent, optimizer, 3)
-                    self.assertEqual(guard.observe(score, 3), "recovery_accepted")
-                    self.assert_nested_equal(capture_state(agent, optimizer, 3),
-                                             candidate)
-                    self.assertEqual(guard.recovery_failures, 0)
-                    self.assertEqual(guard.best_score, best_score)
-                    self.assertEqual(guard.rejection_threshold, threshold)
-                    self.assertTrue(guard.should_evaluate(3, 10))
-                # Several accepted decreases cannot shift the floor downward.
-                self.assertEqual(guard.observe(threshold - 1, 4), "recovery_rejected")
-                self.assert_nested_equal(agent.state_dict(), restored["model"])
-                self.assert_nested_equal(optimizer.state_dict(), restored["optimizer"])
+                self.assertEqual(guard.recovery_failures, 0)
+                with torch.no_grad():
+                    next(agent.parameters()).add_(1)
+                optimizer.state[next(agent.parameters())]["exp_avg"].add_(5)
+                torch.rand(3)
+                candidate = capture_state(agent, optimizer, 2)
+                self.assertEqual(guard.observe(threshold, 2), "recovery_accepted")
+                self.assert_nested_equal(capture_state(agent, optimizer, 2), candidate)
+                self.assertFalse(guard.recovering)
+                self.assertEqual(guard.recovery_failures, 0)
+                self.assertEqual(guard.best_score, best_score)
+                self.assertEqual(guard.rejection_threshold, threshold)
+                self.assertFalse(guard.should_evaluate(3, 10))
+                self.assertTrue(guard.should_evaluate(10, 10))
+                assert guard.best_state is not None
+                self.assert_nested_equal(restored["model"], guard.best_state["model"])
 
     def test_recovery_accepts_improvements_and_new_stage_resets_monitoring(self):
         agent, optimizer = agent_and_optimizer()
@@ -231,10 +227,10 @@ class TrainingSafetyTests(unittest.TestCase):
             next(agent.parameters()).add_(1)
         improved = capture_state(agent, optimizer, 3)
         self.assertEqual(guard.observe(101, 3), "best")
-        self.assertTrue(guard.recovering)  # A pass must not restart unchecked updates.
+        self.assertFalse(guard.recovering)
         self.assertEqual(guard.recovery_failures, 0)
         self.assertEqual(guard.rejection_threshold, 50.5)
-        self.assertEqual(guard.observe(50, 4), "recovery_rejected")
+        self.assertEqual(guard.observe(50, 4), "rollback")
         self.assert_nested_equal(agent.state_dict(), improved["model"])
         guard.reset_baseline()
         self.assertFalse(guard.recovering)
