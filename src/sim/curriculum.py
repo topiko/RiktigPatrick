@@ -8,7 +8,14 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from nn_ctrl.nns import Agent, continuous_action_settings
-from riktigpatric.patrick import Actions, DerivedObs, Observable, Target
+from riktigpatric.patrick import (
+    POSITION_ERROR_SCALE,
+    VELOCITY_ERROR_SCALE,
+    Actions,
+    DerivedObs,
+    Observable,
+    Target,
+)
 from riktigpatric.trajectory import PositionTrajectory
 from sim.rewards import validate_pitch_deadband
 from sim.utils import EpisodeBuffer
@@ -35,6 +42,12 @@ class Curriculum:
             "step_time_std": cfg.env.get("step_time_std", 0.0),
             "min_step_time": cfg.env.get("min_step_time", 0.007),
             "random_scale": cfg.env.random_scale,
+            "position_error_scale": cfg.env.get(
+                "position_error_scale", POSITION_ERROR_SCALE
+            ),
+            "velocity_error_scale": cfg.env.get(
+                "velocity_error_scale", VELOCITY_ERROR_SCALE
+            ),
         }
         self.cfg = cfg.curriculum
         self._validate_task(cfg)

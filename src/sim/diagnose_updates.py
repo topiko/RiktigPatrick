@@ -24,6 +24,7 @@ from sim.checkpoints import (
 )
 from sim.curriculum import Curriculum
 from sim.devices import seed_torch
+from sim.optimizers import make_optimizer
 from sim.train_agent import (
     make_agent,
     make_validation_env,
@@ -33,6 +34,7 @@ from sim.train_agent import (
 from sim.utils import (
     SingleEnvWrapper,
     actor_critic_losses,
+    clip_agent_gradients,
     ebufs2batchd,
     ebufs2bootstrap_values,
     ebufs2step_times,
@@ -121,17 +123,16 @@ def apply_gradients(agent, optimizer, gradient, max_norm, *, fresh_adam=False):
         optimizer.state.clear()
     for parameter, g in zip(agent.parameters(), gradient, strict=True):
         parameter.grad = None if g is None else g.to(agent.device).clone()
-    norm = torch.nn.utils.clip_grad_norm_(
-        agent.parameters(), max_norm, error_if_nonfinite=True,
-    )
+    metrics = clip_agent_gradients(agent, max_norm)
     optimizer.step()
     require_finite(agent.state_dict(), "diagnostic candidate")
-    return float(norm)
+    return metrics["optimization/gradient_norm"]
 
 
 def compare_updates(
     cfg, checkpoint, *, batches=4, seed=20000, learning_rate=None, loss="actor",
     fresh_adam=False, hold_velocity_weight=None, discount=None, validation_seeds=None,
+    critic_learning_rate=None,
 ):
     """Restore the same model/Adam before every batch and every candidate update.
 
@@ -150,9 +151,12 @@ def compare_updates(
         training_cfg.rl.discount = discount
     curriculum = Curriculum(training_cfg) if training_cfg.curriculum.enabled else None
     agent = make_agent(training_cfg)
-    optimizer = torch.optim.Adam(agent.parameters(), lr=training_cfg.train.policy_lr)
+    optimizer = make_optimizer(
+        agent, training_cfg.train.policy_lr, training_cfg.train.get("critic_lr")
+    )
     iteration = load_checkpoint(checkpoint, agent, optimizer, curriculum,
-                                learning_rate=learning_rate)
+                                learning_rate=learning_rate,
+                                critic_learning_rate=critic_learning_rate)
     if hold_velocity_weight is not None and (
         curriculum is None or curriculum.stage != "hold_position"
     ):
@@ -167,6 +171,7 @@ def compare_updates(
         "checkpoint": str(checkpoint), "iteration": iteration,
         "loss": loss, "fresh_adam": fresh_adam,
         "learning_rate": optimizer.param_groups[0]["lr"],
+        "critic_learning_rate": optimizer.param_groups[-1]["lr"],
         "training_discount": training_cfg.rl.discount,
         "bootstrap_time_limits": training_cfg.rl.get("bootstrap_time_limits", False),
         "training_hold_velocity_weight": (
@@ -226,6 +231,7 @@ def main():
     parser.add_argument("--batches", type=int, default=4)
     parser.add_argument("--seed", type=int, default=20000)
     parser.add_argument("--learning-rate", type=float)
+    parser.add_argument("--critic-learning-rate", type=float)
     parser.add_argument("--loss", choices=("actor", "joint"), default="actor")
     parser.add_argument("--fresh-adam", action="store_true")
     parser.add_argument("--hold-velocity-weight", type=float)
@@ -244,6 +250,7 @@ def main():
         learning_rate=args.learning_rate, loss=args.loss, fresh_adam=args.fresh_adam,
         hold_velocity_weight=args.hold_velocity_weight, discount=args.discount,
         validation_seeds=args.validation_seeds,
+        critic_learning_rate=args.critic_learning_rate,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")

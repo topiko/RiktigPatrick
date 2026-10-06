@@ -234,10 +234,21 @@ observed sampling/stability tradeoff that motivates this comparison.
 
 ### Recurrent training (TBPTT)
 
-Fresh training uses `train.policy_lr=0.0001`. The loss is
-`policy_loss + rl.value_loss_coef * value_loss`, with `rl.value_loss_coef=0.1` to
-reduce critic-driven changes to the shared GRU. `losses/value` remains the raw MSE;
+Fresh training uses the configured `train.policy_lr`. The loss is
+`policy_loss + rl.value_loss_coef * value_loss`, with `rl.value_loss_coef=1.0`.
+By default, `policy.detach_critic=true`: the critic receives detached shared
+features, so value regression updates only its private MLP, not the policy's
+encoders, GRU, layer normalization or action heads. `policy.critic_hidden_sizes=[64,64]`
+gives that MLP two hidden layers (previously one 16-unit layer). Set
+`policy.detach_critic=false` for a controlled shared-gradient comparison.
+`losses/value` remains the raw MSE;
 `losses/value_weighted` shows its actual contribution to `losses/total`.
+
+Adam has separate parameter groups controlled by `train.policy_lr` and
+`train.critic_lr` (both currently default to 0.0005). The critic group contains only
+the private value MLP. For example, `train.policy_lr=0.0001 train.critic_lr=0.0005`
+slows policy updates without slowing value regression. The actual rates are logged
+as `optimization/learning_rate` and `optimization/critic_learning_rate`.
 
 `train.kl_probe_every=32` records an observation and detached GRU state every 32
 control steps, excluding finished environments. After the optimizer step, the
@@ -255,7 +266,10 @@ at chunk boundaries. Memory is reset at the start of an episode.
 
 Training collects full episodes with gradients enabled, detaching the hidden
 state every N rollout steps. It then computes full-episode discounted returns
-and performs one backward pass, gradient clip and Adam step per rollout batch.
+and performs one backward pass and Adam step per rollout batch. With a detached
+critic, policy and critic gradients are clipped separately to `train.grad_clip`,
+so large critic gradients cannot scale down the policy update. Shared-gradient
+mode retains global clipping.
 The critic baseline is detached, losses are normalized by the batch's total valid
 transitions, and finished episodes and padded tails contribute no further loss.
 
@@ -445,6 +459,13 @@ requiring a return to the episode's starting position. Select the objective with
 | `position` | `derived/position_error` | Position error in meters |
 | `position_velocity` | `target/vel`, both tracking errors | Position error plus velocity error |
 | `none` | No tracking inputs | No position/velocity-reference penalty |
+
+The error inputs are `tanh((actual - target) / scale)`. Configure their denominators
+with `env.position_error_scale` (default **0.5 m**) and `env.velocity_error_scale`
+(default **0.2 m/s**); both must be positive and finite. The wider position scale
+keeps useful resolution during large drifts: a 0.3 m error now maps to about 0.537
+instead of 0.995. Training, validation, video rollouts and live target overrides
+use the same scales. Raw SI errors still determine rewards and promotion gates.
 
 All locomotion modes retain balancing and the selected head/yaw objectives. Position and `none` modes
 also retain the configured absolute wheel-speed penalty. Velocity and combined modes disable
@@ -808,9 +829,12 @@ one. Local-path resumes start a new parent run.
 
 `train.resume_from` and `policy.restore_id` are mutually exclusive. The former
 restores optimizer LR and progress; the latter loads policy weights with a new
-optimizer. `train.resume_lr` explicitly overrides the loaded Adam LR while retaining
-its moments; the default `null` preserves the saved LR (including guard reductions).
-Changing `train.policy_lr` alone affects fresh optimizers, not resumed ones.
+optimizer. `train.resume_lr` overrides the loaded policy-group LR and
+`train.resume_critic_lr` overrides the critic-group LR, retaining their moments.
+Both default to `null`, preserving saved rates (including guard reductions).
+Changing `train.policy_lr` or `train.critic_lr` alone affects fresh optimizers, not
+resumed ones. Legacy single-group checkpoints are split into policy and critic
+groups while preserving their moments and original LR in both groups.
 Input order, action specifications and network shapes must match for checkpoint
 resume. Keep the same task/seed overrides for reproducible continuation: saved
 configuration is included for reference, while the supplied run configuration
@@ -830,6 +854,14 @@ Policy tracking inputs now use bounded errors rather than absolute position
 references. Checkpoints created with the earlier raw position inputs are rejected;
 start a fresh run after this input change. Curriculum resume of compatible
 checkpoints still restores the stage, streak, weights and Adam state.
+
+The expanded critic requires a matching `policy.critic_hidden_sizes` on resume.
+For a checkpoint with the previous one-layer critic, explicitly use
+`policy.critic_hidden_sizes=[16]`; the detached-gradient setting can then be
+enabled without changing its weights. Use `env.position_error_scale=0.1` to retain
+the old bounded-input semantics. Normal checkpoint resume restores Adam; guard
+rollbacks instead reset it as described below. New runs use the expanded critic
+and wider position scale by default. Changed error scales reset promotion streaks.
 
 Promotion archives `stage_<name>_complete.pt`, enables the next heads, and resets
 the guard baseline. New-stage validation establishes its own `best.pt`; guard
@@ -861,28 +893,29 @@ threshold = best_return - max(abs(best_return) * guard.drop_fraction,
 ```
 
 Both the relative and absolute drop limits must therefore be exceeded.
-Rollback restores the best weights and optimizer moments, multiplies the current
-learning rate by `guard.lr_factor=0.95` (down to `guard.min_lr`), and continues at
-the current iteration and sampling state.
+Rollback restores the best weights and clears all Adam moments and step counters.
+It multiplies each group's current learning rate by `guard.lr_factor=0.95`
+(down to `guard.min_lr`) and continues at the current iteration and sampling state.
 
 **After a rollback, every subsequent update is checked immediately against the
 same threshold.** Candidates at or above it are accepted, even without a new best.
 Acceptance retains the current weights and Adam moments, saves progress to
-`latest.pt`, and clears the consecutive rejection count. Only a new record replaces
+`latest.pt`, clears the consecutive rejection count, and returns to scheduled
+validation every `guard.every` updates. Only a new record replaces
 `best.pt` and triggers best-policy recordings. The floor stays anchored to the best
 return and rises with new records; accepted declines cannot move it downward.
 
-Candidates below the floor restore the best weights and Adam moments, keeping the
-reduced LR unchanged and advancing training seeds. With `guard.recovery_attempts=3`,
-three consecutive such rejections stop training cleanly. Per-update checking remains
-active until the curriculum stage changes. Extra checks do not accelerate the
-curriculum's scheduled promotion gates.
+Candidates below the floor restore the best weights and clear Adam again, keeping
+the reduced LR unchanged and advancing training seeds. With
+`guard.recovery_attempts=20`, twenty consecutive such rejections stop training
+cleanly. Per-update checking ends after an accepted candidate or a new best.
+Extra checks do not accelerate the curriculum's scheduled promotion gates.
 Set `guard.recovery_attempts=0` to use the previous periodic rollback behavior.
 
 For example, best return 1185.33, `drop_fraction=0.30` and `absolute_drop=100` give
 a floor of **829.73**. Recovery scores around 1170 are accepted.
 
-On exhaustion, `latest.pt` contains the restored best policy and Adam state, current
+On exhaustion, `latest.pt` contains the restored best policy and empty Adam state, current
 LR, current RNG and next attempted iteration. `training_stop.json` records the
 reason, rejection threshold, best/candidate scores and rejected candidate's
 validation metrics. Both are
@@ -891,7 +924,9 @@ with other resumes, this starts a fresh guard baseline. The stop indicates a lac
 of accepted updates, not successful training.
 
 Metrics are grouped under `validation/returns/*`, `guard/*` and
-`optimization/{gradient_norm,learning_rate}`. Validation step numbers count
+`optimization/{gradient_norm,policy_gradient_norm,critic_gradient_norm,learning_rate,critic_learning_rate}`.
+Gradient norms are pre-clipping; separate policy/critic norms are logged in
+detached-critic mode. Validation step numbers count
 completed updates; zero is the initial benchmark. `guard.enabled=false` disables
 performance rollback, but local checkpoints and numerical update checks remain.
 When `guard/rolled_back=1`, `validation/*` describes the rejected candidate;
@@ -989,8 +1024,8 @@ The active simulation and agent use SI units:
 | `derived/pos` | Wheel odometry; plot/diagnostic only | m, 1 |
 | `target/vel` | Desired signed forward velocity | m/s, 1 |
 | `derived/vel` | Signed forward velocity from wheel odometry; plot/diagnostic only | m/s, 1 |
-| `derived/position_error` | `tanh((derived/pos - target/pos) / 0.1)` | normalized, 1 |
-| `derived/velocity_error` | `tanh((derived/vel - target/vel) / 0.2)` | normalized, 1 |
+| `derived/position_error` | `tanh((derived/pos - target/pos) / env.position_error_scale)` | normalized, 1 |
+| `derived/velocity_error` | `tanh((derived/vel - target/vel) / env.velocity_error_scale)` | normalized, 1 |
 | `target/yaw_rate` | Desired body-Z angular rate, positive left | rad/s, 1 |
 | `derived/yaw_rate` | Measured body-Z angular rate from gyro | rad/s, 1 |
 | `target/camera_pitch_world` | Desired optical-axis elevation above horizon | rad, 1 |

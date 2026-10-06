@@ -57,6 +57,8 @@ from riktigpatric.geometry import (
     camera_elevation,
 )
 from riktigpatric.patrick import (
+    POSITION_ERROR_SCALE,
+    VELOCITY_ERROR_SCALE,
     Actions,
     DerivedObs,
     Observable,
@@ -445,6 +447,8 @@ class GymRP(gymnasium.Env):
         step_time_std: float = 0.0,
         min_step_time: float = 0.007,
         max_episode_time: float = 20.0,
+        position_error_scale: float = POSITION_ERROR_SCALE,
+        velocity_error_scale: float = VELOCITY_ERROR_SCALE,
     ):
         self.timing = ControlTiming(step_time, step_time_std, min_step_time)
         self.step_time = step_time  # Nominal command-conversion/reference interval.
@@ -482,7 +486,11 @@ class GymRP(gymnasium.Env):
         self.dm_env = self._reset_env()
         assert self.dm_env is not None
 
-        self.state = State(wheel_radius=WHEEL_D / 2, record=record)
+        self.state = State(
+            wheel_radius=WHEEL_D / 2, record=record,
+            position_error_scale=position_error_scale,
+            velocity_error_scale=velocity_error_scale,
+        )
         self.target_pos = target_pos
         self.target_trajectory = target_trajectory
         self.target_vel = target_vel
@@ -510,6 +518,14 @@ class GymRP(gymnasium.Env):
     def pitch_deadband(self, value: float | None):
         validate_pitch_deadband(value)
         self._pitch_deadband = value
+
+    @property
+    def position_error_scale(self) -> float:
+        return self.state.position_error_scale
+
+    @property
+    def velocity_error_scale(self) -> float:
+        return self.state.velocity_error_scale
 
     @property
     def target_pos(self) -> float:

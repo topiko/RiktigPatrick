@@ -22,14 +22,13 @@ from omegaconf import DictConfig, OmegaConf
 
 from nn_ctrl.nns import Agent, ContinuousHead
 from riktigpatric.patrick import (
-    POSITION_ERROR_SCALE,
-    VELOCITY_ERROR_SCALE,
     Actions,
     DerivedObs,
     Observable,
     StateVar,
     StateVarKey,
     Target,
+    bounded_tracking_error,
 )
 from riktigpatric.trajectory import (
     HeadTrajectory,
@@ -48,6 +47,7 @@ from sim.checkpoints import (
 from sim.curriculum import Curriculum
 from sim.devices import evaluation_rng, resolve_device, seed_torch
 from sim.episode_io import resample_video_frames, save_episode_csv
+from sim.optimizers import make_optimizer
 from sim.plot_utils import plot_episode
 from sim.policy_probe import PolicyProbe
 from sim.utils import (
@@ -56,6 +56,7 @@ from sim.utils import (
     MiscKeys,
     SingleEnvWrapper,
     actor_critic_losses,
+    clip_agent_gradients,
     ebufs2batchd,
     ebufs2bootstrap_values,
     ebufs2step_times,
@@ -183,20 +184,20 @@ def _zero_hidden_state(
     return torch.where(done_t.view(1, -1, 1), torch.zeros_like(h), h)
 
 
-def _update_error_observations(obs_d):
+def _update_error_observations(obs_d, rp_env):
     if not {
         DerivedObs.CURRENT_POS, DerivedObs.CURRENT_VEL,
         Target.TARGET_POS, Target.TARGET_VEL,
     } <= obs_d.keys():
         return obs_d
-    obs_d[DerivedObs.POSITION_ERROR] = np.tanh(
-        (obs_d[DerivedObs.CURRENT_POS] - obs_d[Target.TARGET_POS])
-        / POSITION_ERROR_SCALE
-    ).astype(np.float32)
-    obs_d[DerivedObs.VELOCITY_ERROR] = np.tanh(
-        (obs_d[DerivedObs.CURRENT_VEL] - obs_d[Target.TARGET_VEL])
-        / VELOCITY_ERROR_SCALE
-    ).astype(np.float32)
+    obs_d[DerivedObs.POSITION_ERROR] = bounded_tracking_error(
+        obs_d[DerivedObs.CURRENT_POS], obs_d[Target.TARGET_POS],
+        np.asarray(rp_env.get_attr("position_error_scale"))[:, None],
+    )
+    obs_d[DerivedObs.VELOCITY_ERROR] = bounded_tracking_error(
+        obs_d[DerivedObs.CURRENT_VEL], obs_d[Target.TARGET_VEL],
+        np.asarray(rp_env.get_attr("velocity_error_scale"))[:, None],
+    )
     return obs_d
 
 
@@ -225,14 +226,14 @@ def add_targets(
             ],
             dtype=np.float32,
         )
-        return _update_error_observations(obs_d)
+        return _update_error_observations(obs_d, rp_env)
     key, attribute, values = (
         (Target.TARGET_VEL, "target_vel", target_velocities)
         if target_velocities is not None
         else (Target.TARGET_POS, "target_pos", target_positions)
     )
     return _update_error_observations(
-        _add_scalar_targets(obs_d, rp_env, key, attribute, values)
+        _add_scalar_targets(obs_d, rp_env, key, attribute, values), rp_env
     )
 
 
@@ -546,8 +547,10 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
         )
     if cfg.train.resume_from is not None and cfg.policy.restore_id is not None:
         raise ValueError("Choose a training checkpoint or an MLflow policy, not both")
-    if cfg.train.resume_lr is not None and cfg.train.resume_from is None:
-        raise ValueError("train.resume_lr requires train.resume_from")
+    if cfg.train.resume_from is None and any(
+        cfg.train.get(key) is not None for key in ("resume_lr", "resume_critic_lr")
+    ):
+        raise ValueError("train.resume_lr/resume_critic_lr require train.resume_from")
     curriculum = Curriculum(cfg) if cfg.curriculum.enabled else None
     # Setup MLflow if enabled
     if cfg.logging.mlflow.enabled:
@@ -573,15 +576,17 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
         curriculum.apply_policy(agent)
     LOG.info("Policy device %s; GRU hidden size %d, layers %d",
              agent.device, agent.rnn.hidden_size, agent.rnn.num_layers)
-    optimizer = torch.optim.Adam(agent.parameters(), lr=cfg.train.policy_lr)
+    optimizer = make_optimizer(agent, cfg.train.policy_lr, cfg.train.get("critic_lr"))
     next_iteration = 0
     if resume_path is not None:
         next_iteration = load_checkpoint(
             resume_path, agent, optimizer, curriculum,
             learning_rate=cfg.train.resume_lr,
+            critic_learning_rate=cfg.train.get("resume_critic_lr"),
         )
-        LOG.info("Resumed at iteration %d; Adam LR %.3g",
-                 next_iteration, optimizer.param_groups[0]["lr"])
+        LOG.info("Resumed at iteration %d; Adam LR policy %.3g, critic %.3g",
+                 next_iteration, optimizer.param_groups[0]["lr"],
+                 optimizer.param_groups[-1]["lr"])
     agent.train()
     require_finite(agent.state_dict(), "model")
     guard = PolicyGuard(
@@ -609,6 +614,10 @@ def train(cfg: DictConfig, resources: ExitStack, device: torch.device | None = N
 
 def make_agent(cfg: DictConfig, device: torch.device | None = None) -> Agent:
     device = resolve_device(cfg.train.device if device is None else device)
+    critic_hidden_sizes = tuple(cfg.policy.get("critic_hidden_sizes", (16,)))
+    detach_critic = cfg.policy.get("detach_critic", False)
+    if type(detach_critic) is not bool:
+        raise ValueError("policy.detach_critic must be a boolean")
     if cfg.policy.restore_id is not None:
         LOG.info("Restoring agent from MLflow model ID: %s", cfg.policy.restore_id)
         agent = mlflow.pytorch.load_model(
@@ -622,15 +631,21 @@ def make_agent(cfg: DictConfig, device: torch.device | None = None) -> Agent:
             )
             or agent.rnn.hidden_size != cfg.policy.hsize
             or agent.rnn.num_layers != cfg.policy.n_rnnlayers
+            or tuple(
+                layer.out_features for layer in agent.value_head[:-1]
+                if isinstance(layer, torch.nn.Linear)
+            ) != critic_hidden_sizes
         ):
             raise ValueError(
                 "Restored policy architecture/inputs/actions do not match this task"
             )
         agent.inactive_actions = ()  # Non-curriculum fine-tuning enables every head.
+        agent.detach_critic = detach_critic
         return agent.to(device)
     return Agent(
         inputs=get_policy_inputs(cfg), actions=cfg.policy.actions,
         hsize=cfg.policy.hsize, n_rnnlayers=cfg.policy.n_rnnlayers,
+        critic_hidden_sizes=critic_hidden_sizes, detach_critic=detach_critic,
     ).to(device)
 
 
@@ -703,9 +718,7 @@ def training_update(
         loss = policy_loss + weighted_value_loss
         require_finite((policy_loss, values_loss, loss), "loss")
         loss.backward()
-        gradient_norm = torch.nn.utils.clip_grad_norm_(
-            agent.parameters(), max_norm=cfg.train.grad_clip, error_if_nonfinite=True
-        )
+        gradient_metrics = clip_agent_gradients(agent, cfg.train.grad_clip)
         optimizer.step()
         require_finite(agent.state_dict(), "updated model")
         require_finite(optimizer.state_dict(), "updated optimizer")
@@ -732,8 +745,11 @@ def training_update(
             "timing/step_time/min": float(valid_times.min()),
             "timing/step_time/max": float(valid_times.max()),
             "timing/step_time/std": float(valid_times.std(unbiased=False)),
-            "optimization/gradient_norm": float(gradient_norm),
+            **gradient_metrics,
             "optimization/learning_rate": float(optimizer.param_groups[0]["lr"]),
+            "optimization/critic_learning_rate": float(
+                optimizer.param_groups[-1]["lr"]
+            ),
             **probe_metrics,
             **{
                 f"policy/std/{action}": float(head.std.detach())
@@ -858,15 +874,17 @@ def start_stage_run(cfg, agent, curriculum: Curriculum, iteration: int, stage_ru
 
 def _log_guard_decision(guard, decision, score):
     if decision == "rollback":
-        LOG.warning("Policy degradation: restored best return %.2f; LR now %.3g",
-                    guard.best_score, guard.optimizer.param_groups[0]["lr"])
+        LOG.warning(
+            "Policy degradation: restored best return %.2f; reset Adam; LR %.3g",
+            guard.best_score, guard.optimizer.param_groups[0]["lr"],
+        )
         if guard.recovering:
             LOG.warning("Checking every subsequent update against rejection threshold "
                         "%.2f; stopping after %d consecutive degraded attempts",
                         guard.rejection_threshold, guard.recovery_attempts)
     elif decision in ("recovery_rejected", "recovery_stop"):
         LOG.warning("Recovery attempt %d/%d rejected: candidate %.2f below %.2f "
-                    "(best %.2f); restored weights and Adam, kept LR %.3g",
+                    "(best %.2f); restored weights and reset Adam, kept LR %.3g",
                     guard.recovery_failures, guard.recovery_attempts, score,
                     guard.rejection_threshold, guard.best_score,
                     guard.optimizer.param_groups[0]["lr"])
@@ -939,6 +957,7 @@ def check_policy_guard(
             "guard/rollbacks": guard.rollbacks,
             "guard/rolled_back": int(rejected),
             "guard/learning_rate": guard.optimizer.param_groups[0]["lr"],
+            "guard/critic_learning_rate": guard.optimizer.param_groups[-1]["lr"],
             "guard/recovering": int(guard.recovering),
             "guard/recovery_failures": guard.recovery_failures,
             "guard/stop_requested": int(guard.stop_requested),

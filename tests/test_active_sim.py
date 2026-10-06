@@ -49,6 +49,63 @@ class ActiveSimulationTests(unittest.TestCase):
     def setUpClass(cls):
         torch.set_num_threads(1)
 
+    def test_configured_error_scales_match_targets_and_steps_in_both_backends(self):
+        for count in (1, 3):
+            cfg = config()
+            cfg.env.n_parallel = count
+            cfg.env.max_episode_steps = 5
+            cfg.env.position_error_scale = 0.8
+            cfg.env.velocity_error_scale = 0.4
+            env = register_and_make_env(cfg)
+            if isinstance(env, Env):
+                env = SingleEnvWrapper(env)
+            self.addCleanup(env.close)
+            obs, _ = env.reset(seed=1)
+            positions = np.linspace(0.3, 0.9, count)
+            velocities = np.linspace(-0.2, 0.4, count)
+            obs = add_targets(obs, env, target_positions=positions)
+            obs = add_targets(obs, env, target_velocities=velocities)
+            np.testing.assert_allclose(obs[DerivedObs.POSITION_ERROR][:, 0],
+                                       np.tanh(-positions / 0.8), atol=1e-7)
+            np.testing.assert_allclose(obs[DerivedObs.VELOCITY_ERROR][:, 0],
+                                       np.tanh(-velocities / 0.4), atol=1e-7)
+            trajectories = [[[0, 0.2], [0.1, 0.6]]] * count
+            obs = add_targets(obs, env, target_trajectories=trajectories)
+            np.testing.assert_allclose(obs[DerivedObs.POSITION_ERROR],
+                                       np.tanh(-0.2 / 0.8), atol=1e-7)
+            actions = {action: np.zeros((count, 1), dtype=np.float32)
+                       for action in cfg.policy.actions}
+            obs, _, _, _, _ = env.step(actions)
+            for error, actual, target, scale in (
+                (DerivedObs.POSITION_ERROR, DerivedObs.CURRENT_POS,
+                 Target.TARGET_POS, 0.8),
+                (DerivedObs.VELOCITY_ERROR, DerivedObs.CURRENT_VEL,
+                 Target.TARGET_VEL, 0.4),
+            ):
+                np.testing.assert_allclose(obs[error],
+                                           np.tanh((obs[actual] - obs[target]) / scale),
+                                           atol=1e-7)
+
+    def test_state_scales_validate_and_live_targets_refresh_errors(self):
+        for name in ("position_error_scale", "velocity_error_scale"):
+            for value in (0, -1, np.nan, np.inf):
+                with (
+                    self.subTest(name=name, value=value), self.assertRaises(ValueError)
+                ):
+                    if name == "position_error_scale":
+                        State(wheel_radius=0.05, position_error_scale=value)
+                    else:
+                        State(wheel_radius=0.05, velocity_error_scale=value)
+        state = State(
+            wheel_radius=0.05, position_error_scale=0.5, velocity_error_scale=0.4
+        )
+        state.target_pos = 0.3
+        state.target_vel = 0.2
+        np.testing.assert_allclose(state.snapshot()[DerivedObs.POSITION_ERROR],
+                                   np.tanh(-0.3 / 0.5), atol=1e-7)
+        np.testing.assert_allclose(state.snapshot()[DerivedObs.VELOCITY_ERROR],
+                                   np.tanh(-0.2 / 0.4), atol=1e-7)
+
     def test_odometry_is_in_meters_and_filter_is_in_radians(self):
         state = State(wheel_radius=0.05)
         state.reset()

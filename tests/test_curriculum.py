@@ -340,12 +340,15 @@ class CurriculumTests(unittest.TestCase):
         self.assertEqual(
             agent.inactive_actions, (Actions.VEL_WHEEL_DIFF, *HEAD_ACTIONS)
         )
-        changed = deepcopy(cfg)
-        changed.guard.seed += 1
-        restarted = Curriculum(changed)
-        restarted.load_state_dict(before["curriculum"])
-        self.assertEqual(restarted.stage, "straight_line")
-        self.assertEqual(restarted.success_streak, 0)
+        for setting in (
+            "guard.seed", "env.position_error_scale", "env.velocity_error_scale"
+        ):
+            changed = deepcopy(cfg)
+            OmegaConf.update(changed, setting, OmegaConf.select(cfg, setting) + 1)
+            restarted = Curriculum(changed)
+            restarted.load_state_dict(before["curriculum"])
+            self.assertEqual(restarted.stage, "straight_line")
+            self.assertEqual(restarted.success_streak, 0)
         with self.assertRaisesRegex(ValueError, "curriculum.enabled"):
             restore_state(agent, optimizer, before)
         legacy = capture_state(agent, optimizer, 17)

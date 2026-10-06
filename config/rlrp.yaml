@@ -16,7 +16,7 @@ logging:
 rl:
   discount: 0.995
   bootstrap_time_limits: true  # detached V(final state) at time limits; falls use zero
-  value_loss_coef: 0.1  # limit critic influence on the shared recurrent features
+  value_loss_coef: 1.0  # scale value-head regression loss
 
 reward:
   # These keys need to exactly match the values in patrick/Observables
@@ -35,11 +35,13 @@ reward:
 train:
   device: auto  # auto selects CUDA when available; cpu, cuda, or cuda:N also supported
   policy_lr: 0.0005
+  critic_lr: 0.0005
   grad_clip: 500.0
   tbptt_steps: 256  # detach recurrent gradient history every N rollout steps
   max_iterations: null  # null trains until interrupted
   resume_from: null  # full local/MLflow-downloaded .pt checkpoint (weights + Adam + RNG)
-  resume_lr: null  # optional explicit Adam LR override after loading a checkpoint
+  resume_lr: null  # optional policy-group Adam LR override on resume
+  resume_critic_lr: null  # optional critic-group LR override on resume
   kl_probe_every: 32  # sample conditional before/after policy KL; 0 disables diagnostics
   target_positions: null  # optional list of n_parallel fixed targets, in meters
   target_trajectories: null  # optional per-env lists of [time, position] waypoints
@@ -97,6 +99,8 @@ env:
   target_pos: 0.0  # default fixed position target, meters from episode origin
   target_trajectory: null  # optional default trajectory for training and evaluation
   target_vel: 0.0  # default low-level command: balance and stop, m/s
+  position_error_scale: 0.5  # meters; tanh((position - target) / scale)
+  velocity_error_scale: 0.2  # m/s; tanh((velocity - target) / scale)
   yaw_tracking: true
   target_yaw_rate: 0.0  # rad/s about body +Z; positive turns left
   head_tracking: true
@@ -116,6 +120,8 @@ env:
 policy:
   hsize: 64
   n_rnnlayers: 1
+  critic_hidden_sizes: [64, 64]
+  detach_critic: true
   restore_id: null #m-29426a56db26487faa3adad22b42489a
   actions:
     act/accelerate_both_wheels:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
@@ -157,6 +158,10 @@ class SingleEnvWrapper:
             truncated_batched,
             reward_info_batched,
         )
+
+    def get_attr(self, name):
+        """Match SyncVectorEnv.get_attr for one environment."""
+        return (self.env.get_wrapper_attr(name),)
 
     def set_attr(self, name, values):
         """Match SyncVectorEnv.set_attr for a batch containing one environment."""
@@ -360,6 +365,30 @@ def get_advantages(returns: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
         )
     advantages = returns - values.detach()
     return advantages
+
+
+def clip_agent_gradients(agent, max_norm):
+    """Keep a detached critic's gradient scale out of the policy clipping decision."""
+    if not getattr(agent, "detach_critic", False):
+        norm = torch.nn.utils.clip_grad_norm_(
+            agent.parameters(), max_norm=max_norm, error_if_nonfinite=True,
+        )
+        return {"optimization/gradient_norm": float(norm)}
+    groups = {"policy": [], "critic": []}
+    for name, parameter in agent.named_parameters():
+        group = "critic" if name.startswith("value_head.") else "policy"
+        groups[group].append(parameter)
+    norms = {
+        name: float(torch.nn.utils.clip_grad_norm_(
+            parameters, max_norm=max_norm, error_if_nonfinite=True,
+        ))
+        for name, parameters in groups.items()
+    }
+    return {
+        "optimization/gradient_norm": math.hypot(*norms.values()),
+        **{f"optimization/{name}_gradient_norm": norm
+           for name, norm in norms.items()},
+    }
 
 
 def actor_critic_losses(logps, returns, values, valid_mask):

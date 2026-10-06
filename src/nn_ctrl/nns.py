@@ -143,6 +143,8 @@ class Agent(nn.Module):
         actions: dict[str, dict],
         hsize: int = 64,
         n_rnnlayers: int = 1,
+        critic_hidden_sizes: tuple[int, ...] = (64, 64),
+        detach_critic: bool = True,
     ):
         """Initialize agent.
 
@@ -154,6 +156,13 @@ class Agent(nn.Module):
         self.inputs = inputs
         self.actions = actions
         self.inactive_actions: tuple[Actions, ...] = ()
+        if type(detach_critic) is not bool:
+            raise ValueError("detach_critic must be a boolean")
+        if not critic_hidden_sizes or any(
+            type(width) is not int or width < 1 for width in critic_hidden_sizes
+        ):
+            raise ValueError("critic_hidden_sizes must contain positive integers")
+        self.detach_critic = detach_critic
 
         # Parse inputs and convert string keys to Observables
 
@@ -205,11 +214,13 @@ class Agent(nn.Module):
         self.action_heads = nn.ModuleDict(heads)
 
         # Value head for critic (if using actor-critic method)
-        self.value_head = nn.Sequential(
-            nn.Linear(hsize, 16),
-            nn.ReLU(),
-            nn.Linear(16, 1),
-        )
+        critic_layers: list[nn.Module] = []
+        width = hsize
+        for hidden_size in critic_hidden_sizes:
+            critic_layers.extend((nn.Linear(width, hidden_size), nn.ReLU()))
+            width = hidden_size
+        critic_layers.append(nn.Linear(width, 1))
+        self.value_head = nn.Sequential(*critic_layers)
 
     @property
     def device(self) -> torch.device:
@@ -258,7 +269,8 @@ class Agent(nn.Module):
             action_logits[Actions.from_str(action_key)] = mod_(x_)
 
         # (B, hsize) -> (B, 1)
-        values = self.value_head(x_)
+        critic_features = x_.detach() if getattr(self, "detach_critic", False) else x_
+        values = self.value_head(critic_features)
 
         return action_logits, values, h
 

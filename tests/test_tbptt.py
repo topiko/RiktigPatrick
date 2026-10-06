@@ -88,7 +88,7 @@ class TBPTTTests(unittest.TestCase):
                     buffer, = rollout(scripted_env((7,)), agent, tbptt_steps=size)
                 for time in range(1, 7):
                     gradients = torch.autograd.grad(
-                        buffer.values_l[time], hidden_states[:time],
+                        buffer.logps_l[time], hidden_states[:time],
                         allow_unused=True, retain_graph=True,
                     )
                     for earlier, grad in enumerate(gradients):

@@ -346,6 +346,13 @@ class Obs:
         return dict(self._values)
 
 
+def bounded_tracking_error(actual, target, scale):
+    """Dimensionless tracking error; supports scalar and batched observations."""
+    return np.tanh((np.asarray(actual, dtype=np.float64) - target) / scale).astype(
+        np.float32
+    )
+
+
 class State:
     """Shared sensor processing, independent of physics and reward calculation.
 
@@ -358,7 +365,17 @@ class State:
         self,
         wheel_radius: float,
         record: bool = False,
+        position_error_scale: float = POSITION_ERROR_SCALE,
+        velocity_error_scale: float = VELOCITY_ERROR_SCALE,
     ):
+        for name, scale in (
+            ("position_error_scale", position_error_scale),
+            ("velocity_error_scale", velocity_error_scale),
+        ):
+            if not np.isfinite(scale) or scale <= 0:
+                raise ValueError(f"{name} must be positive and finite")
+        self.position_error_scale = float(position_error_scale)
+        self.velocity_error_scale = float(velocity_error_scale)
         self.wheel_radius = wheel_radius
         self.mahony = Mahony()
         self._record = record
@@ -394,6 +411,7 @@ class State:
         """Set a fixed target, replacing any active trajectory."""
         self._set_target(Target.TARGET_POS, value)
         self._target_trajectory = None
+        self._update_tracking_errors()
 
     @property
     def target_vel(self) -> float:
@@ -403,6 +421,7 @@ class State:
     def target_vel(self, value: float):
         """Update the signed forward-velocity command without resetting state."""
         self._set_target(Target.TARGET_VEL, value)
+        self._update_tracking_errors()
 
     @property
     def target_yaw_rate(self) -> float:
@@ -428,6 +447,7 @@ class State:
         """Replace the trajectory, sampling it at the current episode time."""
         self._target_trajectory = trajectory
         self._update_target()
+        self._update_tracking_errors()
 
     @property
     def head_target(self) -> np.ndarray:
@@ -458,19 +478,13 @@ class State:
         self._update_target()
 
     def _update_tracking_errors(self):
-        position_error = (
-            self.derived_obs[DerivedObs.CURRENT_POS][0]
-            - self.targets[Target.TARGET_POS][0]
+        self.derived_obs[DerivedObs.POSITION_ERROR] = bounded_tracking_error(
+            self.derived_obs[DerivedObs.CURRENT_POS], self.targets[Target.TARGET_POS],
+            self.position_error_scale,
         )
-        velocity_error = (
-            self.derived_obs[DerivedObs.CURRENT_VEL][0]
-            - self.targets[Target.TARGET_VEL][0]
-        )
-        self.derived_obs[DerivedObs.POSITION_ERROR] = np.tanh(
-            np.array([position_error / POSITION_ERROR_SCALE], dtype=np.float32)
-        )
-        self.derived_obs[DerivedObs.VELOCITY_ERROR] = np.tanh(
-            np.array([velocity_error / VELOCITY_ERROR_SCALE], dtype=np.float32)
+        self.derived_obs[DerivedObs.VELOCITY_ERROR] = bounded_tracking_error(
+            self.derived_obs[DerivedObs.CURRENT_VEL], self.targets[Target.TARGET_VEL],
+            self.velocity_error_scale,
         )
 
     def _update_target(self):

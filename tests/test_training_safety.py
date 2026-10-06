@@ -1,4 +1,4 @@
-"""Training recovery must preserve weights, Adam state, RNG, and episode alignment."""
+"""Checkpoint/failure recovery is exact; performance rollbacks reset Adam."""
 
 import json
 import os
@@ -55,7 +55,7 @@ def agent_and_optimizer():
         Actions.ACC_BOTH_WHEELS.value: {"type": "discrete", "bins": [-1.0, 0.0, 1.0]}
     }, hsize=4)
     optimizer = torch.optim.Adam(agent.parameters(), lr=0.01)
-    # Initialize Adam's moving averages so restoring only weights cannot pass.
+    # Prime optimizer moments for resume and rollback assertions.
     torch.stack([p.square().sum() for p in agent.parameters()]).sum().backward()
     optimizer.step()
     optimizer.zero_grad(set_to_none=True)
@@ -143,7 +143,7 @@ class TrainingSafetyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             restore_state(agent, optimizer, state)
 
-    def test_guard_needs_sustained_drop_and_restores_adam_with_lower_lr(self):
+    def test_guard_needs_sustained_drop_and_resets_adam_with_lower_lr(self):
         agent, optimizer = agent_and_optimizer()
         guard = PolicyGuard(agent, optimizer, recovery_attempts=0)
         self.assertEqual(guard.observe(100, 10), "best")
@@ -159,6 +159,7 @@ class TrainingSafetyTests(unittest.TestCase):
         self.assertEqual(guard.observe(19, 14), "rollback")
         self.assert_nested_equal(agent.state_dict(), best["model"])
         expected_optimizer = deepcopy(best["optimizer"])
+        expected_optimizer["state"] = {}
         expected_optimizer["param_groups"][0]["lr"] = 0.005
         self.assert_nested_equal(optimizer.state_dict(), expected_optimizer)
         torch.testing.assert_close(torch.get_rng_state(), rng, rtol=0, atol=0)
@@ -167,6 +168,7 @@ class TrainingSafetyTests(unittest.TestCase):
         self.assertEqual(guard.observe(0, 15), "keep")
         self.assertEqual(guard.observe(0, 16), "rollback")
         self.assertEqual(optimizer.param_groups[0]["lr"], 0.0025)
+        self.assertEqual(len(optimizer.state), 0)
 
     def test_recovery_rejects_material_drops_without_further_lr_decay(self):
         agent, optimizer = agent_and_optimizer()
@@ -178,7 +180,8 @@ class TrainingSafetyTests(unittest.TestCase):
         for score, decision in ((49, "recovery_rejected"), (0, "recovery_stop")):
             with torch.no_grad():
                 next(agent.parameters()).add_(1)
-            optimizer.state[next(agent.parameters())]["exp_avg"].add_(5)
+            torch.stack([p.square().sum() for p in agent.parameters()]).sum().backward()
+            optimizer.step()
             torch.rand(3)
             rng = torch.get_rng_state().clone()
             self.assertEqual(guard.observe(score, 2), decision)
@@ -187,6 +190,31 @@ class TrainingSafetyTests(unittest.TestCase):
             torch.testing.assert_close(torch.get_rng_state(), rng, rtol=0, atol=0)
         self.assertTrue(guard.stop_requested)
         self.assertEqual(optimizer.param_groups[0]["lr"], 0.005)
+
+    def test_guard_rollback_restarts_adam_like_a_fresh_optimizer(self):
+        agent, optimizer = agent_and_optimizer()
+        guard = PolicyGuard(agent, optimizer, patience=1)
+        guard.observe(100, 10)
+        with torch.no_grad():
+            next(agent.parameters()).add_(1)
+        torch.rand(5)
+        np.random.rand(5)
+        random.random()
+        before = capture_state(agent, optimizer, 20)
+        self.assertEqual(guard.observe(0, 20), "rollback")
+        self.assertEqual(len(optimizer.state), 0)
+        after = capture_state(agent, optimizer, 20)
+        for key in ("torch_rng", "numpy_rng", "python_rng", "next_iteration"):
+            self.assert_nested_equal(after[key], before[key])
+        fresh_agent = deepcopy(agent)
+        fresh_optimizer = torch.optim.Adam(fresh_agent.parameters(), lr=0.005)
+        for model in (agent, fresh_agent):
+            for parameter in model.parameters():
+                parameter.grad = torch.ones_like(parameter)
+        optimizer.step()
+        fresh_optimizer.step()
+        self.assert_nested_equal(agent.state_dict(), fresh_agent.state_dict())
+        self.assert_nested_equal(optimizer.state_dict(), fresh_optimizer.state_dict())
 
     def test_recovery_acceptance_returns_to_periodic_validation(self):
         # Exercise both the relative-drop and absolute-drop branches of the floor.
@@ -203,7 +231,10 @@ class TrainingSafetyTests(unittest.TestCase):
                 self.assertEqual(guard.recovery_failures, 0)
                 with torch.no_grad():
                     next(agent.parameters()).add_(1)
-                optimizer.state[next(agent.parameters())]["exp_avg"].add_(5)
+                loss = torch.stack([p.square().sum() for p in agent.parameters()]).sum()
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
                 torch.rand(3)
                 candidate = capture_state(agent, optimizer, 2)
                 self.assertEqual(guard.observe(threshold, 2), "recovery_accepted")
@@ -263,6 +294,7 @@ class TrainingSafetyTests(unittest.TestCase):
             self.assertEqual(latest["next_iteration"], 7)
             self.assert_nested_equal(latest["model"], before["model"])
             expected = deepcopy(before["optimizer"])
+            expected["state"] = {}
             expected["param_groups"][0]["lr"] = 0.005
             self.assert_nested_equal(latest["optimizer"], expected)
             report = json.loads((Path(folder) / "training_stop.json").read_text())

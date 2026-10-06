@@ -17,6 +17,7 @@ from omegaconf import OmegaConf
 
 from nn_ctrl.nns import Agent
 from sim.checkpoint_migrations import add_position_inputs
+from sim.optimizers import restore_optimizer_state
 
 if TYPE_CHECKING:
     from sim.curriculum import Curriculum
@@ -107,10 +108,26 @@ def _restore_rng(state: dict, device: torch.device):
     random.setstate(state["python_rng"])
 
 
+def _validate_policy_state(agent: Agent, state: dict):
+    if state["policy"] != policy_spec(agent):
+        raise ValueError("Checkpoint inputs/actions do not match this configuration")
+    expected = agent.state_dict()
+    if state["model"].keys() != expected.keys() or any(
+        not isinstance(value, torch.Tensor) or value.shape != expected[key].shape
+        for key, value in state["model"].items()
+    ):
+        raise ValueError(
+            "Checkpoint shape differs; match policy.hsize/n_rnnlayers/"
+            "critic_hidden_sizes"
+        )
+    require_finite(state["model"], "checkpoint/model")
+
+
 def restore_state(
     agent: Agent, optimizer: torch.optim.Optimizer, state: dict,
     *, restore_rng: bool = True, curriculum: Curriculum | None = None,
     restore_curriculum: bool = True,
+    restore_optimizer: bool = True,
 ) -> int:
     progress = state.get("curriculum")
     if (progress is None) != (curriculum is None):
@@ -124,23 +141,15 @@ def restore_state(
             or progress["stage"] != curriculum.stage
         ):
             raise ValueError("Cannot roll back across curriculum stages")
-    # Input order matters for the GRU's concatenated feature vector.
-    if state["policy"] != policy_spec(agent):
-        raise ValueError("Checkpoint inputs/actions do not match this configuration")
-    expected = agent.state_dict()
-    if state["model"].keys() != expected.keys() or any(
-        not isinstance(value, torch.Tensor) or value.shape != expected[key].shape
-        for key, value in state["model"].items()
-    ):
-        raise ValueError("Checkpoint shape differs; match policy.hsize/n_rnnlayers")
-    require_finite(state["model"], "checkpoint/model")
+    _validate_policy_state(agent, state)
     require_finite(state["optimizer"], "checkpoint/optimizer")
     agent.load_state_dict(state["model"])
     # Release old GPU moments before allocating their replacements.
     optimizer.state.clear()
     # PyTorch places moments with their parameters and keeps non-capturable Adam
     # step counters on CPU. Do not blindly move every optimizer tensor to CUDA.
-    optimizer.load_state_dict(deepcopy(state["optimizer"]))
+    if restore_optimizer:
+        restore_optimizer_state(optimizer, state["optimizer"])
     optimizer.zero_grad(set_to_none=True)
     if curriculum is not None:
         assert isinstance(progress, dict)
@@ -175,12 +184,17 @@ def save_checkpoint(
 def load_checkpoint(
     path: str | Path, agent: Agent, optimizer: torch.optim.Optimizer,
     curriculum: Curriculum | None = None,
-    *, learning_rate: float | None = None,
+    *, learning_rate: float | None = None, critic_learning_rate: float | None = None,
 ) -> int:
-    if learning_rate is not None and (
-        not math.isfinite(learning_rate) or learning_rate <= 0
+    for rate in (learning_rate, critic_learning_rate):
+        if rate is not None and (not math.isfinite(rate) or rate <= 0):
+            raise ValueError("Resume learning rate must be positive and finite")
+    if critic_learning_rate is not None and not any(
+        group.get("name") == "critic" for group in optimizer.param_groups
     ):
-        raise ValueError("Resume learning rate must be positive and finite")
+        raise ValueError(
+            "Critic learning rate requires a separate critic optimizer group"
+        )
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if checkpoint.get("format_version") != 1:
         raise ValueError("Unsupported training checkpoint format")
@@ -190,9 +204,10 @@ def load_checkpoint(
         if state is not checkpoint["state"]:
             LOG.info("Added position inputs with zero GRU influence; kept Adam moments")
     iteration = restore_state(agent, optimizer, state, curriculum=curriculum)
-    if learning_rate is not None:
-        for group in optimizer.param_groups:
-            group["lr"] = learning_rate
+    for group in optimizer.param_groups:
+        rate = critic_learning_rate if group.get("name") == "critic" else learning_rate
+        if rate is not None:
+            group["lr"] = rate
     return iteration
 
 
@@ -200,8 +215,8 @@ class PolicyGuard:
     """Keep a best validation state; roll back only sustained, substantial drops.
 
     A fresh/resumed run establishes a new validation baseline. Rollback restores
-    weights AND Adam state, but keeps current RNG/iteration progress so training
-    does not replay the exact same samples forever.
+    weights and clears Adam state, keeping current RNG/iteration progress so
+    training does not replay the exact same samples or optimizer momentum.
     After a rollback, check every update against the same degradation threshold.
     Consecutive rejected attempts stop recovery instead of repeatedly shrinking LR.
     """
@@ -304,12 +319,13 @@ class PolicyGuard:
         restore_state(
             self.agent, self.optimizer, self.best_state, restore_rng=False,
             curriculum=self.curriculum, restore_curriculum=False,
+            restore_optimizer=False,
         )
         if self.curriculum is not None:
             self.curriculum.success_streak = 0
         for group, previous in zip(self.optimizer.param_groups, previous_rates):
             group["lr"] = min(previous, max(
-                self.min_lr, min(previous, group["lr"]) * self.lr_factor
+                self.min_lr, previous * self.lr_factor
             )) if reduce_lr else previous
         self.bad_evaluations = 0
         self.rollbacks += 1
