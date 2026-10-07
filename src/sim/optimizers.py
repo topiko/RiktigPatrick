@@ -20,6 +20,13 @@ def make_optimizer(agent, policy_lr: float, critic_lr: float | None = None):
     ])
 
 
+def reset_policy_optimizer_state(agent, optimizer):
+    """Clear policy moments/counters while retaining the critic's Adam history."""
+    for name, parameter in agent.named_parameters():
+        if not name.startswith("value_head."):
+            optimizer.state.pop(parameter, None)
+
+
 def restore_optimizer_state(optimizer, saved):
     """Split the old single group in model parameter order, preserving Adam moments."""
     saved = deepcopy(saved)

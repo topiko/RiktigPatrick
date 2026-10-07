@@ -9,7 +9,7 @@ import torch
 from test_critic_isolation import agent_and_inputs
 
 from sim.checkpoints import PolicyGuard, capture_state, load_checkpoint, save_checkpoint
-from sim.optimizers import make_optimizer
+from sim.optimizers import make_optimizer, reset_policy_optimizer_state
 
 
 def prime(agent, optimizer):
@@ -106,6 +106,20 @@ class OptimizerTests(unittest.TestCase):
                 make_optimizer(agent, rate, 0.001)
             with self.assertRaisesRegex(ValueError, "critic learning rate"):
                 make_optimizer(agent, 0.001, rate)
+
+    def test_policy_reset_preserves_critic_history_even_in_single_group_optimizer(self):
+        agent, _ = agent_and_inputs()
+        optimizer = torch.optim.Adam(agent.parameters(), lr=0.003)
+        prime(agent, optimizer)
+        states = {name: deepcopy(optimizer.state[parameter])
+                  for name, parameter in agent.named_parameters()}
+        reset_policy_optimizer_state(agent, optimizer)
+        for name, parameter in agent.named_parameters():
+            if name.startswith("value_head."):
+                torch.testing.assert_close(optimizer.state[parameter], states[name])
+            else:
+                self.assertNotIn(parameter, optimizer.state)
+        self.assertEqual(optimizer.param_groups[0]["lr"], 0.003)
 
 
 if __name__ == "__main__":

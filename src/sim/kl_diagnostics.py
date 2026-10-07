@@ -79,10 +79,11 @@ class KLDiagnostics:
         self.trials = []
         self.replay = None
 
-    def record_trial(self, replay, candidate, rates):
+    def record_trial(self, replay, candidate, rates, *, reset_policy_adam=False):
         self.replay = replay
         trial = {**candidate, "attempt": len(self.trials) + 1,
                  "learning_rates": {"policy": rates[0], "critic": rates[-1]},
+                 "policy_adam_reset": reset_policy_adam,
                  "rejected": candidate["mean"] > self.settings.max_kl,
                  "episodes": deepcopy(replay.episode_metrics)}
         self.trials.append(trial)
@@ -256,6 +257,11 @@ class KLDiagnostics:
             "leave_one_out_reference": (
                 "all original trajectories, including omitted episode"
             ),
+            "leave_one_out_optimizer_state": (
+                "original Adam from initial rejected trial"
+            ),
+            "lr_safety": self.settings.lr_safety,
+            "reset_policy_adam": self.settings.reset_policy_adam,
             "tbptt_steps": self.tbptt_steps, "value_loss_coef": self.value_coef,
             "max_kl": self.settings.max_kl, "trials": self.trials,
             "episodes": [], "leave_one_out": [],

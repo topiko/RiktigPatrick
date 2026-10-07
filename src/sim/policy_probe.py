@@ -164,7 +164,8 @@ class RecurrentPolicyReplay:
             if self.actions else torch.zeros(self.samples, device=agent.device)
         ).cpu()
         self.episode_metrics = [
-            {"index": index, "mean": float(values.mean()), "max": float(values.max()),
+            {"index": index, "min": float(values.min()),
+             "mean": float(values.mean()), "max": float(values.max()),
              "steps": length}
             for index, (length, values) in enumerate(zip(
                 self.lengths, joint.split(self.lengths), strict=True
@@ -172,7 +173,8 @@ class RecurrentPolicyReplay:
         ]
         means = np.array([episode["mean"] for episode in self.episode_metrics])
         return {
-            "mean": float(joint.mean()), "max": float(joint.max()),
+            "min": float(joint.min()), "mean": float(joint.mean()),
+            "max": float(joint.max()),
             "samples": float(self.samples),
             "episode_mean_max": float(means.max()),
             "episode_mean_p95": float(np.quantile(means, 0.95)),

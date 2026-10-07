@@ -1059,12 +1059,18 @@ def _log_training_update(cfg, iteration, metrics, reports=()):
              iteration, metrics["losses/policy"], metrics["losses/value"],
              metrics["returns/mean"], metrics["episodes/length/mean"])
     if "kl_guard/kl_mean" in metrics:
-        LOG.info("KL step: accepted=%d trials=%d initial=%.6g final=%.6g; "
-                 "last worst trajectory=%s (mean %s)",
-                 metrics["kl_guard/accepted"], metrics["kl_guard/attempts"],
-                 metrics["kl_guard/initial_kl_mean"], metrics["kl_guard/kl_mean"],
-                 metrics.get("kl_guard/last_candidate_worst_episode"),
-                 metrics.get("kl_guard/last_candidate_episode_mean_max"))
+        if metrics["kl_guard/accepted"] and metrics["kl_guard/attempts"] == 1:
+            LOG.info("KL batch: min=%.6g mean=%.6g max=%.6g",
+                     metrics["kl_guard/kl_min"], metrics["kl_guard/kl_mean"],
+                     metrics["kl_guard/kl_max"])
+        else:
+            LOG.info("KL step: accepted=%d trials=%d initial=%.6g final=%.6g; "
+                     "policy Adam reset=%d; last worst trajectory=%s (mean %s)",
+                     metrics["kl_guard/accepted"], metrics["kl_guard/attempts"],
+                     metrics["kl_guard/initial_kl_mean"], metrics["kl_guard/kl_mean"],
+                     metrics["kl_guard/policy_adam_reset"],
+                     metrics.get("kl_guard/last_candidate_worst_episode"),
+                     metrics.get("kl_guard/last_candidate_episode_mean_max"))
     pushed = (
         cfg.logging.mlflow.enabled and iteration % cfg.logging.mlflow.push_freq == 0
     )

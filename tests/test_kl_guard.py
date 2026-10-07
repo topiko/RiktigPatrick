@@ -1,5 +1,6 @@
 """Full-history KL and backtracking must not replay optimizer momentum or physics."""
 
+import math
 import random
 import unittest
 from copy import deepcopy
@@ -16,7 +17,7 @@ from nn_ctrl.nns import Agent, ContinuousHead
 from riktigpatric.patrick import Actions, Observable, StateVarKey
 from sim.checkpoints import capture_state, restore_state
 from sim.kl_guard import KLGuardSettings, guarded_optimizer_step
-from sim.optimizers import make_optimizer
+from sim.optimizers import make_optimizer, reset_policy_optimizer_state
 from sim.policy_probe import PolicyProbe, RecurrentPolicyReplay
 from sim.train_agent import rollout, training_rollout, training_update
 from sim.utils import EpisodeBuffer
@@ -118,6 +119,7 @@ class KLGuardTests(unittest.TestCase):
                 obs[Observable.OBS_TIME].fill(999)
         actual = replay.metrics(agent)
         self.assertEqual(actual["samples"], 9)
+        self.assertEqual(actual["min"], 0)
         self.assertEqual(len(replay.episode_metrics), 3)
         self.assertEqual([row["steps"] for row in replay.episode_metrics], [1, 3, 5])
         self.assertEqual(actual["worst_episode"], 2)
@@ -158,23 +160,33 @@ class KLGuardTests(unittest.TestCase):
         self.assertFalse(agent.training)
 
     def test_real_gaussian_update_backtracks_to_kl_budget(self):
-        agent = mixed_agent()
-        agent.inactive_actions = (Actions.VEL_WHEEL_DIFF,)
-        optimizer = make_optimizer(agent, 0.03, 0.002)
-        before = capture_state(agent, optimizer, 0)
-        head = agent.action_heads[Actions.ACC_BOTH_WHEELS]
-        assert isinstance(head, ContinuousHead) and head.bias is not None
-        head.bias.grad = -torch.ones_like(head.bias)
-        metrics = guarded_optimizer_step(
-            agent, optimizer, before, buffers(), KLGuardSettings(enabled=True),
-        )
-        self.assertEqual(metrics["kl_guard/attempts"], 2)
-        self.assertEqual(metrics["kl_guard/accepted"], 1)
-        self.assertAlmostEqual(metrics["kl_guard/kl_mean"], 0.01125, places=5)
-        self.assertAlmostEqual(float(head.bias.detach()), 0.015, places=6)
-        self.assertEqual([g["lr"] for g in optimizer.param_groups], [0.015, 0.002])
-        self.assertEqual(optimizer.state[head.bias]["step"], 1)
-        self.assertAlmostEqual(metrics["kl_guard/initial_kl_mean"], 0.045, places=5)
+        for safety in (0.9, 0.95):
+            with self.subTest(safety=safety):
+                agent = mixed_agent()
+                agent.inactive_actions = (Actions.VEL_WHEEL_DIFF,)
+                optimizer = make_optimizer(agent, 0.03, 0.002)
+                before = capture_state(agent, optimizer, 0)
+                head = agent.action_heads[Actions.ACC_BOTH_WHEELS]
+                assert isinstance(head, ContinuousHead) and head.bias is not None
+                head.bias.grad = -torch.ones_like(head.bias)
+                metrics = guarded_optimizer_step(
+                    agent, optimizer, before, buffers(),
+                    KLGuardSettings(enabled=True, lr_safety=safety),
+                )
+                self.assertEqual(metrics["kl_guard/attempts"], 2)
+                self.assertEqual(metrics["kl_guard/accepted"], 1)
+                self.assertAlmostEqual(metrics["kl_guard/kl_mean"],
+                                       0.02 * safety**2, places=5)
+                self.assertAlmostEqual(metrics["kl_guard/kl_min"],
+                                       metrics["kl_guard/kl_mean"], places=6)
+                self.assertAlmostEqual(float(head.bias.detach()),
+                                       0.02 * safety, places=6)
+                self.assertAlmostEqual(optimizer.param_groups[0]["lr"],
+                                       0.02 * safety, places=7)
+                self.assertEqual(optimizer.param_groups[1]["lr"], 0.002)
+                self.assertEqual(optimizer.state[head.bias]["step"], 1)
+                self.assertAlmostEqual(metrics["kl_guard/initial_kl_mean"],
+                                       0.045, places=5)
 
     def test_mixed_heads_include_std_and_categorical_distribution_changes(self):
         agent = mixed_agent()
@@ -214,6 +226,11 @@ class KLGuardTests(unittest.TestCase):
         self.assertEqual(metrics["episode_mean_max"], 0)
 
     def test_retry_matches_one_smaller_step_and_updates_critic_only_once(self):
+        for reset in (False, True):
+            with self.subTest(reset=reset):
+                self.check_retry_matches_step(reset)
+
+    def check_retry_matches_step(self, reset):
         agent = mixed_agent()
         optimizer = make_optimizer(agent, 0.01, 0.002)
         sum(p.square().sum() for p in agent.parameters()).backward()
@@ -223,7 +240,12 @@ class KLGuardTests(unittest.TestCase):
         expected_agent = deepcopy(agent)
         expected_optimizer = make_optimizer(expected_agent, 0.01, 0.002)
         restore_state(expected_agent, expected_optimizer, before, restore_rng=False)
-        expected_optimizer.param_groups[0]["lr"] = 0.005
+        expected_optimizer.param_groups[0]["lr"] = (
+            0.01 * (0.9 * math.sqrt(0.02 / 0.1))
+            * (0.9 * math.sqrt(0.02 / 0.04))
+        )
+        if reset:
+            reset_policy_optimizer_state(expected_agent, expected_optimizer)
         for model in (agent, expected_agent):
             for parameter in model.parameters():
                 parameter.grad = torch.full_like(parameter, 0.3)
@@ -232,14 +254,18 @@ class KLGuardTests(unittest.TestCase):
         after_rollout_rng = torch.get_rng_state().clone()
         with patch("sim.kl_guard.RecurrentPolicyReplay") as replay:
             replay.return_value.metrics.side_effect = [
-                {"mean": 0.1, "max": 0.2, "samples": 9},
-                {"mean": 0.01, "max": 0.04, "samples": 9},
+                {"min": 0., "mean": 0.1, "max": 0.2, "samples": 9},
+                {"min": 0., "mean": 0.04, "max": 0.1, "samples": 9},
+                {"min": 0., "mean": 0.01, "max": 0.04, "samples": 9},
             ]
             metrics = guarded_optimizer_step(
-                agent, optimizer, before, buffers(), KLGuardSettings(enabled=True),
+                agent, optimizer, before, buffers(),
+                KLGuardSettings(enabled=True, reset_policy_adam=reset),
             )
             self.assertEqual(replay.call_count, 1)
-        self.assertEqual(metrics["kl_guard/backtracks"], 1)
+        self.assertEqual(metrics["kl_guard/backtracks"], 2)
+        self.assertEqual(metrics["kl_guard/policy_adam_reset_attempted"], reset)
+        self.assertEqual(metrics["kl_guard/policy_adam_reset"], reset)
         torch.testing.assert_close(agent.state_dict(), expected_agent.state_dict(),
                                    rtol=0, atol=0)
         self.assert_optimizer_equal(
@@ -248,6 +274,9 @@ class KLGuardTests(unittest.TestCase):
         torch.testing.assert_close(
             torch.get_rng_state(), after_rollout_rng, rtol=0, atol=0
         )
+        for name, parameter in agent.named_parameters():
+            expected_step = 1 if reset and not name.startswith("value_head.") else 2
+            self.assertEqual(optimizer.state[parameter]["step"], expected_step)
 
     def test_exhaustion_restores_weights_and_moments_but_keeps_lower_policy_lr(self):
         agent = mixed_agent()
@@ -262,23 +291,30 @@ class KLGuardTests(unittest.TestCase):
             self.assertLogs("sim.kl_guard", level="WARNING"),
         ):
             replay.return_value.metrics.return_value = {
-                "mean": 1., "max": 2., "samples": 9
+                "min": 0., "mean": 1., "max": 2., "samples": 9
             }
             metrics = guarded_optimizer_step(
                 agent, optimizer, before, buffers(),
                 KLGuardSettings(enabled=True, max_backtracks=2),
             )
         expected = deepcopy(before["optimizer"])
-        expected["param_groups"][0]["lr"] = 0.0025
+        expected["param_groups"][0]["lr"] = (
+            0.01 * (0.9 * math.sqrt(0.02)) * (0.9 * math.sqrt(0.02))
+        )
         torch.testing.assert_close(agent.state_dict(), before["model"], rtol=0, atol=0)
         self.assert_optimizer_equal(optimizer.state_dict(), expected)
         self.assertEqual(metrics["kl_guard/attempts"], 3)
         self.assertEqual(metrics["kl_guard/skipped_update"], 1)
         self.assertEqual(metrics["kl_guard/kl_mean"], 0)
         self.assertEqual(metrics["kl_guard/last_candidate_kl_mean"], 1)
+        self.assertEqual(metrics["kl_guard/policy_adam_reset_attempted"], 1)
+        self.assertEqual(metrics["kl_guard/policy_adam_reset"], 0)
 
     def test_lr_floor_stops_retries_and_never_increases_existing_rate(self):
-        for rate, expected, attempts in ((0.01, 0.003, 3), (0.001, 0.001, 1)):
+        for rate, expected, attempts, reset in (
+            (0.01, 0.003, 2, True), (0.001, 0.001, 2, True),
+            (0.001, 0.001, 1, False),
+        ):
             agent = mixed_agent()
             optimizer = make_optimizer(agent, rate, 0.002)
             before = capture_state(agent, optimizer, 0)
@@ -289,11 +325,12 @@ class KLGuardTests(unittest.TestCase):
                 self.assertLogs("sim.kl_guard", level="WARNING"),
             ):
                 replay.return_value.metrics.return_value = {
-                    "mean": 1., "max": 2., "samples": 9
+                    "min": 0., "mean": 1., "max": 2., "samples": 9
                 }
                 metrics = guarded_optimizer_step(
                     agent, optimizer, before, buffers(),
-                    KLGuardSettings(enabled=True, min_lr=0.003),
+                    KLGuardSettings(enabled=True, min_lr=0.003,
+                                    reset_policy_adam=reset),
                 )
             self.assertEqual(metrics["kl_guard/attempts"], attempts)
             self.assertEqual(optimizer.param_groups[0]["lr"], expected)
@@ -317,8 +354,8 @@ class KLGuardTests(unittest.TestCase):
             patch.object(torch.Tensor, "backward", new=counted_backward),
             patch.object(optimizer, "step", wraps=optimizer.step) as step,
             patch.object(RecurrentPolicyReplay, "metrics", side_effect=[
-                {"mean": 0.1, "max": 0.2, "samples": 11},
-                {"mean": 0.01, "max": 0.03, "samples": 11},
+                {"min": 0., "mean": 0.1, "max": 0.2, "samples": 11},
+                {"min": 0., "mean": 0.01, "max": 0.03, "samples": 11},
             ]),
         ):
             metrics = training_update(cfg, scripted_env(), agent, optimizer, 0)
@@ -327,34 +364,89 @@ class KLGuardTests(unittest.TestCase):
         self.assertEqual(step.call_count, 2)
         self.assertEqual(metrics["kl_guard/accepted"], 1)
 
+    def test_initial_acceptance_preserves_policy_moments(self):
+        agent = mixed_agent()
+        optimizer = make_optimizer(agent, 0.01, 0.002)
+        sum(p.square().sum() for p in agent.parameters()).backward()
+        optimizer.step()
+        before = capture_state(agent, optimizer, 1)
+        for parameter in agent.parameters():
+            parameter.grad = torch.ones_like(parameter)
+        with patch("sim.kl_guard.RecurrentPolicyReplay") as replay:
+            replay.return_value.metrics.return_value = {
+                "min": 0., "mean": 0.001, "max": 0.002, "samples": 9
+            }
+            metrics = guarded_optimizer_step(
+                agent, optimizer, before, buffers(), KLGuardSettings(enabled=True),
+            )
+        self.assertEqual(metrics["kl_guard/policy_adam_reset_attempted"], 0)
+        self.assertEqual(metrics["kl_guard/policy_adam_reset"], 0)
+        for state in optimizer.state.values():
+            self.assertEqual(state["step"], 2)
+
+    def test_reset_retry_can_succeed_at_the_lr_floor(self):
+        agent = mixed_agent()
+        optimizer = make_optimizer(agent, 0.001, 0.002)
+        sum(p.square().sum() for p in agent.parameters()).backward()
+        optimizer.step()
+        before = capture_state(agent, optimizer, 1)
+        for parameter in agent.parameters():
+            parameter.grad = torch.ones_like(parameter)
+        with patch("sim.kl_guard.RecurrentPolicyReplay") as replay:
+            replay.return_value.metrics.side_effect = [
+                {"min": 0., "mean": 1.0, "max": 2.0, "samples": 9},
+                {"min": 0., "mean": 0.001, "max": 0.002, "samples": 9},
+            ]
+            metrics = guarded_optimizer_step(
+                agent, optimizer, before, buffers(),
+                KLGuardSettings(enabled=True, min_lr=0.001),
+            )
+        self.assertEqual(metrics["kl_guard/attempts"], 2)
+        self.assertEqual(metrics["kl_guard/policy_adam_reset"], 1)
+        self.assertEqual(
+            [group["lr"] for group in optimizer.param_groups], [0.001, 0.002]
+        )
+        for name, parameter in agent.named_parameters():
+            expected_step = 2 if name.startswith("value_head.") else 1
+            self.assertEqual(optimizer.state[parameter]["step"], expected_step)
+
     def test_invalid_settings_are_rejected(self):
         for kwargs in (
             {"enabled": 1}, {"max_backtracks": -1}, {"max_backtracks": True},
             {"max_kl": 0}, {"max_kl": float("nan")}, {"min_lr": float("inf")},
-            {"min_lr": 0}, {"lr_factor": 1}, {"lr_factor": 0},
+            {"min_lr": 0}, {"lr_safety": 1}, {"lr_safety": 0},
+            {"lr_safety": float("nan")}, {"reset_policy_adam": 1},
             {"diagnostics": 1}, {"loo_top_k": -1}, {"loo_top_k": True},
         ):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
                 KLGuardSettings(**kwargs)  # ty: ignore[invalid-argument-type]
 
     def test_nonfinite_replay_restores_the_training_transaction(self):
-        agent = make_agent()
-        optimizer = make_optimizer(agent, 0.01, 0.002)
-        sum(p.square().sum() for p in agent.parameters()).backward()
-        optimizer.step()
-        cfg = config()
-        cfg.kl_guard = OmegaConf.structured(KLGuardSettings(enabled=True))
-        before = capture_state(agent, optimizer, 0)
-        with (
-            patch.object(RecurrentPolicyReplay, "metrics", return_value={
-                "mean": float("nan"), "max": float("nan"), "samples": 11,
-            }),
-            self.assertRaisesRegex(FloatingPointError, "replayed policy KL"),
-        ):
-            training_update(cfg, scripted_env(), agent, optimizer, 0)
-        torch.testing.assert_close(agent.state_dict(), before["model"], rtol=0, atol=0)
-        self.assert_optimizer_equal(optimizer.state_dict(), before["optimizer"])
-        torch.testing.assert_close(torch.get_rng_state(), before["torch_rng"])
+        for fail_after_reset in (False, True):
+            with self.subTest(fail_after_reset=fail_after_reset):
+                agent = make_agent()
+                optimizer = make_optimizer(agent, 0.01, 0.002)
+                sum(p.square().sum() for p in agent.parameters()).backward()
+                optimizer.step()
+                cfg = config()
+                cfg.kl_guard = OmegaConf.structured(KLGuardSettings(enabled=True))
+                before = capture_state(agent, optimizer, 0)
+                trials = [{"min": 0., "mean": 0.1, "max": 0.2, "samples": 11}]
+                invalid = {
+                    "min": float("nan"), "mean": float("nan"),
+                    "max": float("nan"), "samples": 11,
+                }
+                with (
+                    patch.object(RecurrentPolicyReplay, "metrics", side_effect=(
+                        [*trials, invalid] if fail_after_reset else [invalid]
+                    )),
+                    self.assertRaisesRegex(FloatingPointError, "replayed policy KL"),
+                ):
+                    training_update(cfg, scripted_env(), agent, optimizer, 0)
+                torch.testing.assert_close(agent.state_dict(), before["model"],
+                                           rtol=0, atol=0)
+                self.assert_optimizer_equal(optimizer.state_dict(), before["optimizer"])
+                torch.testing.assert_close(torch.get_rng_state(), before["torch_rng"])
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA unavailable")
     def test_replay_works_on_cuda(self):

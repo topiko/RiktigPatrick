@@ -95,6 +95,11 @@ class KLDiagnosticTests(unittest.TestCase):
             self.assertAlmostEqual(sum(e["policy_norm_share"]
                                        for e in report["episodes"]), 1)
             self.assertEqual(len(report["leave_one_out"]), 2)
+            self.assertFalse(report["trials"][0]["policy_adam_reset"])
+            for trial in report["trials"][1:]:
+                self.assertTrue(trial["policy_adam_reset"])
+            self.assertEqual(metrics["kl_guard/policy_adam_reset"], bool(backtracks))
+            self.assertIn("original Adam", report["leave_one_out_optimizer_state"])
             for omitted in report["leave_one_out"]:
                 self.assertEqual(omitted["samples"], 11)
                 self.assertEqual(len(omitted["episodes"]), 3)

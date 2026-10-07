@@ -252,16 +252,17 @@ slows policy updates without slowing value regression. The actual rates are logg
 as `optimization/learning_rate` and `optimization/critic_learning_rate`.
 
 When `kl_guard.enabled=false`, `train.kl_probe_every=32` records an observation and
-detached GRU state every 32 control steps, excluding finished environments. After the optimizer step, the
-same observation/state pairs measure conditional policy KL, logged as
+detached GRU state every 32 control steps, excluding finished environments. After
+the optimizer step, the same observation/state pairs measure conditional policy KL,
+logged as
 `optimization/{policy_kl_mean,policy_kl_max,policy_probe_samples}`. Active Gaussian
 and categorical heads are supported; inactive heads contribute no KL. This is
 a local diagnostic conditional on cached hidden states, not a full recurrent
 history replay or a KL-based rejection rule. It costs an extra forward pass at
 probe steps and one batched post-update pass; `0` disables it.
 
-`train.tbptt_steps=124` controls truncated backpropagation through time. At the
-default 0.01 s control timestep, each chunk spans up to **1.24 s**. The GRU's
+`train.tbptt_steps=256` controls truncated backpropagation through time. At the
+default 0.01 s control timestep, each chunk spans up to **2.56 s**. The GRU's
 hidden-state values carry forward continuously; only gradient history is detached
 at chunk boundaries. Memory is reset at the start of an episode.
 
@@ -275,6 +276,15 @@ mode retains global clipping.
 The critic baseline is detached, losses are normalized by the batch's total valid
 transitions, and finished episodes and padded tails contribute no further loss.
 
+Override with `train.tbptt_steps=64`, for example. The value must be a positive
+integer; setting it at least as large as the longest episode gives full-episode
+BPTT. Chunk size can change when resuming a checkpoint.
+
+This simple approach retains all chunk graphs until the final backward pass, so
+activation memory still grows with episode length. If memory becomes a bottleneck,
+a future optimization is no-grad collection followed by chunked replay/backward,
+freeing each chunk's graph immediately while retaining full-episode return targets.
+
 ### Recurrent KL backtracking
 
 `kl_guard.enabled=true` checks every tentative optimizer update using the recorded
@@ -286,8 +296,9 @@ kl_guard:
   enabled: true
   max_kl: 0.02
   max_backtracks: 6
-  lr_factor: 0.5
+  lr_safety: 0.95
   min_lr: 0.000001
+  reset_policy_adam: true
   diagnostics: true
   loo_top_k: 3
 ```
@@ -301,27 +312,52 @@ valid transitions. Padding, final observations and inactive heads are excluded.
 Continuous tanh-Gaussian heads use the equivalent analytic KL before the shared
 tanh/scale transform; discrete heads use categorical KL.
 
-An update is accepted when mean KL is at most `max_kl`. Otherwise, both the model
-and the exact pre-update Adam state are restored, the policy LR is multiplied by
-`lr_factor`, and the same clipped gradients are retried. The critic LR stays
-unchanged. Acceptance commits exactly one actor/critic optimizer step: rejected
-attempts do not accumulate momentum, step counters or critic updates.
+An update is accepted when mean KL is at most `max_kl`. After rejection, the next
+policy LR is proposed using the local quadratic approximation of KL:
 
-There are at most `1 + max_backtracks` candidate steps. Retries also stop when the
-policy LR cannot be reduced further. If no candidate passes, the entire update
-is skipped and the old weights/moments are retained. The last tested policy LR
-persists for the next batch; rollout RNG and iteration progression continue.
+```text
+factor = lr_safety * sqrt(max_kl / measured_KL)
+new_policy_lr = min(current_policy_lr, max(min_lr, current_policy_lr * factor))
+```
+
+For a measured KL of 0.0396 and a limit of 0.02, a safety factor of 0.95 proposes
+approximately `0.675 * current_policy_lr`, rather than fixed halving. `lr_safety`
+replaces the old `kl_guard.lr_factor` option. Every proposal is replayed and checked against the
+actual KL budget; the approximation does not guarantee acceptance, particularly
+when resetting Adam changes the update direction.
+
+Before each retry, the pre-update weights and Adam state are restored. With
+`reset_policy_adam=true`, the policy's moments and step counters are then cleared;
+the critic's pre-update state and LR are retained. Thus every retry starts from
+the same clean policy optimizer baseline and uses the same clipped gradients.
+An accepted retry keeps the resulting fresh policy moments and commits one critic
+update. Initial attempts that pass keep ordinary Adam history. Set
+`reset_policy_adam=false` to retain the pre-update policy history during retries.
+
+There are at most `1 + max_backtracks` candidate steps. At the LR floor, one
+fresh-policy-Adam retry is still allowed after the first rejection if enabled and
+the retry budget permits it; subsequent rejected trials stop if the LR cannot
+decrease further. If no candidate passes, the entire update is skipped and the
+original weights and Adam moments are restored, including the policy's old history.
+The last tested policy LR persists for the next batch; no automatic LR increase is
+performed. Rollout RNG and iteration progression continue.
 Numerical failures still use the existing transactional failure recovery.
 
 Diagnostics:
-- `kl_guard/initial_kl_mean` and `initial_kl_max`: the first proposed step.
-- `kl_guard/kl_mean` and `kl_max`: the committed change (zero for a skipped update).
-- `kl_guard/last_candidate_kl_mean` and `last_candidate_kl_max`: the last trial,
+- `kl_guard/initial_kl_min`, `initial_kl_mean`, `initial_kl_max`: the first proposed step.
+- `kl_guard/kl_min`, `kl_mean`, `kl_max`: committed change (zero for a skipped update).
+- `kl_guard/last_candidate_kl_min`, `last_candidate_kl_mean`, `last_candidate_kl_max`: last trial,
   including a rejected one when the budget is exhausted.
 - `kl_guard/attempts`, `backtracks`, `accepted`, `skipped_update`, `replay_samples`.
+- `kl_guard/policy_adam_reset_attempted`: a clean-state retry was tested.
+- `kl_guard/policy_adam_reset`: a clean-state retry was accepted and retained.
 - `kl_guard/initial_episode_mean_max`, `initial_episode_mean_p95`,
   `initial_worst_episode`, and corresponding `last_candidate_*` statistics.
 - `timing/kl_guard_seconds`: replay, candidate-step and restoration overhead.
+
+First-try acceptance logs only batch KL min/mean/max over valid decision steps.
+Retries and skipped updates retain detailed initial/final summaries. Any rejection
+still triggers the configured trajectory analysis, even if a later retry succeeds.
 
 The cached-hidden-state probe is disabled while this guard is active. A first-attempt
 acceptance requires two network replays (old and candidate), and each backtrack
@@ -353,6 +389,8 @@ after backtracking completes (not a repeat of that analysis on every retry):
   removes one episode's joint-loss gradient contribution, renormalizes by the
   remaining transition count, and applies normal gradient clipping. KL is then
   checked on **all original trajectories**, including the omitted episode.
+  These counterfactuals analyze the initial rejected update with its original
+  Adam history. Trial reports separately identify retries that reset policy Adam.
 
 The analysis runs on a separate model/optimizer copy. It reconstructs the original
 sampled actions using the saved pre-rollout RNG state inside an isolated RNG
@@ -381,15 +419,6 @@ updates/replays. Set `loo_top_k=0` to keep gradient analysis without leave-one-o
 or `diagnostics=false` to retain just ordinary backtracking and KL statistics.
 Analysis failures are logged and reported without changing the live accepted/skipped
 update or its optimizer/RNG state. No episode is automatically discarded.
-
-Override with `train.tbptt_steps=64`, for example. The value must be a positive
-integer; setting it at least as large as the longest episode gives full-episode
-BPTT. Chunk size can change when resuming a checkpoint.
-
-This simple approach retains all chunk graphs until the final backward pass, so
-activation memory still grows with episode length. If memory becomes a bottleneck,
-a future optimization is no-grad collection followed by chunked replay/backward,
-freeing each chunk's graph immediately while retaining full-episode return targets.
 
 ### Optional time-limit bootstrapping
 
