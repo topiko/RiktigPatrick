@@ -47,6 +47,12 @@ from sim.checkpoints import (
 from sim.curriculum import Curriculum
 from sim.devices import evaluation_rng, resolve_device, seed_torch
 from sim.episode_io import resample_video_frames, save_episode_csv
+from sim.kl_diagnostics import (
+    finish_kl_diagnostics,
+    prepare_kl_diagnostics,
+    publish_kl_report,
+)
+from sim.kl_guard import KLGuardSettings, guarded_optimizer_step
 from sim.optimizers import make_optimizer
 from sim.plot_utils import plot_episode
 from sim.policy_probe import PolicyProbe
@@ -681,13 +687,15 @@ def training_rollout(cfg, rp_env, agent, seed, curriculum=None, policy_probe=Non
 
 
 def training_update(
-    cfg, rp_env, agent, optimizer, iteration: int, curriculum: Curriculum | None = None
+    cfg, rp_env, agent, optimizer, iteration: int, curriculum: Curriculum | None = None,
+    *, reports: list[dict] | None = None,
 ) -> dict[str, float]:
     """One transactional update: a failed/non-finite update restores its input state."""
     if curriculum is not None:
         curriculum.apply_policy(agent)
     before = capture_state(agent, optimizer, iteration, curriculum)
     try:
+        kl_settings = KLGuardSettings(**dict(cfg.get("kl_guard", {})))
         optimizer.zero_grad(set_to_none=True)
         _validate_tbptt_steps(cfg.train.tbptt_steps)
         coefficient = cfg.rl.value_loss_coef
@@ -696,7 +704,10 @@ def training_update(
         probe_every = cfg.train.kl_probe_every
         if type(probe_every) is not int or probe_every < 0:
             raise ValueError("train.kl_probe_every must be a nonnegative integer")
-        probe = PolicyProbe(agent, probe_every) if probe_every else None
+        probe = (
+            PolicyProbe(agent, probe_every)
+            if probe_every and not kl_settings.enabled else None
+        )
         episode_buf_l = training_rollout(
             cfg, rp_env, agent, cfg.seed + iteration, curriculum, probe,
         )
@@ -718,8 +729,17 @@ def training_update(
         loss = policy_loss + weighted_value_loss
         require_finite((policy_loss, values_loss, loss), "loss")
         loss.backward()
+        diagnostics = prepare_kl_diagnostics(
+            cfg, kl_settings, agent, episode_buf_l, G_t, values, logps, iteration,
+        )
         gradient_metrics = clip_agent_gradients(agent, cfg.train.grad_clip)
-        optimizer.step()
+        kl_metrics = guarded_optimizer_step(
+            agent, optimizer, before, episode_buf_l, kl_settings, curriculum,
+            diagnostics=diagnostics,
+        )
+        kl_metrics.update(finish_kl_diagnostics(
+            diagnostics, agent, optimizer, before, curriculum, kl_metrics, reports,
+        ))
         require_finite(agent.state_dict(), "updated model")
         require_finite(optimizer.state_dict(), "updated optimizer")
         probe_metrics = probe.metrics(agent) if probe is not None else {}
@@ -751,6 +771,7 @@ def training_update(
                 optimizer.param_groups[-1]["lr"]
             ),
             **probe_metrics,
+            **kl_metrics,
             **{
                 f"policy/std/{action}": float(head.std.detach())
                 for action, head in agent.action_heads.items()
@@ -1033,12 +1054,25 @@ def preserve_training_failure(
         LOG.exception("Could not persist/upload failure artifacts")
 
 
-def _log_training_update(cfg, iteration, metrics):
+def _log_training_update(cfg, iteration, metrics, reports=()):
     LOG.info("Step %4d: p_l=%.4f, v_l=%.4f, ret=%.2f, mean_ep_len=%.0f",
              iteration, metrics["losses/policy"], metrics["losses/value"],
              metrics["returns/mean"], metrics["episodes/length/mean"])
-    if cfg.logging.mlflow.enabled and iteration % cfg.logging.mlflow.push_freq == 0:
+    if "kl_guard/kl_mean" in metrics:
+        LOG.info("KL step: accepted=%d trials=%d initial=%.6g final=%.6g; "
+                 "last worst trajectory=%s (mean %s)",
+                 metrics["kl_guard/accepted"], metrics["kl_guard/attempts"],
+                 metrics["kl_guard/initial_kl_mean"], metrics["kl_guard/kl_mean"],
+                 metrics.get("kl_guard/last_candidate_worst_episode"),
+                 metrics.get("kl_guard/last_candidate_episode_mean_max"))
+    pushed = (
+        cfg.logging.mlflow.enabled and iteration % cfg.logging.mlflow.push_freq == 0
+    )
+    if pushed:
         mlflow.log_metrics(metrics, step=iteration)
+    for report in reports:
+        report["metrics"].update(metrics)
+        publish_kl_report(cfg, report, log_metrics=not pushed)
 
 
 def run_training_loop(
@@ -1063,9 +1097,12 @@ def run_training_loop(
             or next_iteration < cfg.train.max_iterations
         ):
             iteration = next_iteration
-            metrics = training_update(cfg, env, agent, optimizer, iteration, curriculum)
+            reports = []
+            metrics = training_update(
+                cfg, env, agent, optimizer, iteration, curriculum, reports=reports,
+            )
             next_iteration = iteration + 1
-            _log_training_update(cfg, iteration, metrics)
+            _log_training_update(cfg, iteration, metrics, reports)
             scheduled = next_iteration % cfg.guard.every == 0
             best_recorded = False
             if validation_env is not None and guard.should_evaluate(

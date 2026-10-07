@@ -172,6 +172,7 @@ def compare_updates(
         "loss": loss, "fresh_adam": fresh_adam,
         "learning_rate": optimizer.param_groups[0]["lr"],
         "critic_learning_rate": optimizer.param_groups[-1]["lr"],
+        "kl_guard_applied": False,
         "training_discount": training_cfg.rl.discount,
         "bootstrap_time_limits": training_cfg.rl.get("bootstrap_time_limits", False),
         "training_hold_velocity_weight": (

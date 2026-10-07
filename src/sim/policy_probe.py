@@ -1,4 +1,4 @@
-"""Cheap conditional policy-KL diagnostics on sampled rollout observations/states."""
+"""Conditional probes and full-history recurrent policy-KL replay."""
 
 from dataclasses import dataclass
 
@@ -7,7 +7,24 @@ import torch
 from torch.distributions import Categorical, Normal, kl_divergence
 
 from nn_ctrl.nns import Agent, ContinuousHead
-from riktigpatric.patrick import Actions, StateVarKey
+from riktigpatric.patrick import Actions, StateVar, StateVarKey
+from sim.utils import EpisodeBuffer
+
+
+def _policy_kl(agent, previous, current, old_stds):
+    terms = []
+    for action, parameters in previous.items():
+        head = agent.action_heads[action.value]
+        if isinstance(head, ContinuousHead):
+            # The common invertible tanh/scale transform leaves KL unchanged.
+            old = Normal(parameters, old_stds[action].to(agent.device))
+            new = Normal(current[action], head.std)
+            terms.append(kl_divergence(old, new).sum(dim=-1))
+        else:
+            terms.append(kl_divergence(
+                Categorical(logits=parameters), Categorical(logits=current[action])
+            ))
+    return torch.stack(terms).sum(dim=0).clamp_min(0)
 
 
 @dataclass
@@ -63,24 +80,101 @@ class PolicyProbe:
         }
         hidden = torch.cat([s.hidden for s in self.samples], dim=1).to(agent.device)
         current, _, _ = agent.forward(observations, hidden)
-        joint_kl = torch.zeros(hidden.shape[1], device=agent.device)
-        for action in self.actions:
-            previous = torch.cat([
+        previous = {
+            action: torch.cat([
                 s.parameters[action] for s in self.samples
             ]).to(agent.device)
-            head = agent.action_heads[action.value]
-            if isinstance(head, ContinuousHead):
-                # KL is invariant under the common invertible tanh/scale transform.
-                old = Normal(previous, self.old_stds[action].to(agent.device))
-                new = Normal(current[action], head.std)
-                joint_kl += kl_divergence(old, new).sum(dim=-1)
-            else:
-                joint_kl += kl_divergence(
-                    Categorical(logits=previous), Categorical(logits=current[action])
-                )
-        joint_kl = joint_kl.clamp_min(0)  # Suppress tiny negative round-off at zero KL.
+            for action in self.actions
+        }
+        joint_kl = _policy_kl(agent, previous, current, self.old_stds)
         return {
             "optimization/policy_kl_mean": float(joint_kl.mean()),
             "optimization/policy_kl_max": float(joint_kl.max()),
             "optimization/policy_probe_samples": float(joint_kl.numel()),
+        }
+
+
+class RecurrentPolicyReplay:
+    """Compare policies on old observation histories, rebuilding each GRU state.
+
+    All valid decision-time observations are retained. Each replay starts from a
+    fresh hidden state; padding and final observations do not contribute to KL.
+    No actions are sampled and no simulator transitions are executed.
+    """
+
+    def __init__(self, agent: Agent, buffers: list[EpisodeBuffer]):
+        lengths = [buffer.seq_len for buffer in buffers]
+        if not lengths or min(lengths) < 1:
+            raise ValueError("Recurrent KL replay requires nonempty finished episodes")
+        self.steps = max(lengths)
+        self.samples = sum(lengths)
+        self.lengths = lengths
+        self.episode_metrics: list[dict[str, float]] = []
+        self.actions = tuple(
+            action for action in agent.action_configs
+            if action not in agent.inactive_actions
+        )
+        self.valid = (
+            torch.arange(self.steps, device=agent.device)[None, :]
+            < torch.tensor(lengths, device=agent.device)[:, None]
+        )
+        self.observations = {}
+        for name in agent.inputs:
+            key = StateVar.from_str(name)
+            shape = np.asarray(buffers[0].obs_l[0][key]).shape
+            values = np.zeros((len(buffers), self.steps, *shape), dtype=np.float32)
+            for row, buffer in enumerate(buffers):
+                values[row, :lengths[row]] = np.stack([
+                    observations[key] for observations in buffer.obs_l[:-1]
+                ])
+            self.observations[key] = torch.from_numpy(values).to(agent.device)
+        self.old_stds = {
+            action: head.std.detach().clone()
+            for action in self.actions
+            if isinstance(head := agent.action_heads[action.value], ContinuousHead)
+        }
+        self.previous = self._replay(agent)
+
+    @torch.no_grad()
+    def _replay(self, agent):
+        if not self.actions:
+            return {}
+        was_training = agent.training
+        agent.eval()
+        try:
+            hidden = None
+            parameters = {action: [] for action in self.actions}
+            for step in range(self.steps):
+                observations = {key: values[:, step]
+                                for key, values in self.observations.items()}
+                current, _, hidden = agent.forward(observations, hidden)
+                for action in self.actions:
+                    parameters[action].append(current[action])
+            return {
+                action: torch.stack(values, dim=1)[self.valid]
+                for action, values in parameters.items()
+            }
+        finally:
+            agent.train(was_training)
+
+    @torch.no_grad()
+    def metrics(self, agent: Agent) -> dict[str, float]:
+        joint = (
+            _policy_kl(agent, self.previous, self._replay(agent), self.old_stds)
+            if self.actions else torch.zeros(self.samples, device=agent.device)
+        ).cpu()
+        self.episode_metrics = [
+            {"index": index, "mean": float(values.mean()), "max": float(values.max()),
+             "steps": length}
+            for index, (length, values) in enumerate(zip(
+                self.lengths, joint.split(self.lengths), strict=True
+            ))
+        ]
+        means = np.array([episode["mean"] for episode in self.episode_metrics])
+        return {
+            "mean": float(joint.mean()), "max": float(joint.max()),
+            "samples": float(self.samples),
+            "episode_mean_max": float(means.max()),
+            "episode_mean_p95": float(np.quantile(means, 0.95)),
+            "worst_episode": float(means.argmax()),
         }

@@ -171,9 +171,13 @@ class TimingTests(unittest.TestCase):
         before = capture_state(agent, optimizer, 0, curriculum)
         first = training_update(cfg, env, agent, optimizer, 0, curriculum)
         restore_state(agent, optimizer, before, curriculum=curriculum)
-        self.assertEqual(
-            first, training_update(cfg, env, agent, optimizer, 0, curriculum)
-        )
+        second = training_update(cfg, env, agent, optimizer, 0, curriculum)
+        for metrics in (first, second):
+            self.assertGreaterEqual(metrics.pop("timing/kl_guard_seconds", 0.0), 0)
+            self.assertGreaterEqual(
+                metrics.pop("timing/kl_diagnostics_seconds", 0.0), 0
+            )
+        self.assertEqual(first, second)
         self.assertAlmostEqual(first["episodes/duration/mean"], 0.04, places=6)
         self.assertAlmostEqual(first["returns/mean"], 4.0, places=6)
         with torch.no_grad():

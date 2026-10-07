@@ -80,7 +80,8 @@ See [fixes.md](fixes.md) for the cleanup findings and before/after pseudocode.
 | `src/sim/timing.py` | Seeded control-interval jitter on the fixed physics grid |
 | `src/sim/checkpoints.py` | Portable training snapshots and validation rollback |
 | `src/sim/checkpoint_migrations.py` | Legacy checkpoint input migrations |
-| `src/sim/policy_probe.py` | Sampled conditional policy-change diagnostics |
+| `src/sim/policy_probe.py` | Conditional probes and full-history policy-KL replay |
+| `src/sim/kl_guard.py` | Recurrent-replay KL acceptance and optimizer backtracking |
 | `src/sim/curriculum.py` | Stage masks, command sampling and physical promotion gates |
 | `src/sim/plot_utils.py` | Episode plots |
 | `src/nn_ctrl/nns.py` | Recurrent neural-network agent |
@@ -250,8 +251,8 @@ the private value MLP. For example, `train.policy_lr=0.0001 train.critic_lr=0.00
 slows policy updates without slowing value regression. The actual rates are logged
 as `optimization/learning_rate` and `optimization/critic_learning_rate`.
 
-`train.kl_probe_every=32` records an observation and detached GRU state every 32
-control steps, excluding finished environments. After the optimizer step, the
+When `kl_guard.enabled=false`, `train.kl_probe_every=32` records an observation and
+detached GRU state every 32 control steps, excluding finished environments. After the optimizer step, the
 same observation/state pairs measure conditional policy KL, logged as
 `optimization/{policy_kl_mean,policy_kl_max,policy_probe_samples}`. Active Gaussian
 and categorical heads are supported; inactive heads contribute no KL. This is
@@ -266,12 +267,120 @@ at chunk boundaries. Memory is reset at the start of an episode.
 
 Training collects full episodes with gradients enabled, detaching the hidden
 state every N rollout steps. It then computes full-episode discounted returns
-and performs one backward pass and Adam step per rollout batch. With a detached
+and performs one backward pass per rollout batch. KL backtracking may retry the
+optimizer step, but commits at most one update from that batch. With a detached
 critic, policy and critic gradients are clipped separately to `train.grad_clip`,
 so large critic gradients cannot scale down the policy update. Shared-gradient
 mode retains global clipping.
 The critic baseline is detached, losses are normalized by the batch's total valid
 transitions, and finished episodes and padded tails contribute no further loss.
+
+### Recurrent KL backtracking
+
+`kl_guard.enabled=true` checks every tentative optimizer update using the recorded
+rollout histories. The return-based rollback guard defaults to `guard.enabled=false`;
+curriculum validation, promotion gates and best-checkpoint recording remain active.
+
+```yaml
+kl_guard:
+  enabled: true
+  max_kl: 0.02
+  max_backtracks: 6
+  lr_factor: 0.5
+  min_lr: 0.000001
+  diagnostics: true
+  loo_top_k: 3
+```
+
+The old and candidate policies replay the same decision-time observations, each
+starting from a fresh GRU hidden state. Every observation is replayed in order;
+the candidate does not reuse old hidden states. This replay is a network forward
+pass, not another simulation rollout, and does not sample actions. KL is
+`KL(old || candidate)`, summed across active action heads and averaged across all
+valid transitions. Padding, final observations and inactive heads are excluded.
+Continuous tanh-Gaussian heads use the equivalent analytic KL before the shared
+tanh/scale transform; discrete heads use categorical KL.
+
+An update is accepted when mean KL is at most `max_kl`. Otherwise, both the model
+and the exact pre-update Adam state are restored, the policy LR is multiplied by
+`lr_factor`, and the same clipped gradients are retried. The critic LR stays
+unchanged. Acceptance commits exactly one actor/critic optimizer step: rejected
+attempts do not accumulate momentum, step counters or critic updates.
+
+There are at most `1 + max_backtracks` candidate steps. Retries also stop when the
+policy LR cannot be reduced further. If no candidate passes, the entire update
+is skipped and the old weights/moments are retained. The last tested policy LR
+persists for the next batch; rollout RNG and iteration progression continue.
+Numerical failures still use the existing transactional failure recovery.
+
+Diagnostics:
+- `kl_guard/initial_kl_mean` and `initial_kl_max`: the first proposed step.
+- `kl_guard/kl_mean` and `kl_max`: the committed change (zero for a skipped update).
+- `kl_guard/last_candidate_kl_mean` and `last_candidate_kl_max`: the last trial,
+  including a rejected one when the budget is exhausted.
+- `kl_guard/attempts`, `backtracks`, `accepted`, `skipped_update`, `replay_samples`.
+- `kl_guard/initial_episode_mean_max`, `initial_episode_mean_p95`,
+  `initial_worst_episode`, and corresponding `last_candidate_*` statistics.
+- `timing/kl_guard_seconds`: replay, candidate-step and restoration overhead.
+
+The cached-hidden-state probe is disabled while this guard is active. A first-attempt
+acceptance requires two network replays (old and candidate), and each backtrack
+adds another candidate replay. No new physics data or backward pass is needed.
+Only the mean KL is constrained; the maximum is diagnostic. This bounds the
+measured policy change on old-policy histories, not the new controller's physical
+performance. Periodic simulation validation is still required.
+
+This remains a single-rollout actor-critic update, not PPO or minibatch training.
+
+#### Rejection-time trajectory analysis
+
+Per-trajectory mean/max KL is computed on every candidate, including accepted ones.
+The batch acceptance criterion remains the transition-weighted mean; per-trajectory
+outliers are reported, not silently turned into additional acceptance thresholds.
+
+With `kl_guard.diagnostics=true`, a rejected update also gets one detailed analysis
+after backtracking completes (not a repeat of that analysis on every retry):
+
+- Episode index, environment seed, steps, duration, return, ending flags, reference
+  commands, advantage mean/RMS, and per-trajectory KL for every candidate trial.
+- Unclipped per-trajectory policy/critic parameter-group gradient norms, policy
+  norm shares and cosine alignment with the batch policy gradient. Contributions
+  use the original batch's total valid-transition denominator. With a detached
+  critic, the policy-group gradients come only from the actor; shared-critic mode
+  is labelled explicitly in the report.
+- Leave-one-out updates for the `loo_top_k` largest policy-gradient contributors.
+  Each starts from the same pre-update model/Adam state and initial proposed LRs,
+  removes one episode's joint-loss gradient contribution, renormalizes by the
+  remaining transition count, and applies normal gradient clipping. KL is then
+  checked on **all original trajectories**, including the omitted episode.
+
+The analysis runs on a separate model/optimizer copy. It reconstructs the original
+sampled actions using the saved pre-rollout RNG state inside an isolated RNG
+context, and verifies that actions and log probabilities match. This also handles
+saturated tanh actions without approximating their inverse. Gradient replay uses
+the same TBPTT boundaries, returns, and frozen advantages as training. The summed
+trajectory gradients are checked against the actual batch gradient; a relative
+reconstruction error over `1e-3` skips leave-one-out checks rather than reporting
+unreliable attribution. No additional simulator rollouts are collected.
+Environment seeds describe simulator randomization; reproducing sampled actions
+also requires the pre-rollout policy/RNG snapshot, not just those seeds. The JSON
+report contains diagnostic summaries rather than full rollout tensors/checkpoints.
+
+Logs include the rejection trials, a row for every trajectory, and the leave-one-out
+results. Detailed reports are saved beside the checkpoint directory under
+`kl_diagnostics/iteration_XXXXXX.json`, and uploaded to MLflow under `diagnostics/kl/`.
+Rejected-update metrics are logged even between normal `logging.mlflow.push_freq`
+intervals. Additional scalars include `kl_diagnostics/max_policy_norm_share`,
+`cancellation_ratio` (near zero means strongly cancelling episode gradients),
+`gradient_reconstruction_error`, `best_loo_kl_reduction`, and `failed`.
+`timing/kl_diagnostics_seconds` measures the extra analysis cost.
+
+This can be expensive for long batches: it adds a differentiable network replay,
+one gradient calculation per trajectory, and up to `loo_top_k` counterfactual
+updates/replays. Set `loo_top_k=0` to keep gradient analysis without leave-one-out,
+or `diagnostics=false` to retain just ordinary backtracking and KL statistics.
+Analysis failures are logged and reported without changing the live accepted/skipped
+update or its optimizer/RNG state. No episode is automatically discarded.
 
 Override with `train.tbptt_steps=64`, for example. The value must be a positive
 integer; setting it at least as large as the longest episode gives full-episode
@@ -876,8 +985,8 @@ checkpoints remain readable; when moving one to CUDA, the GPU stream starts from
 the configured seed. Cross-device continuation is supported, but it is not
 bitwise-reproducible across CPU/CUDA or different hardware/software versions.
 
-With `guard.enabled=true` (default), training runs a fixed-seed validation batch
-before the first update and every `guard.every=10` updates. The batch has
+With the optional return-based `guard.enabled=true`, training runs a fixed-seed
+validation batch before the first update and every `guard.every=10` updates. The batch has
 `guard.episodes=50` environments and does not render. Curriculum validation uses
 the fixed command suite and randomized initial conditions described above.
 Without curriculum, it uses the environment's default targets/trajectory and
@@ -969,7 +1078,9 @@ plus the baseline to be evaluated on both suites.
 
 The default `--loss actor` excludes the new critic gradient; restored Adam moments
 still contain historical joint-training gradients. `--fresh-adam` tests without
-that history, and `--loss joint` reproduces the normal combined-loss update.
+that history, and `--loss joint` reproduces the combined-loss candidate update.
+This diagnostic deliberately bypasses KL acceptance/backtracking and records
+`kl_guard_applied=false`, so oversized candidate steps remain visible for analysis.
 Gradients are averaged **before** clipping and Adam, not by averaging updated
 weights. The source checkpoint and MLflow run are not modified.
 
