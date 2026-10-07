@@ -34,7 +34,7 @@ reward:
 
 train:
   device: auto  # auto selects CUDA when available; cpu, cuda, or cuda:N also supported
-  policy_lr: 0.0005
+  policy_lr: 0.003
   critic_lr: 0.0005
   grad_clip: 500.0
   tbptt_steps: 256  # detach recurrent gradient history every N rollout steps
