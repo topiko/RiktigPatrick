@@ -957,10 +957,13 @@ uv run python -m sim.train_agent --config-name continuous \
 
 `train.resume_from` accepts a local path or a 32-character MLflow run ID. A
 child run ID requires `MLFLOW_TRACKING_URI` and downloads that run's
-`checkpoints/best.pt`; a parent run ID searches its child runs, selects the child
-with the highest recorded `guard/best_return`, and downloads that child's
-`checkpoints/best.pt`. If no child has metrics, it falls back to the newest child
-with a `checkpoints/latest.pt`. The file is stored under
+`checkpoints/best.pt` (or `latest.pt` if no best exists). A parent run ID selects
+the furthest curriculum stage with an available checkpoint, then the child with
+the highest recorded `guard/best_return` in that stage (falling back to validation
+return history). Running, failed, killed, and finished children are all eligible;
+returns from different stages are not compared. If no best checkpoint in that
+stage has a score, it uses the newest resumable child's `best.pt` or `latest.pt`.
+Runs without stage tags rank below tagged curriculum stages. The file is stored under
 `checkpoints/resume_runs/<resolved-run-id>/`. When MLflow logging is enabled, the
 resumed stage is attached under the source run's original parent when that run has
 one. Local-path resumes start a new parent run.

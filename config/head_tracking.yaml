@@ -18,6 +18,6 @@ env:
 
 train:
   # Independent head references while both environments target zero forward speed.
-  head_trajectories:
+  head_trajectories:  # per-env [time (s), elevation (rad), yaw (rad)] waypoints
     - [[0, 0, 0], [2, 0.0872664626, 0.1745329252], [4, 0, 0]]
     - [[0, 0, 0], [2, -0.0872664626, -0.1745329252], [4, 0, 0]]

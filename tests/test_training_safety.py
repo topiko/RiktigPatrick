@@ -26,6 +26,7 @@ from sim.checkpoints import (
 )
 from sim.envs.rp_env import GymRP
 from sim.train_agent import (
+    _select_parent_child,
     _start_training_mlflow,
     get_policy_inputs,
     make_validation_env,
@@ -393,7 +394,7 @@ class TrainingSafetyTests(unittest.TestCase):
                     info=Mock(experiment_id="22"),
                     data=Mock(tags={}),
                 )
-                child = Mock(info=Mock(run_id=child_id))
+                child = Mock(info=Mock(run_id=child_id), data=Mock(tags={}))
 
                 def list_artifacts(run_id, path):
                     self.assertEqual(path, "checkpoints")
@@ -434,8 +435,8 @@ class TrainingSafetyTests(unittest.TestCase):
                 client.get_run.return_value = Mock(
                     info=Mock(experiment_id="22"), data=Mock(tags={}),
                 )
-                best = Mock(info=Mock(run_id=best_id))
-                latest = Mock(info=Mock(run_id=latest_id))
+                best = Mock(info=Mock(run_id=best_id), data=Mock(tags={}))
+                latest = Mock(info=Mock(run_id=latest_id), data=Mock(tags={}))
                 client.search_runs.return_value = [latest, best]
 
                 def artifacts(run_id, path):
@@ -458,6 +459,41 @@ class TrainingSafetyTests(unittest.TestCase):
                     run_id=best_id, artifact_path="checkpoints/best.pt",
                     dst_path=f"{folder}/resume_runs/{best_id}",
                 )
+
+    def test_parent_resume_prefers_furthest_stage_regardless_of_run_status(self):
+        def child(run_id, stage, status):
+            return Mock(info=Mock(run_id=run_id, status=status), data=Mock(tags={
+                "curriculum.stage_index": str(stage),
+            }))
+
+        client = Mock()
+        client.list_artifacts.side_effect = lambda run_id, path: {
+            "empty": [],
+            "new": [Mock(path="checkpoints/latest.pt")],
+            "best": [Mock(path="checkpoints/best.pt")],
+            "early": [Mock(path="checkpoints/best.pt")],
+        }[run_id]
+        client.get_metric_history.side_effect = lambda run_id, metric: [
+            Mock(value={"best": 1818.31, "early": 1862.10}[run_id])
+        ]
+        for status in ("RUNNING", "FAILED", "KILLED", "FINISHED"):
+            with self.subTest(status=status):
+                children = [
+                    child("empty", 2, "RUNNING"),
+                    child("new", 1, "RUNNING"),
+                    child("best", 1, status),
+                    child("early", 0, "FINISHED"),
+                ]
+                self.assertEqual(_select_parent_child(client, children),
+                                 ("best", "best.pt"))
+        # A later stage without validation still takes precedence over earlier ones.
+        self.assertEqual(_select_parent_child(client, [children[1], children[3]]),
+                         ("new", "latest.pt"))
+        # An unscored best checkpoint is also usable, even without latest.pt.
+        client.get_metric_history.return_value = []
+        client.get_metric_history.side_effect = None
+        self.assertEqual(_select_parent_child(client, [children[2]]),
+                         ("best", "best.pt"))
 
     def test_resumed_parent_keeps_immutable_mlflow_params(self):
         run_id = "a" * 32

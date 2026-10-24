@@ -20,17 +20,18 @@ rl:
 
 reward:
   # These keys need to exactly match the values in patrick/Observables
-  reward/step: 1.0
+  # Reward units are arbitrary; dense terms are per nominal control interval.
+  reward/step: 1.0  # reward units per nominal step
   reward/rp_pitch: -5.73  # per radian; approximately the old -0.1 per degree
-  reward/fell: 0.0
-  reward/wheel_vel: -0.2
-  reward/head_pitch: -0.5
-  reward/camera_pitch: -0.5  # true world elevation error, active with head_tracking
-  reward/head_yaw: -0.25  # neck-relative yaw error
+  reward/fell: 0.0  # reward units per fall
+  reward/wheel_vel: -0.2  # reward units per rad/s of mean absolute wheel speed
+  reward/head_pitch: -0.5  # reward units per rad of head pitch
+  reward/camera_pitch: -0.5  # reward units per rad of world elevation error
+  reward/head_yaw: -0.25  # reward units per rad of neck-relative yaw error
   reward/pos: -1.0  # penalty per meter of absolute position error
   reward/vel: -4.0  # penalty per m/s of absolute velocity error
   reward/yaw_rate: -1.0  # penalty per rad/s of body-Z angular-rate error
-  reward/total: 1.0
+  reward/total: 1.0  # dimensionless multiplier
 
 train:
   device: auto  # auto selects CUDA when available; cpu, cuda, or cuda:N also supported
@@ -44,11 +45,11 @@ train:
   resume_critic_lr: null  # optional critic-group LR override on resume
   kl_probe_every: 32  # sample conditional before/after policy KL; 0 disables diagnostics
   target_positions: null  # optional list of n_parallel fixed targets, in meters
-  target_trajectories: null  # optional per-env lists of [time, position] waypoints
+  target_trajectories: null  # optional per-env [time (s), position (m)] waypoints
   target_velocities: null  # optional list of n_parallel velocity commands, in m/s
   target_yaw_rates: null  # optional list of n_parallel body-Z rate commands, rad/s
   head_targets: null  # optional per-env [world camera elevation, neck yaw], rad
-  head_trajectories: null  # optional per-env [time, elevation, yaw] waypoints
+  head_trajectories: null  # optional per-env [time (s), elevation (rad), yaw (rad)]
 
 checkpoints:
   dir: ${hydra:runtime.output_dir}/checkpoints
@@ -59,22 +60,22 @@ curriculum:
   neutral_probability: 0.9  # discrete-head activation; continuous heads use their initial_std
   consecutive_passes: 3
   survival_fraction: 0.9
-  hold_seconds: 20.0
+  hold_seconds: 20.0  # s
   position_mae: 0.05  # meters from the starting position
-  straight_line_position_mae: 0.02
+  straight_line_position_mae: 0.02  # m from the moving position reference
   hold_velocity_weight: 0.125  # multiply reward/vel for gentle damping during position hold
-  locomotion_seconds: 20.0
-  startup_seconds: 1.0  # tracking-error allowance at episode start
+  locomotion_seconds: 20.0  # s
+  startup_seconds: 1.0  # s; tracking-error allowance at episode start
   velocity_mae: 0.05  # m/s
   yaw_rate_mae: 0.2  # rad/s
-  pitch_deadband: 0.08726646259971647  # 5 degrees in radians; all curriculum stages
-  forward_velocities: [-0.1, 0.0, 0.1]
-  straight_line_forward_velocities: [0.005, 0.0, -0.005]
-  yaw_rates: [-0.5, 0.0, 0.5]
+  pitch_deadband: 0.02  # rad (~1.15°); all curriculum stages
+  forward_velocities: [-0.1, 0.0, 0.1]  # m/s
+  straight_line_forward_velocities: [0.02, 0.0, -0.02]  # m/s
+  yaw_rates: [-0.5, 0.0, 0.5]  # rad/s about body +Z
 
 kl_guard:
   enabled: true
-  max_kl: 0.02  # mean joint KL over all valid rollout decisions
+  max_kl: 0.02  # nats; mean joint KL over all valid rollout decisions
   max_backtracks: 6  # at most seven candidate steps including the initial attempt
   lr_safety: 0.95  # new policy LR = LR * safety * sqrt(max_kl / measured_kl)
   min_lr: 0.000001
@@ -89,17 +90,17 @@ guard:
   episodes: 50  # fixed validation batch; covers all curriculum command pairs
   seed: 1042
   drop_fraction: 0.50  # rollback after a drop larger than both this fraction and absolute_drop
-  absolute_drop: 50.0
+  absolute_drop: 50.0  # reward units
   patience: 1  # consecutive degraded validation checks
-  min_best_return: 100.0  # do not constrain noisy initial learning
+  min_best_return: 100.0  # reward units; do not constrain noisy initial learning
   lr_factor: 0.95
   min_lr: 0.000001
   recovery_attempts: 20  # after rollback, check each update; stop after N rejections (0 disables)
 
 env:
   step_time: 0.01  # seconds
-  step_time_std: 0.001  # 0 disables jitter; use 0.002 for approximately 2 ms std
-  min_step_time: 0.007  # lower jitter bound; rounded upward to the 2 ms physics grid
+  step_time_std: 0.001  # s; 0 disables jitter
+  min_step_time: 0.007  # s; lower jitter bound, rounded up to the 2 ms physics grid
   randomize: true  # vary initial pitch and physical parameters during training
   n_parallel: 16
   max_episode_time: 20.0  # seconds, independent of how many policy updates occur
@@ -107,7 +108,7 @@ env:
   arena_half_size: 20.0  # visual floor extent in meters; plane collisions are infinite
   tracking_mode: velocity  # velocity, position, position_velocity, or none
   target_pos: 0.0  # default fixed position target, meters from episode origin
-  target_trajectory: null  # optional default trajectory for training and evaluation
+  target_trajectory: null  # optional [time (s), position (m)] waypoints
   target_vel: 0.0  # default low-level command: balance and stop, m/s
   position_error_scale: 0.5  # meters; tanh((position - target) / scale)
   velocity_error_scale: 0.2  # m/s; tanh((velocity - target) / scale)
@@ -115,11 +116,11 @@ env:
   target_yaw_rate: 0.0  # rad/s about body +Z; positive turns left
   head_tracking: true
   head_target: [0.0, 0.0]  # horizontal gaze, forward neck-relative yaw, radians
-  head_trajectory: null
+  head_trajectory: null  # optional [time (s), elevation (rad), yaw (rad)] waypoints
   pitch_deadband: null  # null: linear pitch cost; radians: quadratic outside free region
   camera_view: both  # external, head, or both (overview left, head camera right)
 
-  # Relative standard deviation of body/head masses and wheel diameter
+  # Dimensionless relative standard deviation of body/head masses and wheel diameter
   random_scale: 0.01
 
   # All units are SI (International System of Units)
@@ -152,11 +153,11 @@ policy:
 
   # Shared sensor inputs; the trainer appends the selected tracking-mode inputs.
   inputs:
-    - filter/rp_pitch
-    - sens/left_wheel_vel
-    - sens/right_wheel_vel
-    - sens/head_pitch
-    - sens/head_turn
-    - env/obs_time
-    - sens/gyro
-    - sens/acc
+    - filter/rp_pitch  # rad
+    - sens/left_wheel_vel  # rad/s
+    - sens/right_wheel_vel  # rad/s
+    - sens/head_pitch  # rad
+    - sens/head_turn  # rad
+    - env/obs_time  # s
+    - sens/gyro  # rad/s, body XYZ
+    - sens/acc  # m/s², body XYZ

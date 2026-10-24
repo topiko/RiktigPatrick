@@ -10,4 +10,4 @@ env:
   n_parallel: 3
 
 train:
-  target_velocities: [-0.1, 0.0, 0.1]
+  target_velocities: [-0.1, 0.0, 0.1]  # m/s

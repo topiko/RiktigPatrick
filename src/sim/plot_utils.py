@@ -7,8 +7,42 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-from riktigpatric.patrick import Actions, StateVarKey
+from riktigpatric.patrick import Actions, DerivedObs, Observable, StateVarKey, Target
 from sim.utils import Episode, MiscKeys
+
+STREAM_UNITS = {
+    **dict.fromkeys((Observable.OBS_TIME, Actions.TIME), "s"),
+    **dict.fromkeys((Target.TARGET_POS, DerivedObs.CURRENT_POS), "m"),
+    **dict.fromkeys((Target.TARGET_VEL, DerivedObs.CURRENT_VEL), "m/s"),
+    Observable.ACC: "m/s²",
+    **dict.fromkeys((
+        Observable.RP_PITCH, Observable.RP_ROLL, Observable.TRUE_PITCH,
+        Observable.HEAD_PITCH, Observable.HEAD_TURN, Observable.TRUE_CAMERA_PITCH,
+        Target.CAMERA_PITCH_WORLD, Target.HEAD_YAW_NECK, DerivedObs.CAMERA_PITCH_WORLD,
+    ), "rad"),
+    **dict.fromkeys((
+        Observable.GYRO, Observable.LEFT_WHEEL_VEL, Observable.RIGHT_WHEEL_VEL,
+        Observable.HEAD_PITCH_VEL, Observable.HEAD_TURN_VEL,
+        Target.YAW_RATE, DerivedObs.YAW_RATE,
+        Actions.VEL_LEFT_WHEEL, Actions.VEL_RIGHT_WHEEL, Actions.VEL_WHEEL_DIFF,
+        Actions.VEL_HEAD_PITCH, Actions.VEL_HEAD_TURN,
+    ), "rad/s"),
+    **dict.fromkeys((
+        Actions.ACC_LEFT_WHEEL, Actions.ACC_RIGHT_WHEEL, Actions.ACC_BOTH_WHEELS,
+        Actions.ACC_HEAD_PITCH, Actions.ACC_HEAD_TURN, Actions.ACC_YAW_TURN,
+    ), "rad/s²"),
+    **dict.fromkeys((
+        DerivedObs.POSITION_ERROR, DerivedObs.VELOCITY_ERROR, MiscKeys.LOGPS,
+    ), "dimensionless"),
+    **dict.fromkeys((
+        MiscKeys.REWARDS, MiscKeys.VALUE_ESTIM, MiscKeys.RETURNS, MiscKeys.ADVANTAGES,
+        *(key for key in Observable if key.value.startswith("reward/")),
+    ), "reward units"),
+}
+
+
+def stream_label(key: StateVarKey | Actions | MiscKeys) -> str:
+    return f"{key.value} [{STREAM_UNITS[key]}]"
 
 
 def plot_stream(
@@ -22,8 +56,8 @@ def plot_stream(
     x = eps.get_data(xkey)
     y = eps.get_data(ykey)
 
-    ax.plot(x, y, "-|", lw=1, label=ykey)
-    ax.set_ylabel(ykey.value)
+    ax.plot(x, y, "-|", lw=1, label=stream_label(ykey))
+    ax.set_ylabel(stream_label(ykey))
 
     ax.spines.top.set_visible(False)
     ax.spines.right.set_visible(False)

@@ -440,23 +440,46 @@ def _has_checkpoint(client, run_id: str, artifact_name: str) -> bool:
 
 
 def _select_parent_child(client, children) -> tuple[str, str] | None:
-    best_children = []
+    """Prefer curriculum progress, then validated return within that stage."""
+    resumable = []
     for child in children:
-        if _has_checkpoint(client, child.info.run_id, "best.pt"):
+        checkpoints = {
+            artifact.path for artifact in client.list_artifacts(
+                child.info.run_id, "checkpoints"
+            )
+        } & {"checkpoints/best.pt", "checkpoints/latest.pt"}
+        if checkpoints:
+            stage = int(child.data.tags.get("curriculum.stage_index", -1))
+            resumable.append((stage, child, checkpoints))
+    if not resumable:
+        return None
+    furthest_stage = max(stage for stage, _, _ in resumable)
+    candidates = [(child, checkpoints) for stage, child, checkpoints in resumable
+                  if stage == furthest_stage]
+    best_children = []
+    for child, checkpoints in candidates:
+        if "checkpoints/best.pt" in checkpoints:
             score = _best_run_score(client, child.info.run_id)
             if score is not None:
                 best_children.append((score, child))
     if best_children:
-        _, selected = max(best_children, key=lambda item: item[0])
-        return selected.info.run_id, "best.pt"
-    for child in children:
-        if _has_checkpoint(client, child.info.run_id, "latest.pt"):
-            return child.info.run_id, "latest.pt"
-    return None
+        score, selected = max(best_children, key=lambda item: item[0])
+        artifact_name = "best.pt"
+    else:
+        selected, checkpoints = candidates[0]  # Children are newest first.
+        score = None
+        artifact_name = (
+            "best.pt" if "checkpoints/best.pt" in checkpoints else "latest.pt"
+        )
+    LOG.info("Selected child %s: stage=%s status=%s best_return=%s checkpoint=%s",
+             selected.info.run_id,
+             selected.data.tags.get("curriculum.stage", "unknown"),
+             selected.info.status, score, artifact_name)
+    return selected.info.run_id, artifact_name
 
 
 def resolve_resume_path(value: str, checkpoint_dir: str | Path) -> Path:
-    """Resolve a local path, an MLflow child best, or a parent's best child."""
+    """Resolve a local path, a child best, or a parent's furthest-stage best."""
     local = Path(value).expanduser()
     if local.exists() or re.fullmatch(r"[0-9a-fA-F]{32}", value) is None:
         return local

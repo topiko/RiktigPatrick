@@ -8,9 +8,9 @@ curriculum:
 env:
   tracking_mode: position
   n_parallel: 2
-  target_trajectory: [[0.0, 0.0], [2.0, 0.2], [4.0, 0.0]]
+  target_trajectory: [[0.0, 0.0], [2.0, 0.2], [4.0, 0.0]]  # [time (s), position (m)]
 
 train:
-  target_trajectories:
+  target_trajectories:  # per-env [time (s), position (m)] waypoints
     - [[0.0, 0.0], [2.0, 0.2], [4.0, 0.0]]
     - [[0.0, 0.0], [2.0, -0.2], [4.0, 0.0]]
