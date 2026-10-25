@@ -495,6 +495,27 @@ class TrainingSafetyTests(unittest.TestCase):
         self.assertEqual(_select_parent_child(client, [children[2]]),
                          ("best", "best.pt"))
 
+    def test_parent_resume_compares_stage_names_across_curriculum_versions(self):
+        def child(run_id, version, stage, index):
+            return Mock(info=Mock(run_id=run_id, status="FAILED"), data=Mock(tags={
+                "curriculum.version": str(version), "curriculum.stage": stage,
+                "curriculum.stage_index": str(index),
+            }))
+
+        client = Mock()
+        client.list_artifacts.return_value = [Mock(path="checkpoints/best.pt")]
+        client.get_metric_history.side_effect = lambda run_id, metric: [
+            Mock(value=1000 if run_id == "directions" else 500)
+        ]
+        directions = child("directions", 7, "direction_changes", 2)
+        steering = child("steering", 6, "locomotion", 2)
+        self.assertEqual(_select_parent_child(client, [directions, steering]),
+                         ("steering", "best.pt"))
+        # Before schema 5, locomotion meant straight-line training.
+        old = child("old", 4, "locomotion", 1)
+        self.assertEqual(_select_parent_child(client, [old, directions]),
+                         ("directions", "best.pt"))
+
     def test_resumed_parent_keeps_immutable_mlflow_params(self):
         run_id = "a" * 32
         parent_id = "b" * 32

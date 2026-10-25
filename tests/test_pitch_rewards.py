@@ -77,7 +77,8 @@ class PitchRewardTests(unittest.TestCase):
                     assert isinstance(raw, GymRP)
                     self.assertEqual(raw.pitch_deadband, cfg.curriculum.pitch_deadband)
                     raw.state.obs.set_observable(
-                        Observable.RP_PITCH, np.array([math.radians(3)])
+                        Observable.RP_PITCH,
+                        np.array([cfg.curriculum.pitch_deadband / 2]),
                     )
                     rewards = raw._calculate_rewards(raw.state, terminated=False)
                     self.assertEqual(rewards[Observable.REWARD_RP_PITCH], 0)

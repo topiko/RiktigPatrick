@@ -14,6 +14,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from riktigpatric.patrick import Actions, DerivedObs, Observable, Target
+from riktigpatric.trajectory import SinusoidalPositionTrajectory
 from sim.checkpoints import (
     PolicyGuard,
     capture_state,
@@ -28,6 +29,7 @@ from sim.train_agent import (
     get_plot_keys,
     make_agent,
     make_validation_env,
+    rollout,
     run_training_loop,
     start_stage_run,
     training_update,
@@ -165,7 +167,7 @@ class CurriculumTests(unittest.TestCase):
                     self.assertEqual(rewards[key], 0)
             self.assertLess(rewards[Observable.REWARD_VEL], 0)
             self.assertEqual(rewards[Observable.REWARD_WHEEL_VEL], 0)
-            if stage in ("hold_position", "straight_line"):
+            if stage in ("hold_position", "straight_line", "direction_changes"):
                 self.assertLess(rewards[Observable.REWARD_POS], 0)
             else:
                 self.assertEqual(rewards[Observable.REWARD_POS], 0)
@@ -187,7 +189,7 @@ class CurriculumTests(unittest.TestCase):
         env = self.env(cfg)
         training_update(cfg, env, agent, optimizer, 0, curriculum)
         curriculum.advance(agent, optimizer)
-        for newly_active in ((Actions.VEL_WHEEL_DIFF,), HEAD_ACTIONS):
+        for newly_active in ((), (Actions.VEL_WHEEL_DIFF,), HEAD_ACTIONS):
             before = deepcopy(agent.state_dict())
             adam = deepcopy(optimizer.state_dict())
             curriculum.advance(agent, optimizer)
@@ -229,6 +231,8 @@ class CurriculumTests(unittest.TestCase):
              for velocity, _ in curriculum.straight_line_pairs],
         )
         curriculum.advance(agent, optimizer)
+        self.assertEqual(curriculum.stage, "direction_changes")
+        curriculum.advance(agent, optimizer)
         commands = curriculum.prepare_rollout(dummy, agent)
         actual = set(zip(commands["target_velocities"], commands["target_yaw_rates"]))
         self.assertEqual(actual, set(map(tuple, curriculum.command_pairs)))
@@ -248,6 +252,76 @@ class CurriculumTests(unittest.TestCase):
                              validate_policy(cfg, env, agent, curriculum))
             self.assert_state_equal(capture_state(agent, optimizer, 0, curriculum), rng)
             self.assertTrue(all(e.unwrapped._randomize for e in env.envs))
+
+    def test_direction_changes_sample_pairs_and_fix_validation_without_using_rng(self):
+        cfg, curriculum, agent, optimizer = self.training()
+        while curriculum.stage != "direction_changes":
+            curriculum.advance(agent, optimizer)
+        dummy = SimpleNamespace(num_envs=200, set_attr=Mock())
+
+        def trajectories():
+            return next(call.args[1] for call in reversed(dummy.set_attr.call_args_list)
+                        if call.args[0] == "target_trajectory")
+
+        commands = curriculum.prepare_rollout(dummy, agent)
+        self.assertIsNone(commands["target_velocities"])
+        np.testing.assert_array_equal(commands["target_yaw_rates"], 0)
+        sampled = trajectories()
+        self.assertEqual({(t.amplitude, t.omega) for t in sampled},
+                         set(map(tuple, curriculum.direction_change_pairs)))
+        self.assertTrue(all(isinstance(t, SinusoidalPositionTrajectory)
+                            for t in sampled))
+        before = capture_state(agent, optimizer, 0, curriculum)
+        curriculum.prepare_rollout(dummy, agent, evaluation=True)
+        first = trajectories()
+        curriculum.prepare_rollout(dummy, agent, evaluation=True)
+        self.assertEqual(first, trajectories())
+        self.assertEqual([(t.amplitude, t.omega)
+                          for t in first[:len(curriculum.direction_change_pairs)]],
+                         list(map(tuple, curriculum.direction_change_pairs)))
+        self.assert_state_equal(capture_state(agent, optimizer, 0, curriculum), before)
+        with tempfile.TemporaryDirectory() as folder:
+            path = save_checkpoint(Path(folder) / "directions.pt", before, {})
+            curriculum.advance(agent, optimizer)
+            load_checkpoint(path, agent, optimizer, curriculum)
+        self.assertEqual(curriculum.stage, "direction_changes")
+        self.assert_state_equal(capture_state(agent, optimizer, 0, curriculum), before)
+
+    def test_direction_change_rollout_records_coupled_targets_and_rewards(self):
+        cfg, curriculum, agent, _ = self.training()
+        curriculum.stage = "direction_changes"
+        env = self.env(cfg)
+        with torch.no_grad():
+            buffers = rollout(env, agent, seed=123, curriculum=curriculum,
+                              evaluation=True, bootstrap_time_limits=True)
+        for buffer, (amplitude, omega) in zip(
+            buffers, curriculum.direction_change_pairs
+        ):
+            time = buffer.get_observable(Observable.OBS_TIME)[:, 0]
+            position = buffer.get_observable(Target.TARGET_POS)[:, 0]
+            velocity = buffer.get_observable(Target.TARGET_VEL)[:, 0]
+            np.testing.assert_allclose(position, amplitude * np.sin(omega * time),
+                                       atol=1e-7)
+            np.testing.assert_allclose(velocity, amplitude * omega * np.cos(omega*time),
+                                       atol=1e-7)
+            self.assertEqual(position[0], 0)
+            self.assertGreater(len(time), 1)
+        raw = env.envs[0].unwrapped
+        raw.state.derived_obs[DerivedObs.CURRENT_POS][:] = raw.state.target_pos
+        raw.state.derived_obs[DerivedObs.CURRENT_VEL][:] = raw.state.target_vel
+        rewards = raw._calculate_rewards(raw.state, terminated=False)
+        self.assertEqual(rewards[Observable.REWARD_POS], 0)
+        self.assertEqual(rewards[Observable.REWARD_VEL], 0)
+        # Transitioning away must remove the oscillating velocity reference too.
+        curriculum.stage = "locomotion"
+        with torch.no_grad():
+            buffers = rollout(env, agent, seed=123, curriculum=curriculum,
+                              evaluation=True)
+        for buffer, (velocity, _) in zip(buffers, curriculum.command_pairs):
+            np.testing.assert_allclose(buffer.get_observable(Target.TARGET_VEL),
+                                       velocity)
+        self.assertTrue(all(not isinstance(t, SinusoidalPositionTrajectory)
+                            for t in env.get_attr("target_trajectory")))
 
     def test_physical_metrics_include_short_failures_and_distinguish_time_limit(self):
         curriculum = Curriculum(config())
@@ -295,7 +369,17 @@ class CurriculumTests(unittest.TestCase):
         curriculum.advance(agent, optimizer)
         self.assertEqual(curriculum.stage, "straight_line")
         self.assertFalse(curriculum.observe({
+            **good, "validation/position_mae": 0.06
+        }))
+        for expected in (False, False, True):
+            self.assertEqual(curriculum.observe(good), expected)
+        curriculum.advance(agent, optimizer)
+        self.assertEqual(curriculum.stage, "direction_changes")
+        self.assertFalse(curriculum.observe({
             **good, "validation/position_mae": 0.03
+        }))
+        self.assertFalse(curriculum.observe({
+            **good, "validation/velocity_mae": 0.06
         }))
         for expected in (False, False, True):
             self.assertEqual(curriculum.observe(good), expected)
@@ -318,7 +402,7 @@ class CurriculumTests(unittest.TestCase):
         self.assertFalse(curriculum.observe({
             **passing_metrics(), "validation/survival_fraction": 0.8
         }))
-        for stage in ("hold_position", "straight_line", "locomotion"):
+        for stage in STAGES[:-1]:
             self.assertEqual(curriculum.stage, stage)
             for expected in (False, False, True):
                 self.assertEqual(curriculum.observe(passing_metrics()), expected)
@@ -373,7 +457,8 @@ class CurriculumTests(unittest.TestCase):
         for position in (-0.8, -0.4, 0.4, 0.8):
             state.derived_obs[DerivedObs.CURRENT_POS][:] = position
             rewards = raw._calculate_rewards(state, terminated=False)
-            self.assertAlmostEqual(rewards[Observable.REWARD_POS], -abs(position))
+            self.assertAlmostEqual(rewards[Observable.REWARD_POS],
+                                   cfg.reward["reward/pos"] * abs(position))
             self.assertAlmostEqual(rewards[Observable.REWARD_VEL], -0.1)
             self.assertEqual(rewards[Observable.REWARD_WHEEL_VEL], 0)
         curriculum.advance(agent, optimizer)
@@ -383,7 +468,8 @@ class CurriculumTests(unittest.TestCase):
         state.derived_obs[DerivedObs.CURRENT_POS][:] = 0.8
         state.derived_obs[DerivedObs.CURRENT_VEL][:] = 0.2
         rewards = raw._calculate_rewards(state, terminated=False)
-        self.assertAlmostEqual(rewards[Observable.REWARD_POS], -0.8)
+        self.assertAlmostEqual(rewards[Observable.REWARD_POS],
+                               cfg.reward["reward/pos"] * 0.8)
         self.assertAlmostEqual(
             rewards[Observable.REWARD_VEL], -4 * abs(0.2 - state.target_vel)
         )
@@ -413,6 +499,8 @@ class CurriculumTests(unittest.TestCase):
             (2, "stop", "hold_position"), (3, "hold_position", "hold_position"),
             (3, "locomotion", "straight_line"), (4, "hold_position", "hold_position"),
             (4, "locomotion", "straight_line"), (4, "full_control", "full_control"),
+            (5, "locomotion", "locomotion"), (6, "straight_line", "straight_line"),
+            (6, "locomotion", "locomotion"), (6, "full_control", "full_control"),
         ):
             with (
                 self.subTest(version=version, stage=old),
@@ -445,7 +533,8 @@ class CurriculumTests(unittest.TestCase):
         _, curriculum, agent, optimizer = self.training()
         before = capture_state(agent, optimizer, 0, curriculum)
         for version, stage in (
-            (7, "hold_position"), (6, "balance"), (5, "balance"),
+            (8, "hold_position"), (6, "direction_changes"),
+            (6, "balance"), (5, "balance"),
             (4, "balance"), (True, "balance"), (1, "stop")
         ):
             invalid = deepcopy(before)
@@ -492,8 +581,8 @@ class CurriculumTests(unittest.TestCase):
 
     def test_failed_activation_restores_partially_initialized_heads_and_stage(self):
         cfg, curriculum, agent, optimizer = self.training()
-        curriculum.advance(agent, optimizer)
-        curriculum.advance(agent, optimizer)
+        while curriculum.stage != "locomotion":
+            curriculum.advance(agent, optimizer)
         curriculum.success_streak = 2
         guard = PolicyGuard(agent, optimizer, curriculum=curriculum)
         initialize = agent.initialize_neutral_head
@@ -519,8 +608,8 @@ class CurriculumTests(unittest.TestCase):
 
     def test_velocity_curriculum_plots_target_and_current_position(self):
         cfg, curriculum, agent, optimizer = self.training()
-        curriculum.advance(agent, optimizer)
-        curriculum.advance(agent, optimizer)
+        while curriculum.stage != "locomotion":
+            curriculum.advance(agent, optimizer)
         keys = get_plot_keys(cfg, agent, curriculum)
         self.assertIn(
             (Observable.OBS_TIME,
@@ -578,7 +667,8 @@ class CurriculumTests(unittest.TestCase):
 
         def validate(*args):
             return passing_metrics({
-                "hold_position": 75, "straight_line": 60, "locomotion": 50,
+                "hold_position": 75, "straight_line": 60, "direction_changes": 55,
+                "locomotion": 50,
                 "full_control": 25,
             }[curriculum.stage])
 
@@ -682,6 +772,12 @@ class CurriculumTests(unittest.TestCase):
             ("curriculum.survival_fraction", 1.1),
             ("curriculum.hold_seconds", 0),
             ("curriculum.forward_velocities", []),
+            ("curriculum.direction_changes_amplitudes", []),
+            ("curriculum.direction_changes_amplitudes", [0]),
+            ("curriculum.direction_changes_amplitudes", [float("nan")]),
+            ("curriculum.direction_changes_angular_frequencies", [0]),
+            ("curriculum.direction_changes_angular_frequencies", [-0.5]),
+            ("curriculum.direction_changes_position_mae", 0),
             ("curriculum.yaw_rates", [float("nan")]),
             ("guard.episodes", 1),
             ("env.tracking_mode", "position"),

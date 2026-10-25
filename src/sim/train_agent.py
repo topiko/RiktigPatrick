@@ -44,7 +44,7 @@ from sim.checkpoints import (
     restore_state,
     save_checkpoint,
 )
-from sim.curriculum import Curriculum
+from sim.curriculum import STAGES, Curriculum, migrated_stage
 from sim.devices import evaluation_rng, resolve_device, seed_torch
 from sim.episode_io import resample_video_frames, save_episode_csv
 from sim.kl_diagnostics import (
@@ -449,7 +449,14 @@ def _select_parent_child(client, children) -> tuple[str, str] | None:
             )
         } & {"checkpoints/best.pt", "checkpoints/latest.pt"}
         if checkpoints:
-            stage = int(child.data.tags.get("curriculum.stage_index", -1))
+            tags = child.data.tags
+            name = migrated_stage(
+                tags.get("curriculum.stage", ""),
+                int(tags.get("curriculum.version", Curriculum.VERSION)),
+            )
+            # Numeric indices shift when a curriculum stage is inserted.
+            stage = (STAGES.index(name) if name in STAGES
+                     else int(tags.get("curriculum.stage_index", -1)))
             resumable.append((stage, child, checkpoints))
     if not resumable:
         return None

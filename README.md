@@ -115,7 +115,7 @@ when resolving them; the lockfile is not currently tracked in this repository.
 ## Training
 
 ```bash
-# Default: four-stage curriculum, 16 synchronously stepped environments
+# Default: five-stage curriculum, 16 synchronously stepped environments
 uv run python -m sim.train_agent
 
 # One environment, same training loop
@@ -498,13 +498,14 @@ image retained and duration rounded to a video frame.
 ### Curriculum (default)
 
 `curriculum.enabled=true` starts in **position holding**, then advances based on fixed-suite
-validation through straight-line tracking before enabling steering. One GRU, critic
+validation through straight-line tracking and direction changes before enabling steering. One GRU, critic
 and four action heads exist throughout; input/output shapes stay constant across stages.
 
 | Stage | Active action heads | Objectives |
 |-------|---------------------|------------|
 | `hold_position` | Common wheel acceleration | Hold the starting position with gentle velocity damping |
 | `straight_line` | Common wheel acceleration | Track forward velocity without steering or yaw reward |
+| `direction_changes` | Common wheel acceleration | Track sinusoidal position and its velocity, learning braking and reversals |
 | `locomotion` | Common acceleration + wheel-speed difference | Balance, forward velocity and yaw rate |
 | `full_control` | All four | Locomotion plus horizontal camera elevation and forward neck yaw |
 
@@ -519,7 +520,7 @@ start with fresh optimizer moments. Inactive continuous heads also issue exactly
 zero, with no gradient into their mean or standard deviation.
 
 **All curriculum stages allow free leaning** within
-`curriculum.pitch_deadband=0.08726646259971647` radians (±5°), then apply a quadratic
+`curriculum.pitch_deadband=0.02` radians (approximately ±1.15°), then apply a quadratic
 penalty. A nonzero torso angle may be needed to place the combined centre of mass
 above the wheel contact line. The curve matches the old pitch penalty at the
 20° fall-angle reference:
@@ -529,8 +530,8 @@ excess = max(0, abs(filtered_body_pitch) - deadband)
 pitch_reward = pitch_scale * fall_angle * (excess / (fall_angle - deadband))²
 ```
 
-With the default scale this costs approximately 0 at 5°, −0.222 at 10° and −2 at
-20°, symmetrically for forward/backward lean. True body pitch still controls the
+With the default scale this reaches approximately −2 at 20°, symmetrically for
+forward/backward lean. True body pitch still controls the
 20° episode termination. Deadbands must be nonnegative and below 20°, in radians;
 `null` selects the original linear penalty. With curriculum disabled,
 `env.pitch_deadband` selects the shaping instead (default `null`).
@@ -539,7 +540,7 @@ Training begins with survival, pitch shaping and position holding together;
 there is no survival-only warm-up. Steering and head commands start at zero.
 The hold stage targets `x=0` relative to the episode origin, using signed fore/aft
 wheel odometry, plus gentle damping toward `v=0`. With default scales its tracking
-reward is `-abs(x) - 0.5*abs(v)`: `reward/pos=-1` and
+reward is `-2*abs(x) - 0.5*abs(v)`: `reward/pos=-2` and
 `reward/vel=-4` multiplied by `curriculum.hold_velocity_weight=0.125`.
 This penalizes sustained drift while discouraging oscillation around the origin.
 Both position and velocity are observable throughout. The wheel controller is trained
@@ -547,12 +548,41 @@ to stay near the origin from the outset, rather than first learning to accelerat
 until reaching its speed limit.
 
 After position hold, the straight-line stage samples only
-`curriculum.straight_line_forward_velocities=[0.0025,0,-0.0025]` m/s, or roughly
-5 cm over 20 seconds, and keeps yaw targets at zero. Position tracking is active in
+`curriculum.straight_line_forward_velocities=[0.05,0,-0.05]` m/s, or up to
+1 m over 20 seconds, and keeps yaw targets at zero. Position tracking is active in
 this stage, so the policy is rewarded for following the moving reference as well as
 matching its velocity. The differential steering head remains inactive and receives
-no gradient. Only after straight-line promotion does
-the locomotion stage sample independent `curriculum.forward_velocities` and
+no gradient. The next stage, `direction_changes`, samples a signed amplitude `A`
+and positive angular frequency `omega` independently from configurable grids,
+once per episode:
+
+```text
+x_target(t) = A * sin(omega * t)
+v_target(t) = A * omega * cos(omega * t)
+```
+
+Both references are evaluated analytically at the same episode-relative sensor
+timestamp, including reset and the final observation. Position starts at zero;
+initial velocity is `A * omega`. A negative amplitude reverses the initial direction.
+The defaults are:
+
+```yaml
+curriculum:
+  direction_changes_amplitudes: [-0.1, -0.05, 0.05, 0.1]  # m
+  direction_changes_angular_frequencies: [0.4, 0.6]  # rad/s, not Hz
+  direction_changes_position_mae: 0.02  # m
+```
+
+These give peak speeds of 0.02–0.06 m/s, peak accelerations of 0.008–0.036 m/s²,
+and periods of approximately 10.5–15.7 s. The rollout should be long enough to
+include reversals when changing the frequency grid. This stage uses the full
+position-plus-velocity reward, `locomotion_seconds`, and `velocity_mae`; steering,
+yaw reward and head control remain inactive. Validation cycles through every
+amplitude/frequency pair without consuming training RNG; `guard.episodes` must
+cover the largest stage grid. Existing target/error plots show both moving references.
+
+After direction-change promotion, the locomotion stage samples independent
+`curriculum.forward_velocities` and
 `curriculum.yaw_rates` pairs. Gaze references remain `[0,0]`. A red MuJoCo marker
 shows the current position reference in recorded videos.
 Validation deterministically covers all pairs, with fixed seeds and small initial
@@ -567,7 +597,8 @@ and strict tracking limits, controlled by `curriculum.consecutive_passes` and
 | Promotion | Survival requirement | Tracking-error limits |
 |-----------|----------------------|-----------------------|
 | Position hold → Straight line | ≥90% reach 20 s | Position MAE ≤0.05 m and forward-speed MAE ≤0.05 m/s |
-| Straight line → Locomotion | ≥90% reach 20 s | Position MAE ≤0.02 m and forward-speed MAE ≤0.05 m/s; yaw-rate error is diagnostic only |
+| Straight line → Direction changes | ≥90% reach 20 s | Position MAE ≤0.05 m and forward-speed MAE ≤0.05 m/s; yaw-rate error is diagnostic only |
+| Direction changes → Locomotion | ≥90% reach 20 s | Position MAE ≤0.02 m and forward-speed MAE ≤0.05 m/s; yaw-rate error is diagnostic only |
 | Locomotion → Full control | ≥90% reach 20 s | Forward-speed MAE ≤0.05 m/s; yaw-rate MAE ≤0.2 rad/s |
 
 These are tunable `curriculum.*` settings, not measured guarantees. MAEs omit the
@@ -902,9 +933,9 @@ disabled. To train without rendering, set both `logging.plot_freq=0` and
 #### Separate MLflow runs per stage
 
 With curriculum and MLflow enabled, the session is a parent run containing nested
-`hold_position`, `straight_line`, `locomotion` and `full_control` runs as those stages
-are reached. Each
-checkpoints. The parent holds the overall configuration and build/device tags.
+`hold_position`, `straight_line`, `direction_changes`, `locomotion` and `full_control`
+runs as those stages are reached. Each child owns its metrics and checkpoints.
+The parent holds the overall configuration and build/device tags.
 Reward curves from different objectives are therefore separate.
 
 Child run names include `resumed_from=<run-id>` when training resumes from an MLflow
@@ -985,9 +1016,12 @@ load with it disabled. Curriculum resume restores the neutral-action mask withou
 reinitializing learned heads. Changed curriculum criteria/commands or validation
 seed/batch/timing settings reset the streak while retaining the stage.
 
-Curriculum state uses schema version 6. Older `balance` and `stop` stages map to
-`hold_position`; older `locomotion` checkpoints map to `straight_line` so steering
-is relearned after the new intermediate stage. Later stage names are retained.
+Curriculum state uses schema version 7. Older `balance` and `stop` stages map to
+`hold_position`; schema 1–4 `locomotion` checkpoints map to `straight_line` because
+they predate steering activation. Schema 5–6 stage names are retained: a resumed
+straight-line policy next advances to direction changes, while an already advanced
+locomotion/full-control policy keeps its stage. Parent-run selection compares
+migrated stage names, so indices from different curriculum versions remain comparable.
 Migration preserves weights and Adam state and resets the promotion streak for
 the new curriculum definition.
 

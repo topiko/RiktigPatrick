@@ -1,4 +1,4 @@
-"""Four-stage curriculum: hold position, move straight, move/turn and control gaze."""
+"""Balance, move straight, reverse direction, move/turn, then control gaze."""
 
 import logging
 from itertools import product
@@ -16,12 +16,16 @@ from riktigpatric.patrick import (
     Observable,
     Target,
 )
-from riktigpatric.trajectory import PositionTrajectory
+from riktigpatric.trajectory import PositionTrajectory, SinusoidalPositionTrajectory
 from sim.rewards import validate_pitch_deadband
 from sim.utils import EpisodeBuffer
 
 LOG = logging.getLogger(__name__)
-STAGES = ("hold_position", "straight_line", "locomotion", "full_control")
+STAGES = (
+    "hold_position", "straight_line", "direction_changes", "locomotion", "full_control",
+)
+POSITION_STAGES = STAGES[:3]
+LEGACY_STAGES = ("hold_position", "straight_line", "locomotion", "full_control")
 HEAD_ACTIONS = (Actions.VEL_HEAD_PITCH, Actions.VEL_HEAD_TURN)
 HEAD_REWARDS = (
     Observable.REWARD_HEAD_PITCH, Observable.REWARD_CAMERA_PITCH,
@@ -29,8 +33,17 @@ HEAD_REWARDS = (
 )
 
 
+def migrated_stage(stage: str, version: int) -> str:
+    """Interpret names whose objectives changed in older checkpoint schemas."""
+    if stage in ("balance", "stop"):
+        return "hold_position"
+    if version <= 4 and stage == "locomotion":
+        return "straight_line"
+    return stage
+
+
 class Curriculum:
-    VERSION = 6  # Use a separate low-speed command grid for straight-line tracking.
+    VERSION = 7  # Insert sinusoidal direction changes before steering activation.
 
     def __init__(self, cfg: DictConfig):
         self.settings = OmegaConf.to_container(cfg.curriculum, resolve=True)
@@ -59,7 +72,14 @@ class Curriculum:
             (velocity, 0.0)
             for velocity in self.cfg.straight_line_forward_velocities
         ])
-        if cfg.guard.episodes < len(self.command_pairs):
+        self.direction_change_pairs = np.array(list(product(
+            self.cfg.direction_changes_amplitudes,
+            self.cfg.direction_changes_angular_frequencies,
+        )))
+        if cfg.guard.episodes < max(
+            len(self.command_pairs), len(self.straight_line_pairs),
+            len(self.direction_change_pairs),
+        ):
             raise ValueError("Validation must cover every curriculum command pair")
         self.stage = STAGES[0]
         self.success_streak = 0
@@ -106,6 +126,7 @@ class Curriculum:
         durations = (c.hold_seconds, c.locomotion_seconds)
         positive = (
             *durations, c.position_mae, c.straight_line_position_mae,
+            c.direction_changes_position_mae,
             c.velocity_mae, c.yaw_rate_mae
         )
         if not all(np.isfinite(v) and v > 0 for v in positive):
@@ -119,7 +140,8 @@ class Curriculum:
         ):
             raise ValueError("Invalid curriculum probability, startup or pass count")
         for grid in (
-            c.forward_velocities, c.straight_line_forward_velocities, c.yaw_rates
+            c.forward_velocities, c.straight_line_forward_velocities, c.yaw_rates,
+            c.direction_changes_amplitudes, c.direction_changes_angular_frequencies,
         ):
             values = np.asarray(grid, dtype=np.float64)
             if (
@@ -127,6 +149,12 @@ class Curriculum:
                 or np.any(abs(values) > float(np.finfo(np.float32).max))
             ):
                 raise ValueError("Command grids must contain finite float32 values")
+        if any(value == 0 for value in c.direction_changes_amplitudes):
+            raise ValueError("Direction-change amplitudes must be nonzero")
+        for amplitude, omega in product(
+            c.direction_changes_amplitudes, c.direction_changes_angular_frequencies
+        ):
+            SinusoidalPositionTrajectory(amplitude, omega)
 
     @property
     def index(self) -> int:
@@ -135,12 +163,12 @@ class Curriculum:
     @property
     def inactive_actions(self) -> tuple[Actions, ...]:
         stationary = (Actions.VEL_WHEEL_DIFF, *HEAD_ACTIONS)
-        return (stationary, stationary, HEAD_ACTIONS, ())[self.index]
+        return (stationary, stationary, stationary, HEAD_ACTIONS, ())[self.index]
 
     @property
     def disabled_rewards(self) -> tuple[Observable, ...]:
         stationary = (Observable.REWARD_YAW_RATE, *HEAD_REWARDS)
-        return (stationary, stationary, HEAD_REWARDS, ())[self.index]
+        return (stationary, stationary, stationary, HEAD_REWARDS, ())[self.index]
 
     def apply_policy(self, agent: Agent):
         agent.inactive_actions = self.inactive_actions
@@ -149,7 +177,7 @@ class Curriculum:
     def tracking_mode(self) -> str:
         return (
             "position_velocity"
-            if self.stage in ("hold_position", "straight_line") else "velocity"
+            if self.stage in POSITION_STAGES else "velocity"
         )
 
     @property
@@ -163,6 +191,14 @@ class Curriculum:
         env.set_attr("pitch_deadband", self.cfg.pitch_deadband)
         env.set_attr("tracking_mode", self.tracking_mode)
         env.set_attr("velocity_reward_weight", self.velocity_reward_weight)
+        if self.stage == "direction_changes":
+            pairs = self._sample_pairs(self.direction_change_pairs, env, evaluation)
+            env.set_attr("target_trajectory", [
+                SinusoidalPositionTrajectory(float(amplitude), float(omega))
+                for amplitude, omega in pairs
+            ])
+            # Reset/each sensor update evaluates both references at episode time.
+            return self._commands(None, np.zeros(env.num_envs))
         if self.stage == "hold_position":
             commands = np.zeros((env.num_envs, 2))
         else:
@@ -170,21 +206,29 @@ class Curriculum:
                 self.straight_line_pairs if self.stage == "straight_line"
                 else self.command_pairs
             )
-            indices = (
-                np.arange(env.num_envs) % len(pairs)
-                if evaluation else np.random.randint(len(pairs), size=env.num_envs)
-            )
-            commands = pairs[indices]
+            commands = self._sample_pairs(pairs, env, evaluation)
         duration = self.cfg.locomotion_seconds
         trajectories = [
             PositionTrajectory(((0.0, 0.0), (duration, float(velocity * duration))))
             for velocity in commands[:, 0]
         ]
         env.set_attr("target_trajectory", trajectories)
+        return self._commands(commands[:, 0], commands[:, 1])
+
+    @staticmethod
+    def _sample_pairs(pairs, env, evaluation):
+        indices = (
+            np.arange(env.num_envs) % len(pairs)
+            if evaluation else np.random.randint(len(pairs), size=env.num_envs)
+        )
+        return pairs[indices]
+
+    @staticmethod
+    def _commands(velocities, yaw_rates):
         return {
-            "target_velocities": commands[:, 0],
-            "target_yaw_rates": commands[:, 1],
-            "head_targets": [[0.0, 0.0]] * env.num_envs,
+            "target_velocities": velocities,
+            "target_yaw_rates": yaw_rates,
+            "head_targets": [[0.0, 0.0]] * len(yaw_rates),
             "head_trajectories": None,
         }
 
@@ -227,19 +271,20 @@ class Curriculum:
         """Record one scheduled evaluation; a true result requests promotion."""
         if self.stage == "full_control":
             return False
-        position_limit = (
-            self.cfg.position_mae if self.stage == "hold_position"
-            else self.cfg.straight_line_position_mae
-        )
+        position_limit = {
+            "hold_position": self.cfg.position_mae,
+            "straight_line": self.cfg.straight_line_position_mae,
+            "direction_changes": self.cfg.direction_changes_position_mae,
+        }.get(self.stage)
         position_passed = (
-            self.stage not in ("hold_position", "straight_line")
+            position_limit is None
             or metrics["validation/position_mae"] <= position_limit
         )
         passed = (
             metrics["validation/survival_fraction"] >= self.cfg.survival_fraction
             and metrics["validation/velocity_mae"] <= self.cfg.velocity_mae
             and position_passed
-            and (self.stage in ("hold_position", "straight_line")
+            and (self.stage in POSITION_STAGES
                  or metrics["validation/yaw_rate_mae"] <= self.cfg.yaw_rate_mae)
         )
         self.success_streak = self.success_streak + 1 if passed else 0
@@ -251,6 +296,7 @@ class Curriculum:
         next_stage = STAGES[self.index + 1]
         newly_active = {
             "straight_line": (),
+            "direction_changes": (),
             "locomotion": (Actions.VEL_WHEEL_DIFF,),
             "full_control": HEAD_ACTIONS,
         }[next_stage]
@@ -270,14 +316,15 @@ class Curriculum:
 
     def validate_state(self, state: dict):
         version = state.get("version", 1)
-        if type(version) is not int or version not in (1, 2, 3, 4, 5, self.VERSION):
+        if type(version) is not int or version not in (1, 2, 3, 4, 5, 6, self.VERSION):
             raise ValueError("Unsupported checkpoint curriculum version")
         stages = {
             1: ("balance", "locomotion", "full_control"),
             2: ("balance", "stop", "locomotion", "full_control"),
             3: ("balance", "hold_position", "locomotion", "full_control"),
             4: ("hold_position", "locomotion", "full_control"),
-            5: STAGES,
+            5: LEGACY_STAGES,
+            6: LEGACY_STAGES,
         }.get(version, STAGES)
         if (
             state.get("stage") not in stages
@@ -290,12 +337,7 @@ class Curriculum:
         self.validate_state(state)
         version = state.get("version", 1)
         legacy = version != self.VERSION
-        if state["stage"] in ("balance", "stop"):
-            self.stage = "hold_position"
-        elif legacy and state["stage"] == "locomotion":
-            self.stage = "straight_line"
-        else:
-            self.stage = state["stage"]
+        self.stage = migrated_stage(state["stage"], version)
         if legacy:
             LOG.info("Migrated curriculum %s -> %s; reset promotion streak",
                      state["stage"], self.stage)

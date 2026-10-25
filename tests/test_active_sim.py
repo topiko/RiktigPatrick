@@ -232,7 +232,8 @@ class ActiveSimulationTests(unittest.TestCase):
                 np.testing.assert_allclose(obs[Target.TARGET_POS][:, 0], targets)
                 np.testing.assert_allclose(
                     obs[Observable.REWARD_POS][:, 0],
-                    -abs(obs[DerivedObs.CURRENT_POS][:, 0] - targets),
+                    cfg.reward["reward/pos"]
+                    * abs(obs[DerivedObs.CURRENT_POS][:, 0] - targets),
                 )
                 obs, _ = env.reset(seed=2)
                 np.testing.assert_allclose(obs[Target.TARGET_POS][:, 0], targets)
@@ -356,7 +357,8 @@ class ActiveSimulationTests(unittest.TestCase):
             positions = buffer.get_observable(DerivedObs.CURRENT_POS)[:, 0]
             np.testing.assert_allclose(
                 buffer.get_observable(Observable.REWARD_POS)[1:, 0],
-                -np.abs(positions[1:] - targets[1:]), atol=1e-7,
+                cfg.reward["reward/pos"] * np.abs(positions[1:] - targets[1:]),
+                atol=1e-7,
             )
         obs, _ = env.reset(seed=2)
         np.testing.assert_allclose(obs[Target.TARGET_POS][:, 0], [0.1, -0.2])

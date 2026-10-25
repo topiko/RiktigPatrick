@@ -1,6 +1,7 @@
 """Backend-independent position and head targets, evaluated using episode time."""
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -56,6 +57,35 @@ class PositionTrajectory(_WaypointTrajectory):
 
     def position_at(self, time: float) -> float:
         return float(self._sample(time)[0])
+
+
+@dataclass(frozen=True)
+class SinusoidalPositionTrajectory:
+    """Coupled x=A*sin(omega*t), v=A*omega*cos(omega*t); SI, episode-relative."""
+
+    amplitude: float  # m; sign selects the initial direction
+    omega: float  # rad/s
+
+    def __post_init__(self):
+        if not np.isfinite(self.omega) or self.omega <= 0:
+            raise ValueError("Sinusoidal angular frequency must be positive and finite")
+        if not all(np.isfinite(value) and abs(value) <= float(np.finfo(np.float32).max)
+                   for value in (self.amplitude, self.amplitude * self.omega)):
+            raise ValueError("Sinusoidal position and velocity must fit in float32")
+
+    def _phase(self, time: float) -> float:
+        if not np.isfinite(time) or time < 0 or not np.isfinite(self.omega * time):
+            raise ValueError("Trajectory time/phase must be finite and nonnegative")
+        return self.omega * time
+
+    def position_at(self, time: float) -> float:
+        return float(self.amplitude * np.sin(self._phase(time)))
+
+    def velocity_at(self, time: float) -> float:
+        return float(self.amplitude * self.omega * np.cos(self._phase(time)))
+
+
+PositionReference = PositionTrajectory | SinusoidalPositionTrajectory
 
 
 class HeadTrajectory(_WaypointTrajectory):

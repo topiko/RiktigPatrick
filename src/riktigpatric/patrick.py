@@ -18,7 +18,8 @@ from riktigpatric.geometry import camera_elevation, camera_rotation
 from riktigpatric.servo import Servo
 from riktigpatric.trajectory import (
     HeadTrajectory,
-    PositionTrajectory,
+    PositionReference,
+    SinusoidalPositionTrajectory,
     validate_head_target,
 )
 
@@ -398,7 +399,7 @@ class State:
             Target.CAMERA_PITCH_WORLD: np.array([0.0]),
             Target.HEAD_YAW_NECK: np.array([0.0]),
         }
-        self._target_trajectory: PositionTrajectory | None = None
+        self._target_trajectory: PositionReference | None = None
         self._head_trajectory: HeadTrajectory | None = None
         self.prev_t = 0.0
 
@@ -439,11 +440,11 @@ class State:
         self.targets[key] = np.array([value], dtype=np.float32)
 
     @property
-    def target_trajectory(self) -> PositionTrajectory | None:
+    def target_trajectory(self) -> PositionReference | None:
         return self._target_trajectory
 
     @target_trajectory.setter
-    def target_trajectory(self, trajectory: PositionTrajectory | None):
+    def target_trajectory(self, trajectory: PositionReference | None):
         """Replace the trajectory, sampling it at the current episode time."""
         self._target_trajectory = trajectory
         self._update_target()
@@ -491,6 +492,9 @@ class State:
         if self._target_trajectory is not None:
             position = self._target_trajectory.position_at(self.prev_t)
             self.targets[Target.TARGET_POS] = np.array([position], dtype=np.float32)
+            if isinstance(self._target_trajectory, SinusoidalPositionTrajectory):
+                velocity = self._target_trajectory.velocity_at(self.prev_t)
+                self.targets[Target.TARGET_VEL] = np.array([velocity], dtype=np.float32)
         if self._head_trajectory is not None:
             self._store_head_target(self._head_trajectory.angles_at(self.prev_t))
 

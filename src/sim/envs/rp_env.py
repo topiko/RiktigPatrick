@@ -66,7 +66,12 @@ from riktigpatric.patrick import (
     StateVarKey,
     Target,
 )
-from riktigpatric.trajectory import HeadTrajectory, PositionTrajectory
+from riktigpatric.trajectory import (
+    HeadTrajectory,
+    PositionReference,
+    PositionTrajectory,
+    SinusoidalPositionTrajectory,
+)
 from riktigpatric.wheel_control import wheel_velocity_targets
 from sim.rewards import FALL_PITCH_LIMIT, pitch_reward, validate_pitch_deadband
 from sim.timing import PHYSICS_STEP, ControlTiming, physics_steps
@@ -553,14 +558,16 @@ class GymRP(gymnasium.Env):
         self.state.target_yaw_rate = value
 
     @property
-    def target_trajectory(self) -> PositionTrajectory | None:
+    def target_trajectory(self) -> PositionReference | None:
         return self.state.target_trajectory
 
     @target_trajectory.setter
     def target_trajectory(
-        self, value: PositionTrajectory | Sequence[Sequence[float]] | None
+        self, value: PositionReference | Sequence[Sequence[float]] | None
     ):
-        if value is not None and not isinstance(value, PositionTrajectory):
+        if value is not None and not isinstance(
+            value, (PositionTrajectory, SinusoidalPositionTrajectory)
+        ):
             value = PositionTrajectory(value)
         self.state.target_trajectory = value
 

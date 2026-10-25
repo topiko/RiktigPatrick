@@ -28,7 +28,7 @@ reward:
   reward/head_pitch: -0.5  # reward units per rad of head pitch
   reward/camera_pitch: -0.5  # reward units per rad of world elevation error
   reward/head_yaw: -0.25  # reward units per rad of neck-relative yaw error
-  reward/pos: -1.0  # penalty per meter of absolute position error
+  reward/pos: -2.0  # penalty per meter of absolute position error
   reward/vel: -4.0  # penalty per m/s of absolute velocity error
   reward/yaw_rate: -1.0  # penalty per rad/s of body-Z angular-rate error
   reward/total: 1.0  # dimensionless multiplier
@@ -56,13 +56,14 @@ checkpoints:
   every: 100  # archive periodic checkpoints, independently of MLflow model logging
 
 curriculum:
-  enabled: true  # hold_position -> straight_line -> locomotion -> full_control
+  enabled: true  # hold_position -> straight_line -> direction_changes -> locomotion -> full_control
   neutral_probability: 0.9  # discrete-head activation; continuous heads use their initial_std
   consecutive_passes: 3
   survival_fraction: 0.9
   hold_seconds: 20.0  # s
   position_mae: 0.05  # meters from the starting position
-  straight_line_position_mae: 0.02  # m from the moving position reference
+  straight_line_position_mae: 0.05  # m from the moving position reference
+  direction_changes_position_mae: 0.02  # m from the sinusoidal reference
   hold_velocity_weight: 0.125  # multiply reward/vel for gentle damping during position hold
   locomotion_seconds: 20.0  # s
   startup_seconds: 1.0  # s; tracking-error allowance at episode start
@@ -70,8 +71,11 @@ curriculum:
   yaw_rate_mae: 0.2  # rad/s
   pitch_deadband: 0.02  # rad (~1.15°); all curriculum stages
   forward_velocities: [-0.1, 0.0, 0.1]  # m/s
-  straight_line_forward_velocities: [0.02, 0.0, -0.02]  # m/s
+  straight_line_forward_velocities: [0.05, 0.0, -0.05]  # m/s
   yaw_rates: [-0.5, 0.0, 0.5]  # rad/s about body +Z
+  # Sample one (A, omega) pair per episode; validation covers the Cartesian grid.
+  direction_changes_amplitudes: [-0.1, -0.05, 0.05, 0.1]  # m; sign sets initial direction
+  direction_changes_angular_frequencies: [0.4, 0.6]  # rad/s; period = 2*pi/omega
 
 kl_guard:
   enabled: true
